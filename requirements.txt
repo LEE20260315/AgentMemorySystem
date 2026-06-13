@@ -1,0 +1,21 @@
+# AgentMemorySystem 依赖
+# ========================
+#
+# 安装全部依赖:  pip install -r requirements.txt
+# 只装核心:      pip install pyyaml
+# 只装 GUI:      pip install pyyaml pystray Pillow
+#
+# 或者直接双击 "双击运行.pyw"，程序会自动检查并安装。
+
+# --- 核心依赖（必须）---
+pyyaml>=6.0                   # YAML 解析 (triggers.yaml)
+
+# --- GUI 依赖（推荐）---
+pystray>=0.19                 # 系统托盘图标
+Pillow>=9.0                   # 托盘图标生成
+
+# --- 可选依赖（高级功能）---
+# 以下依赖用于向量语义搜索，基础功能不需要。
+# 如果你不需要语义搜索，可以不安装。
+# sentence-transformers>=2.2.0  # Embedding 模型 (~500MB)
+# numpy>=1.24.0                 # 向量计算

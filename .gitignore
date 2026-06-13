@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 运行时数据（自动生成，不提交）
+data/
+.sync_backups/
+.sync_logs/
+.detected_agents.json
+.sync_state.json
+
+# 日志
+.logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

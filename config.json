@@ -1,0 +1,83 @@
+{
+  "version": "1.0.0",
+  "paths": {
+    "memory_root": "auto",
+    "shared_root": "auto",
+    "backup_dir": ".backups",
+    "archive_dir": ".archive",
+    "lock_dir": ".locks",
+    "log_dir": ".logs"
+  },
+  "limits": {
+    "max_memories_per_agent": 10000,
+    "max_backups": 10,
+    "max_memory_age_days": 365,
+    "hot_tier_days": 30,
+    "warm_tier_days": 180,
+    "cold_tier_days": 365,
+    "id_overflow_limit": 999
+  },
+  "compression": {
+    "similarity_threshold": 0.7,
+    "min_importance_score": 0.3,
+    "target_count": null,
+    "auto_compress_threshold": 5000
+  },
+  "security": {
+    "sensitive_patterns": [
+      "password", "密码", "secret", "密钥", "token", "令牌",
+      "api_key", "apikey", "private_key", "私钥",
+      "credential", "凭据", "auth", "认证"
+    ],
+    "warn_on_sensitive": true,
+    "block_sensitive": false
+  },
+  "logging": {
+    "level": "INFO",
+    "max_log_size_mb": 10,
+    "max_log_files": 5,
+    "log_format": "%(asctime)s [%(levelname)s] %(message)s"
+  },
+  "database": {
+    "version": 1,
+    "auto_vacuum": true,
+    "wal_mode": true,
+    "cache_size": 1000
+  },
+  "sync": {
+    "conflict_strategy": "newer_wins",
+    "retry_count": 3,
+    "retry_delay_seconds": 1,
+    "lock_timeout_seconds": 30
+  },
+  "agent_detection": {
+    "hermes": {
+      "candidate_paths": [
+        "~/.hermes/memories",
+        "~/AppData/Local/hermes/memories",
+        "~/AppData/Roaming/hermes/memories"
+      ],
+      "signature_file": "MEMORY.md",
+      "signature_content": "§"
+    },
+    "claude": {
+      "candidate_paths": [
+        "~/.claude/projects"
+      ],
+      "signature_glob": "*/memory/MEMORY.md"
+    },
+    "trae": {
+      "candidate_paths": [
+        "~/.trae-cn/memory",
+        "~/AppData/Roaming/Trae/memory"
+      ],
+      "signature_file": "user_profile.md"
+    }
+  },
+  "agent_overrides": {},
+  "sync_tool": {
+    "auto_interval_days": 7,
+    "conflict_action": "prompt",
+    "cache_ttl_hours": 24
+  }
+}
