@@ -72,6 +72,62 @@
         "~/AppData/Roaming/Trae/memory"
       ],
       "signature_file": "user_profile.md"
+    },
+    "cursor": {
+      "candidate_paths": [
+        "~/.cursor/memory",
+        "~/AppData/Roaming/Cursor/User/globalStorage/memory"
+      ],
+      "signature_glob": "**/*.md"
+    },
+    "windsurf": {
+      "candidate_paths": [
+        "~/.codeium/windsurf/memory",
+        "~/AppData/Roaming/Windsurf/User/globalStorage/memory"
+      ],
+      "signature_glob": "**/*.md"
+    },
+    "cline": {
+      "candidate_paths": [
+        "~/.cline/memory",
+        "~/AppData/Roaming/Claude/memory"
+      ],
+      "signature_glob": "**/*.md"
+    },
+    "continue": {
+      "candidate_paths": [
+        "~/.continue/memory",
+        "~/AppData/Roaming/Continue/memory"
+      ],
+      "signature_glob": "**/*.md"
+    },
+    "aider": {
+      "candidate_paths": [
+        "~/.aider.memory",
+        "~/.aider"
+      ],
+      "signature_file": ".aider.memory.md"
+    },
+    "roo-code": {
+      "candidate_paths": [
+        "~/.roo-code/memory",
+        "~/AppData/Roaming/Roo-Code/memory"
+      ],
+      "signature_glob": "**/*.md"
+    },
+    "codex": {
+      "candidate_paths": [
+        "~/.codex/memory",
+        "~/AppData/Roaming/Codex/memory"
+      ],
+      "signature_glob": "**/*.md"
+    },
+    "codepilot": {
+      "candidate_paths": [
+        "~/.codepilot"
+      ],
+      "signature_file": "codepilot.db",
+      "storage_type": "sqlite"
     }
   },
   "agent_overrides": {},

@@ -1,6 +1,6 @@
 """
-记忆同步工具
-===========
+多Agent记忆融合器
+================
 双击即跑的 GUI 工具，自动完成：
   读取本地 Agent 记忆 → 融合 → 写回各 Agent
 
@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import sys
 import threading
@@ -27,6 +28,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Optional
+
+# Windows DPI 感知 —— 必须在创建任何 tkinter 窗口之前调用
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+# 字体配置
+if sys.platform == "win32":
+    _FONT = "Microsoft YaHei UI"   # Windows 10/11 清晰中文字体
+elif sys.platform == "darwin":
+    _FONT = "PingFang SC"          # macOS
+else:
+    _FONT = "Noto Sans CJK SC"    # Linux
+
+# PyInstaller 兼容：打包后资源文件在临时目录
+def _resource_path(relative: str) -> Path:
+    """获取资源文件的绝对路径（兼容 PyInstaller 打包）"""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base / relative
+
+_ICON_PATH = _resource_path("assets/app_icon.ico")
+_TRAY_ICON_PATH = _resource_path("assets/tray_icon.png")
 
 # 延迟导入，避免在 CLI 模式下加载 GUI 依赖
 pystray = None
@@ -38,11 +63,20 @@ def _load_tray_deps():
     global pystray, PIL
     try:
         import pystray as _pystray
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageFont
         pystray = _pystray
-        PIL = type("PIL", (), {"Image": Image, "ImageDraw": ImageDraw})()
+        PIL = type("PIL", (), {
+            "Image": Image, "ImageDraw": ImageDraw, "ImageFont": ImageFont
+        })()
         return True
-    except ImportError:
+    except Exception as e:
+        # 把错误写到日志文件，方便排查
+        import traceback
+        log_path = Path.home() / ".agent_memory" / "tray_error.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"pystray/PIL import failed: {e}\n")
+            traceback.print_exc(file=f)
         return False
 
 
@@ -53,7 +87,7 @@ def _load_tray_deps():
 SETTINGS_PATH = Path.home() / ".agent_memory" / "sync_settings.json"
 
 DEFAULT_SETTINGS = {
-    "auto_interval_days": 7,
+    "auto_interval_hours": 2,
     "conflict_action": "prompt",
     "auto_start": False,
     "minimize_to_tray": True,
@@ -93,14 +127,22 @@ COLORS = {
     "success": "#34c759",
     "warning": "#ff9500",
     "error": "#ff3b30",
-    "log_bg": "#1d1d1f",
-    "log_text": "#f5f5f7",
+    "log_bg": "#ffffff",
+    "log_text": "#3d3d3d",
     "sidebar_bg": "#2d2d2d",
 }
 
 
 def apply_modern_style(root: tk.Tk):
     """应用 macOS 风格的现代化样式"""
+    # 高 DPI 缩放修正
+    if sys.platform == "win32":
+        try:
+            dpi = root.winfo_fpixels("1i")
+            root.tk.call("tk", "scaling", dpi / 72.0)
+        except Exception:
+            pass
+
     style = ttk.Style(root)
 
     # 使用 clam 主题作为基础
@@ -115,7 +157,7 @@ def apply_modern_style(root: tk.Tk):
         background=COLORS["accent"],
         foreground="white",
         padding=(20, 10),
-        font=("", 10, "bold"),
+        font=(_FONT, 10, "bold"),
     )
     style.map(
         "Accent.TButton",
@@ -127,7 +169,7 @@ def apply_modern_style(root: tk.Tk):
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
         padding=(15, 8),
-        font=("", 10),
+        font=(_FONT, 10),
         borderwidth=1,
         relief="solid",
     )
@@ -145,37 +187,37 @@ def apply_modern_style(root: tk.Tk):
         "Title.TLabel",
         background=COLORS["bg"],
         foreground=COLORS["text"],
-        font=("", 18, "bold"),
+        font=(_FONT, 18, "bold"),
     )
     style.configure(
         "Subtitle.TLabel",
         background=COLORS["bg"],
         foreground=COLORS["text_secondary"],
-        font=("", 10),
+        font=(_FONT, 10),
     )
     style.configure(
         "Card.TLabel",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
-        font=("", 10),
+        font=(_FONT, 10),
     )
     style.configure(
         "CardTitle.TLabel",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
-        font=("", 11, "bold"),
+        font=(_FONT, 11, "bold"),
     )
     style.configure(
         "Stat.TLabel",
         background=COLORS["card_bg"],
         foreground=COLORS["accent"],
-        font=("", 14, "bold"),
+        font=(_FONT, 14, "bold"),
     )
     style.configure(
         "StatLabel.TLabel",
         background=COLORS["card_bg"],
         foreground=COLORS["text_secondary"],
-        font=("", 9),
+        font=(_FONT, 9),
     )
 
     # LabelFrame
@@ -189,7 +231,7 @@ def apply_modern_style(root: tk.Tk):
         "Card.TLabelframe.Label",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
-        font=("", 11, "bold"),
+        font=(_FONT, 11, "bold"),
     )
 
     # 入口框
@@ -205,7 +247,7 @@ def apply_modern_style(root: tk.Tk):
         "TRadiobutton",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
-        font=("", 10),
+        font=(_FONT, 10),
     )
 
     # Checkbutton
@@ -213,7 +255,7 @@ def apply_modern_style(root: tk.Tk):
         "TCheckbutton",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
-        font=("", 10),
+        font=(_FONT, 10),
     )
 
     # Separator
@@ -230,11 +272,17 @@ def apply_modern_style(root: tk.Tk):
 # ---------------------------------------------------------------------------
 
 class SyncMainWindow:
-    """记忆同步工具主窗口"""
+    """多Agent记忆融合器主窗口"""
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("记忆同步工具")
+        self.root.title("多Agent记忆融合器")
+        # 设置窗口图标
+        if _ICON_PATH.exists():
+            try:
+                self.root.iconbitmap(str(_ICON_PATH))
+            except Exception:
+                pass
         self.root.geometry(load_settings().get("window_geometry", "720x520"))
         self.root.minsize(560, 420)
         self.root.configure(bg=COLORS["bg"])
@@ -250,6 +298,7 @@ class SyncMainWindow:
         self.last_report = None
         self.sync_thread = None
         self.tray_icon = None
+        self._last_sync_time = 0  # timestamp of last sync
 
         apply_modern_style(self.root)
         self._build_ui()
@@ -263,7 +312,7 @@ class SyncMainWindow:
         header = ttk.Frame(self.root)
         header.pack(fill=tk.X, padx=20, pady=(20, 10))
 
-        title = ttk.Label(header, text="记忆同步工具", style="Title.TLabel")
+        title = ttk.Label(header, text="多Agent记忆融合器", style="Title.TLabel")
         title.pack(side=tk.LEFT)
 
         subtitle = ttk.Label(header, text="Agent Memory Sync", style="Subtitle.TLabel")
@@ -448,22 +497,52 @@ class SyncMainWindow:
                     self.root.after(0, lambda: self.status_var.set("同步完成"))
                     self.root.after(0, lambda: self._draw_status_dot(COLORS["success"]))
 
-                # 发送托盘通知
-                self._notify("同步完成", "提取 {} 条, 写回 {} 条".format(
-                    report.total_extracted, report.total_written
-                ))
+                # 发送托盘气泡通知
+                notify_body = "设备: {} | Agent: {} 个 | 提取: {} 条 | 写回: {} 条".format(
+                    getattr(report, 'device', 'unknown'),
+                    len(getattr(report, 'agents_found', [])),
+                    report.total_extracted,
+                    report.total_written
+                )
+                if report.errors:
+                    notify_body += " | 错误: {} 个".format(len(report.errors))
+                self._notify("多Agent记忆融合器 - 同步完成", notify_body)
 
             except Exception as e:
                 self._log("同步失败: {}".format(e))
                 self.root.after(0, lambda: self.status_var.set("同步失败"))
                 self.root.after(0, lambda: self._draw_status_dot(COLORS["error"]))
             finally:
+                self._last_sync_time = time.time()
                 self.is_syncing = False
                 self.root.after(0, lambda: self.run_btn.config(state=tk.NORMAL))
                 self.root.after(0, lambda: self.rollback_btn.config(state=tk.NORMAL))
 
         self.sync_thread = threading.Thread(target=_sync_thread, daemon=True)
         self.sync_thread.start()
+
+    def _schedule_next_sync(self):
+        """定时自动同步调度器"""
+        import time as _time
+        interval_hours = self.settings.get("auto_interval_hours", 2)
+        interval_seconds = interval_hours * 3600
+
+        def _check():
+            if not self.settings.get("auto_start", False):
+                # 未启用自动同步，继续检查
+                self.root.after(60000, _check)
+                return
+            if self.is_syncing:
+                self.root.after(60000, _check)
+                return
+            elapsed = _time.time() - self._last_sync_time
+            if elapsed >= interval_seconds:
+                self._log("[自动同步] 距离上次同步 {:.0f} 分钟，触发同步".format(elapsed / 60))
+                self._start_sync()
+            self.root.after(60000, _check)
+
+        # 首次检查延迟 60 秒
+        self.root.after(60000, _check)
 
     def _rollback(self):
         """回滚上次同步"""
@@ -503,28 +582,62 @@ class SyncMainWindow:
 
     def _minimize_to_tray(self):
         """最小化到系统托盘"""
+        # 写日志方便排查
+        _tray_log = Path.home() / ".agent_memory" / "tray_error.log"
+        _tray_log.parent.mkdir(parents=True, exist_ok=True)
+
         if not _load_tray_deps():
-            messagebox.showwarning(
-                "缺少依赖",
-                "系统托盘需要 pystray 和 Pillow 库。\n"
-                "请运行: pip install pystray Pillow"
-            )
+            error_detail = ""
+            try:
+                import pystray as _test
+                error_detail += f"pystray OK: {_test}\n"
+            except Exception as e:
+                error_detail += f"pystray 导入失败: {e}\n"
+            try:
+                from PIL import Image as _Img
+                error_detail += f"PIL OK: {_Img}\n"
+            except Exception as e:
+                error_detail += f"PIL 导入失败: {e}\n"
+            if not error_detail:
+                error_detail = "pystray/PIL 导入成功但初始化失败"
+            with open(_tray_log, "w", encoding="utf-8") as f:
+                f.write(error_detail)
+            messagebox.showwarning("托盘功能不可用",
+                f"错误详情:\n{error_detail}\n"
+                "解决方案: pip install pystray Pillow")
             return
 
-        self._create_tray_icon()
-        self.root.withdraw()
+        try:
+            self._create_tray_icon()
+            # 等托盘图标注册完成再隐藏窗口
+            import time
+            time.sleep(0.3)
+            self.root.withdraw()
+            with open(_tray_log, "w", encoding="utf-8") as f:
+                f.write("OK: tray icon created, window withdrawn\n")
+        except Exception as e:
+            import traceback
+            with open(_tray_log, "w", encoding="utf-8") as f:
+                f.write(f"创建失败: {e}\n")
+                traceback.print_exc(file=f)
+            messagebox.showerror("托盘创建失败", f"创建托盘图标时出错:\n{e}")
+            self.tray_icon = None
 
     def _create_tray_icon(self):
         """创建系统托盘图标"""
         if self.tray_icon is not None:
             return
 
-        # 生成一个简洁的图标
-        image = PIL.Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        draw = PIL.ImageDraw.Draw(image)
-        # 蓝色圆形 + 白色 "M"
-        draw.ellipse([4, 4, 60, 60], fill=COLORS["accent"])
-        draw.text((18, 14), "M", fill="white")
+        # 使用托盘专用图标，没有则用应用图标，再没有则生成简单图标
+        if _TRAY_ICON_PATH.exists():
+            image = PIL.Image.open(str(_TRAY_ICON_PATH)).resize((32, 32), PIL.Image.LANCZOS)
+        elif _ICON_PATH.exists():
+            image = PIL.Image.open(str(_ICON_PATH)).resize((32, 32), PIL.Image.LANCZOS)
+        else:
+            image = PIL.Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+            draw = PIL.ImageDraw.Draw(image)
+            draw.ellipse([2, 2, 30, 30], fill="#4A90D9")
+            draw.text((9, 7), "M", fill="white")
 
         menu = pystray.Menu(
             pystray.MenuItem("显示主窗口", self._show_window),
@@ -536,9 +649,9 @@ class SyncMainWindow:
         )
 
         self.tray_icon = pystray.Icon(
-            "memory_sync",
+            "AgentMemorySync",
             image,
-            "记忆同步工具",
+            "Agent Memory Sync",
             menu,
         )
 
@@ -574,13 +687,61 @@ class SyncMainWindow:
         if self.settings.get("minimize_to_tray", True):
             self._minimize_to_tray()
         else:
-            self._quit()
+            if messagebox.askyesno("退出", "确定退出多Agent记忆融合器？"):
+                self._quit()
 
     def _notify(self, title: str, body: str):
-        """发送通知"""
+        """发送通知（托盘气泡 + Windows 原生通知兜底）"""
+        # 方法 1: pystray 托盘气泡
         try:
             if self.tray_icon:
                 self.tray_icon.notify(body, title)
+                return
+        except Exception:
+            pass
+
+        # 方法 2: Windows 原生通知（ctypes Shell_NotifyIcon）
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class NOTIFYICONDATA(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.c_uint),
+                    ("hWnd", ctypes.c_void_p),
+                    ("uID", ctypes.c_uint),
+                    ("uFlags", ctypes.c_uint),
+                    ("uCallbackMessage", ctypes.c_uint),
+                    ("hIcon", ctypes.c_void_p),
+                    ("szTip", ctypes.c_wchar * 128),
+                    ("dwState", ctypes.c_uint),
+                    ("dwStateMask", ctypes.c_uint),
+                    ("szInfo", ctypes.c_wchar * 256),
+                    ("uTimeoutOrVersion", ctypes.c_uint),
+                    ("szInfoTitle", ctypes.c_wchar * 64),
+                    ("dwInfoFlags", ctypes.c_uint),
+                    ("guidItem", ctypes.c_byte * 16),
+                    ("hBalloonIcon", ctypes.c_void_p),
+                ]
+
+            NIM_ADD = 0x00
+            NIM_MODIFY = 0x01
+            NIM_DELETE = 0x02
+            NIF_INFO = 0x10
+            NIIF_INFO = 0x01
+
+            nid = NOTIFYICONDATA()
+            nid.cbSize = ctypes.sizeof(NOTIFYICONDATA)
+            nid.uID = 1
+            nid.uFlags = NIF_INFO
+            nid.szInfoTitle = title[:63]
+            nid.szInfo = body[:255]
+            nid.dwInfoFlags = NIIF_INFO
+            nid.uTimeoutOrVersion = 3000
+
+            ctypes.windll.shell32.Shell_NotifyIconW(NIM_ADD, nid)
+            # 3 秒后清理
+            self.root.after(3500, lambda: ctypes.windll.shell32.Shell_NotifyIconW(NIM_DELETE, nid))
         except Exception:
             pass
 
@@ -594,9 +755,12 @@ class SyncMainWindow:
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry("+{}+{}".format(x, y))
 
-        # 自动同步检查
+        # 自动同步：启动时执行一次 + 定时循环
         if self.settings.get("auto_start", False):
             self.root.after(1000, self._start_sync)
+
+        # 定时自动同步调度器（每 60 秒检查一次）
+        self._schedule_next_sync()
 
         self.root.mainloop()
 
@@ -622,6 +786,9 @@ class SettingsDialog:
 
         self._build()
 
+        # 点 X 关闭时也保存
+        self.win.protocol("WM_DELETE_WINDOW", self._save)
+
         # 居中
         self.win.update_idletasks()
         w = self.win.winfo_width()
@@ -643,10 +810,15 @@ class SettingsDialog:
         row = tk.Frame(inner, bg=COLORS["card_bg"])
         row.pack(fill=tk.X, pady=6)
         ttk.Label(row, text="自动同步间隔", style="Card.TLabel").pack(side=tk.LEFT)
-        self.interval_var = tk.IntVar(value=self.settings.get("auto_interval_days", 7))
-        spin = ttk.Spinbox(row, from_=1, to=30, textvariable=self.interval_var, width=5, font=("", 10))
-        spin.pack(side=tk.RIGHT)
-        ttk.Label(row, text="天", style="Card.TLabel").pack(side=tk.RIGHT, padx=(0, 8))
+        hour_options = ["1", "2", "4", "8", "16", "24", "48", "72"]
+        current_hours = str(self.settings.get("auto_interval_hours", 2))
+        if current_hours not in hour_options:
+            current_hours = "2"
+        self.interval_var = tk.StringVar(value=current_hours)
+        combo = ttk.Combobox(row, values=hour_options, textvariable=self.interval_var,
+                             width=5, state="readonly", font=(_FONT, 10))
+        combo.pack(side=tk.RIGHT)
+        ttk.Label(row, text="小时", style="Card.TLabel").pack(side=tk.RIGHT, padx=(0, 8))
 
         ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
 
@@ -675,12 +847,21 @@ class SettingsDialog:
         overrides = self.settings.get("agent_overrides", {})
         self.override_vars = {}
 
-        for agent in ["hermes", "claude", "trae"]:
+        # 从 config.json 动态读取 agent 列表
+        try:
+            _config_file = Path(__file__).parent / "config.json"
+            with open(_config_file, "r", encoding="utf-8") as f:
+                app_config = json.load(f)
+            agent_list = list(app_config.get("agent_detection", {}).keys())
+        except Exception:
+            agent_list = list(overrides.keys())
+
+        for agent in agent_list:
             row = tk.Frame(inner, bg=COLORS["card_bg"])
             row.pack(fill=tk.X, pady=3)
-            ttk.Label(row, text="{}:".format(agent), style="Card.TLabel", width=8).pack(side=tk.LEFT)
+            ttk.Label(row, text="{}:".format(agent), style="Card.TLabel", width=12).pack(side=tk.LEFT)
             var = tk.StringVar(value=overrides.get(agent, ""))
-            entry = ttk.Entry(row, textvariable=var, font=("", 9))
+            entry = ttk.Entry(row, textvariable=var, font=(_FONT, 9))
             entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
             self.override_vars[agent] = var
 
@@ -692,7 +873,7 @@ class SettingsDialog:
         ttk.Button(btn_frame, text="保存", style="Accent.TButton", command=self._save).pack(side=tk.RIGHT, padx=(0, 10))
 
     def _save(self):
-        self.settings["auto_interval_days"] = self.interval_var.get()
+        self.settings["auto_interval_hours"] = int(self.interval_var.get())
         self.settings["conflict_action"] = self.conflict_var.get()
         self.settings["minimize_to_tray"] = self.tray_var.get()
         self.settings["auto_start"] = self.auto_start_var.get()
@@ -714,7 +895,7 @@ class SettingsDialog:
 
 def run_cli():
     """命令行模式同步"""
-    print("=== 记忆同步工具 (CLI 模式) ===")
+    print("=== 多Agent记忆融合器 (CLI 模式) ===")
     print()
 
     from sync_engine import SyncEngine
@@ -734,9 +915,30 @@ def run_cli():
 # 入口
 # ---------------------------------------------------------------------------
 
+def _check_single_instance():
+    """Windows 互斥锁，防止重复启动。返回 True 表示是第一个实例。"""
+    try:
+        import ctypes
+        mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\AgentMemorySyncMutex")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "多Agent记忆融合器已在运行中。\n请检查系统托盘（右下角）。",
+                "多Agent记忆融合器",
+                0x40 | 0x10000  # MB_ICONINFO | MB_TOPMOST
+            )
+            return False
+        return True
+    except Exception:
+        return True
+
+
 def main():
     if "--cli" in sys.argv:
         run_cli()
+        return
+
+    if not _check_single_instance():
         return
 
     app = SyncMainWindow()

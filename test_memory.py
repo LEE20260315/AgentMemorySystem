@@ -1498,7 +1498,7 @@ def test_detect_agents():
         config.config["sync_tool"] = {"cache_ttl_hours": 24}
 
         # 检测
-        detected = am.detect_agents(config, force_redetect=True)
+        detected = am.detect_agents(config, force_redetect=True, write_cache=False)
         assert "claude" in detected, "应检测到 Claude"
         assert "trae" in detected, "应检测到 Trae"
         assert "hermes" in detected, "应检测到 Hermes"
@@ -1533,7 +1533,7 @@ def test_detect_agents_with_override():
         config.config["agent_overrides"] = {"hermes": str(custom_hermes)}
         config.config["sync_tool"] = {"cache_ttl_hours": 24}
 
-        detected = am.detect_agents(config, force_redetect=True)
+        detected = am.detect_agents(config, force_redetect=True, write_cache=False)
         assert "hermes" in detected, "应通过覆盖路径检测到 Hermes"
         assert detected["hermes"]["source"] == "override"
         results.ok("detect_agents_override: 手动覆盖生效")

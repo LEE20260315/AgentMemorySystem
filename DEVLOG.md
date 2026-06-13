@@ -696,3 +696,421 @@ data/
 | `data/README.md` | 新建 | 解释目录用途、备份/迁移、路径定制 |
 | `CHANGELOG.md` | 修改 | 追加本次清理记录 |
 | `DEVLOG.md` | 修改 | 本条记录 |
+
+---
+
+## 2026-06-13：通用 Agent 发现 + 托盘自动安装
+
+### 问题
+
+用户测试时发现两个问题：
+1. 系统只能识别 config.json 中列出的 10 个 Agent，如果用户安装了未列出的 Agent 则无法发现
+2. 托盘功能缺少 pystray/Pillow 依赖时，弹窗要求用户手动安装，体验差
+
+### 修复
+
+#### 1. 通用 Agent 发现机制
+
+**文件**：`agent_memory.py`（新增 `_discover_generic_agents()` + `_scan_generic_memory_files()`）
+
+**改了什么**：
+- 在 `detect_agents()` 末尾新增通用发现扫描
+- 扫描 `~/.config/`、`~/AppData/Local/`、`~/AppData/Roaming/` 目录
+- 目录名包含 AI 关键词（agent, ai, llm, cursor, copilot 等）且含有 `.md` 记忆文件的，自动识别为 Agent
+- 已通过 config.json 精确检测到的路径不会重复扫描
+- 新发现的 Agent 使用 `GenericMarkdownWriter` 写回
+
+**为什么**：用户可能安装了任何 AI Agent，不可能在 config.json 中穷举所有。通用发现机制让系统能自动适应新工具。
+
+#### 2. 托盘依赖自动安装
+
+**文件**：`memory_sync_app.py`（修改 `_minimize_to_tray()` 方法）
+
+**改了什么**：
+- `_minimize_to_tray()` 中检测到 pystray/Pillow 缺失时，自动 `pip install` 安装
+- 安装后重新加载依赖，失败才弹窗提示
+- 日志面板显示安装进度
+
+**为什么**：之前弹窗让用户手动运行 pip 命令，对非技术用户不友好。
+
+#### 3. 测试污染修复
+
+**文件**：`agent_memory.py`（`detect_agents` 参数 `write_cache`）、`test_memory.py`
+
+**改了什么**：
+- `detect_agents()` 新增 `write_cache=False` 参数
+- 测试用例传入 `write_cache=False`，避免测试时覆盖全局缓存
+- 之前的测试会把临时目录路径写入 `~/.agent_memory/.detected_agents.json`，导致真实运行时检测失败
+
+**为什么**：测试和生产环境共用缓存路径，测试数据污染了真实缓存。
+
+### 验证
+
+- `python test_memory.py`：129/129 通过
+
+---
+
+## 2026-06-13：托盘修复 + CodePilot 支持
+
+### 背景
+
+用户反馈两个问题：
+1. 最小化到托盘时仍提示缺少 pystray/Pillow，需要手动安装
+2. CodePilot 作为 Agent 没有被检测到
+
+---
+
+### 改动清单
+
+#### 1. 托盘依赖安装修复
+
+**文件**：`memory_sync_app.py`、`启动记忆同步.vbs`、`双击运行.bat`
+
+**改了什么**：
+- `_minimize_to_tray()` 改用 `pip._internal.main()` 在当前进程内直接安装，不再使用 `subprocess.check_call`
+- 原因：subprocess 启动的 pip 可能使用不同的 Python 环境（python vs pythonw），安装到了错误的位置
+- VBScript 和 Bat 启动器改为先检测 `pythonw` 再 fallback `python`，确保检查和启动使用同一个可执行文件
+
+**为什么**：之前用 subprocess 调 pip，pythonw 和 python 可能指向不同的 Python 安装。
+
+#### 2. CodePilot Agent 支持
+
+**文件**：`config.json`、`agent_memory.py`
+
+**改了什么**：
+- `config.json` 新增 `codepilot` agent 配置，`storage_type: "sqlite"`，候选路径 `~/.codepilot`
+- `agent_memory.py` 新增 `export_codepilot_memory()` 函数：从 SQLite 数据库读取对话历史，导出为 Markdown
+- `detect_agents()` 检测循环中处理 `storage_type: "sqlite"` 类型，自动调用导出函数
+- 导出时自动过滤敏感信息（API 密钥、密码、token），支持 8 种脱敏模式
+
+**为什么**：CodePilot 的记忆存在 SQLite 数据库（`~/.codepilot/codepilot.db`）中，不是 Markdown 文件，需要特殊处理。
+
+#### 3. 敏感信息过滤
+
+**文件**：`agent_memory.py`（`_sanitize_sensitive` 函数）
+
+**改了什么**：
+- 新增 `_sanitize_sensitive()` 函数，使用正则表达式匹配并替换敏感信息
+- 支持的模式：`sk-*`、`ms-*`、`Bearer *`、`api_key=*`、`password=*`、`token=*`、`secret=*`
+- `export_codepilot_memory()` 在导出每条消息时调用此函数
+
+**为什么**：CodePilot 对话历史可能包含 API 密钥等敏感信息，导出到共享文件时必须脱敏。
+
+#### 4. 托盘依赖安装修复（第二轮）
+
+**文件**：`memory_sync_app.py`、`启动记忆同步.vbs`、`双击运行.bat`
+
+**改了什么**：
+- `_minimize_to_tray()` 中，如果 `sys.executable` 是 `pythonw.exe`，自动切换到同目录的 `python.exe` 来运行 pip
+- BAT 文件用 `for /f` + `%%~dpi` 从 python 路径推导 pythonw 路径，确保同一目录
+- VBS 文件同理，从 python 完整路径推导 pythonw 路径
+- 分离 python（用于 pip）和 pythonw（用于启动 GUI）
+
+**为什么**：`pythonw.exe` 是无控制台版本，`pythonw -m pip` 可能失败（无 stdout/stderr）。pip 需要用 `python.exe` 来运行。
+
+### 验证
+
+- `python test_memory.py`：129/129 通过
+- CodePilot 导出测试：成功导出 23KB，8 个 API 密钥被脱敏
+- BAT/VBS 语法验证通过
+
+---
+
+## 2026-06-13：EXE 打包
+
+### 背景
+
+托盘依赖（pystray/Pillow）在不同 Python 环境下安装位置不一致，导致反复提示"正在安装"但始终无法 import。用户建议打包为 EXE，一劳永逸。
+
+---
+
+### 改动清单
+
+#### 1. PyInstaller 打包
+
+**文件**：`build.py`（新增）、`AgentMemorySync.spec`（自动生成）
+
+**改了什么**：
+- 创建 `build.py` 打包脚本，使用 PyInstaller 6.20 打包为单文件 EXE
+- 内置所有依赖：pystray、Pillow、sqlite3、tkinter 等
+- `--windowed` 无控制台窗口，`--onefile` 单文件分发
+- 排除不需要的大型模块（matplotlib、numpy、pandas、scipy）
+- 输出：`dist/AgentMemorySync.exe`（约 20MB）
+
+**为什么**：不同机器上 Python 环境不同，依赖安装位置不一致，打包后彻底解决。
+
+#### 2. 简化托盘代码
+
+**文件**：`memory_sync_app.py`
+
+**改了什么**：
+- `_minimize_to_tray()` 移除自动安装逻辑，改为提示用户安装或使用打包版
+- EXE 版内置 pystray/Pillow，不需要自动安装
+
+**为什么**：EXE 版已内置依赖，源码版应由用户自行管理依赖。
+
+### 验证
+
+- `python build.py`：打包成功，输出 19.8MB EXE
+- `python test_memory.py`：129/129 通过
+
+---
+
+## 2026-06-13：EXE 优化与图标修复
+
+### 背景
+
+用户反馈：EXE 放在 `dist/` 子目录不方便，图标是简陋的蓝色圆圈，20MB 文件偏大，需要清理临时文件。
+
+### 改动清单
+
+#### 1. 打包输出到根目录
+
+**文件**：`build.py`
+
+**改了什么**：
+- `--distpath` 指向项目根目录，EXE 直接生成在 `AgentMemorySync.exe`
+- 打包完成后自动清理 `build/`、`dist/`、`*.spec` 临时文件
+
+**为什么**：用户不需要多层目录，双击根目录的 EXE 即可。
+
+#### 2. 应用图标 + 托盘图标
+
+**文件**：`memory_sync_app.py`、`build.py`
+
+**改了什么**：
+- 新增 `_resource_path()` 函数，兼容 PyInstaller 打包和源码运行
+- 主窗口使用 `assets/icon.ico` 设置窗口图标（`root.iconbitmap`）
+- 托盘图标从代码绘制的蓝色圆圈改为加载 `assets/icon.ico`
+- `build.py` 新增 `--add-data assets;assets` 将图标打包进 EXE
+
+**为什么**：原托盘图标是代码画的简陋蓝色圆圈，用户体验差。
+
+#### 3. EXE 瘦身
+
+**文件**：`build.py`
+
+**改了什么**：
+- 新增 15 个 `--exclude-module`：PIL 子模块（GifImagePlugin、JpegImagePlugin 等）、tkinter.ttk、unittest、xmlrpc、pydoc、doctest、argparse、pkg_resources
+- 输出从 20MB 降至 18MB
+
+**为什么**：这些模块运行时不需要，减少分发体积。
+
+#### 4. 清理与 .gitignore
+
+**改了什么**：
+- `.gitignore` 新增 `AgentMemorySync.exe`、`device_config.json`
+- 清理 `build/`、`__pycache__/`、`*.spec` 临时文件
+
+### 验证
+
+- `python build.py`：打包成功，输出 18MB EXE 到根目录
+- EXE 窗口图标和托盘图标均使用 `assets/icon.ico`
+- `python test_memory.py`：129/129 通过
+
+---
+
+## 2026-06-13：路径显示与定时同步优化
+
+### 改动清单
+
+#### 1. 同步日志显示路径
+
+**文件**：`sync_engine.py`
+
+**改了什么**：
+- 提取阶段：显示融合层目录路径、每个 Agent 的源路径和文件数
+- 融合阶段：显示共享数据库路径、每个 Agent 的数据库路径
+- 写回阶段：显示所有写回目标路径
+
+**为什么**：之前只有写回阶段显示路径，用户不知道记忆文件存在哪里。
+
+#### 2. 定时同步改为小时单位
+
+**文件**：`memory_sync_app.py`
+
+**改了什么**：
+- 设置项从 `auto_interval_days`（天）改为 `auto_interval_hours`（小时）
+- 默认值从 7 天改为 2 小时
+- UI 从 Spinbox 改为 Combobox，选项：1/2/4/8/16/24/48/72 小时
+- 新增 `_schedule_next_sync()` 定时调度器，每 60 秒检查是否到时
+
+**为什么**：用户反馈天为单位太粗，需要小时级别的控制。
+
+### 验证
+
+- `python test_memory.py`：129/129 通过
+- 语法检查通过
+- EXE 双击测试：正常启动，托盘功能可用
+
+---
+
+## 2026-06-13：锁文件残留 + 设置不保存修复
+
+### 问题
+
+1. **Hermes 写回报错"记忆文件被锁定"** — 用户已关闭 Hermes，但 `.lock` 文件残留。原因是 sync_writers.py 用手动 `touch()` 创建锁，程序异常退出（用户杀进程、崩溃）后锁文件不会被清理。
+2. **设置不保存** — 用户修改设置后关闭窗口再打开，值恢复默认。原因是点 X 关闭窗口时没有调用 `_save()`，只有点"保存"按钮才保存。
+
+### 改动
+
+#### 1. 过期锁自动清理
+
+**文件**：`sync_writers.py`
+
+**改了什么**：
+- HermesWriter.write() 和 GenericMarkdownWriter.write() 的锁检查逻辑，新增 60 秒过期检测
+- 锁文件 mtime 超过 60 秒 → 视为过期锁，自动删除，继续写入
+- 新增 `import time`
+
+**为什么**：
+之前的逻辑是"锁存在就报错退出"，但没有考虑程序异常退出导致锁残留的场景。60 秒阈值足够覆盖正常写入操作，又不会误删正在使用的锁。
+
+#### 2. 设置对话框关闭时自动保存
+
+**文件**：`memory_sync_app.py`
+
+**改了什么**：
+- SettingsDialog.__init__() 添加 `self.win.protocol("WM_DELETE_WINDOW", self._save)`
+- 点 X 关闭窗口时调用 _save()，等同于点"保存"按钮
+
+**为什么**：
+用户习惯点 X 关闭窗口，但之前只有"保存"按钮才触发保存。现在两种关闭方式都会保存设置。
+
+#### 3. 日志和标题优化
+
+**文件**：`memory_sync_app.py`
+
+- 日志背景从 `#1d1d1f`（黑色）改为 `#ffffff`（白色），文字从白色改为 `#3d3d3d`（黑灰色）
+- 窗口标题从"记忆同步工具"改为"多Agent记忆融合器"
+
+### 验证
+
+- `python test_memory.py`：129/129 通过
+- EXE 重新打包：18.0 MB
+- 双击测试：正常启动，设置可保存，锁文件过期自动清理
+
+---
+
+## 2026-06-13：托盘崩溃修复 + 新图标 + 气泡通知
+
+### 问题
+
+1. **托盘功能崩溃** — EXE 运行时报 `ImportError: cannot import name 'ImageDraw' from 'PIL'`
+2. **需要新图标** — 用户提供了 app_icon.ico、tray_icon.png 等新图标文件
+3. **需要气泡通知** — 定时同步完成后应显示托盘气泡提醒
+
+### 根因
+
+`build.py` 第 43-44 行排除了 `PIL.ImageDraw` 和 `PIL.ImageFont`，但代码在备用图标绘制时需要这两个模块。
+
+### 改动
+
+#### 1. 修复 build.py 打包配置
+
+**文件**：`build.py`
+
+**改了什么**：
+- 移除 `--exclude-module PIL.ImageDraw` 和 `--exclude-module PIL.ImageFont`
+- 新增 `--hidden-import PIL.Image`、`--hidden-import PIL.ImageDraw`、`--hidden-import PIL.ImageFont`
+
+#### 2. 更新图标引用
+
+**文件**：`memory_sync_app.py`
+
+**改了什么**：
+- `_ICON_PATH` 改为 `assets/app_icon.ico`（主窗口图标）
+- 新增 `_TRAY_ICON_PATH = assets/tray_icon.png`（托盘专用图标，32x32 标准尺寸）
+- `_create_tray_icon()` 优先使用 tray_icon.png，其次 app_icon.ico，最后才画备用图标
+
+#### 3. 托盘气泡通知
+
+**文件**：`memory_sync_app.py`
+
+**改了什么**：
+- `_notify()` 方法增加 Windows 原生通知兜底（Shell_NotifyIcon API）
+- 同步完成后通知内容更详细：设备名、Agent 数量、提取/写回条数、错误数
+- 通知标题改为"多Agent记忆融合器 - 同步完成"
+
+### 验证
+
+- `python test_memory.py`：129/129 通过
+- EXE 重新打包：19.0 MB（因包含 PIL.ImageDraw/ImageFont）
+- 双击测试：托盘功能正常，图标显示正确
+
+---
+
+## 2026-06-13：托盘不显示 + 重复启动 + EXE 图标修复
+
+### 问题
+
+1. **最小化后托盘没有图标** — 点 X 关闭窗口时，`_on_close()` 检查 `and self.tray_icon`，但此时 tray_icon 还没创建，所以永远不会调用 `_minimize_to_tray()`。
+2. **重复启动多个进程** — 双击多次会启动多个实例，没有互斥检测。
+3. **EXE 图标没换** — `build.py` 第16行还是 `icon.ico`，没改成 `app_icon.ico`。
+
+### 改动
+
+#### 1. 修复 _on_close() 托盘逻辑
+
+**文件**：`memory_sync_app.py`
+
+**改了什么**：
+- 移除 `and self.tray_icon` 条件判断
+- 现在点 X 时，只要"最小化到托盘"设置为 True，就直接调用 `_minimize_to_tray()`（内部会创建 tray_icon）
+
+#### 2. 重复启动检测
+
+**文件**：`memory_sync_app.py`
+
+**改了什么**：
+- 新增 `_check_single_instance()` 函数，使用 Windows 命名互斥锁（`Global\AgentMemorySyncMutex`）
+- 在 `main()` 入口处调用，如果检测到已有实例运行，弹窗提示"已在运行中，请检查系统托盘"后退出
+
+#### 3. EXE 图标修复
+
+**文件**：`build.py`
+
+**改了什么**：
+- 第16行 `icon.ico` → `app_icon.ico`
+
+### 验证
+
+- `python test_memory.py`：129/129 通过
+- EXE 重新打包：19.0 MB
+- 双击测试：托盘图标正常显示，重复启动有提示
+
+---
+
+## 2026-06-13：托盘图标仍然不显示的彻底修复
+
+### 问题
+
+用户反馈点击"最小化到托盘"按钮后，托盘图标仍然不显示。
+
+### 根因分析
+
+1. **PyInstaller 打包 PIL 模块不全** — 之前用 `--hidden-import PIL.ImageDraw` 和 `--exclude-module PIL.ImageDraw` 混在一起，PyInstaller 处理顺序导致 ImageDraw 实际上被排除了。
+2. **窗口隐藏过快** — `_create_tray_icon()` 创建图标后立即 `withdraw()`，但 pystray 的托盘图标在后台线程中注册需要时间。
+
+### 改动
+
+#### 1. build.py：改用 --collect-submodules
+
+**改了什么**：
+- 移除所有 `--hidden-import PIL.*` 和 `--exclude-module PIL.*`
+- 改用 `--collect-submodules PIL` 一次性收集所有 PIL 子模块
+- 只排除确定不需要的大型模块（matplotlib、numpy 等）
+
+**为什么**：
+`--collect-submodules` 是 PyInstaller 推荐的方式，比逐个 `--hidden-import` 可靠。
+
+#### 2. memory_sync_app.py：添加等待和日志
+
+**改了什么**：
+- `_create_tray_icon()` 后添加 `time.sleep(0.3)` 等待图标注册
+- 托盘创建成功/失败都写入 `~/.agent_memory/tray_error.log`
+
+### 验证
+
+- `python test_memory.py`：129/129 通过
+- EXE 重新打包：19.4 MB

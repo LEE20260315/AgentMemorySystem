@@ -9,6 +9,57 @@
 
 ### Fixed
 
+- 修复 EXE 打包缺少 tkinter.ttk 导致启动崩溃（ImportError: cannot import name 'ttk'）
+- 修复托盘依赖安装：pythonw.exe 不支持 pip，改用同目录的 python.exe 安装
+- 修复启动器 python/pythonw 路径不一致：从 python 路径推导 pythonw，确保同一安装
+- 修复 Agent 检测缓存被测试污染问题（test_detect_agents 写入全局缓存导致真实检测失败）
+- 修复 VBScript 启动器 UTF-8 编码问题（改用纯英文避免 Windows Script Host 解析失败）
+
+### Changed
+
+- 启动器重命名：`双击运行.bat` → `dev_run.bat`，`启动记忆同步.vbs` → `dev_run.vbs`（仅开发用）
+
+### Added
+
+- CodePilot Agent 支持：自动检测 `~/.codepilot/codepilot.db`，从 SQLite 导出对话历史为 Markdown
+- 导出时自动过滤敏感信息（API 密钥、密码、token 等），8 种模式脱敏
+- 通用 Agent 发现机制：`_discover_generic_agents()` 自动扫描常见 AI 工具目录
+- PyInstaller 打包支持：`python build.py` 生成单文件 EXE（~18MB），内置所有依赖
+- 应用窗口图标和托盘图标使用 `assets/icon.ico`
+- 同步日志显示各阶段路径：融合层目录、Agent 源路径、共享数据库、写回目标
+- 定时自动同步调度器：基于 `auto_interval_hours` 设置自动触发同步
+
+### Changed
+
+- EXE 输出位置从 `dist/` 改为项目根目录
+- 打包后自动清理 `build/`、`dist/`、`*.spec` 临时文件
+- 排除 15 个不需要的 PIL 子模块，EXE 体积从 20MB 降至 18MB
+- `.gitignore` 新增 `AgentMemorySync.exe`、`device_config.json`
+- 自动同步间隔从"天"改为"小时"，默认 2 小时，选项：1/2/4/8/16/24/48/72 小时
+- 设置对话框点 X 关闭时自动保存（之前只有点"保存"按钮才生效）
+- 新图标：app_icon.ico（主窗口）、tray_icon.png（托盘），由用户提供
+- 同步完成后托盘气泡通知：显示设备名、Agent 数量、提取/写回条数、错误数
+- Windows 原生通知兜底：pystray 不可用时自动降级为 Shell_NotifyIcon
+
+### Fixed
+
+- 修复 Hermes 锁文件残留问题：sync_writers.py 的手动锁没有过期检测，程序异常退出后锁文件永久残留。新增 60 秒过期自动清理
+- 修复通用 Writer（GenericMarkdownWriter）同样的锁文件残留问题
+- 修复 PyInstaller 打包 PIL 模块不全导致托盘崩溃：改用 `--collect-submodules PIL` 一次性收集所有 PIL 子模块
+- 修复托盘图标创建后窗口隐藏过快：添加 0.3s 等待确保图标注册完成
+- 修复 build.py 图标路径仍为旧 `icon.ico`，改为 `app_icon.ico`
+- 托盘创建失败时自动写入日志文件 `~/.agent_memory/tray_error.log` 方便排查
+- 修复最小化到托盘不生效：`_on_close()` 中 `and self.tray_icon` 条件导致 tray_icon 未创建时直接跳过
+- 修复 build.py 图标路径仍为旧 `icon.ico`，改为 `app_icon.ico`
+- 日志背景从黑色改为白色，文字改为黑灰色
+- 窗口标题改为"多Agent记忆融合器"
+
+### Added
+
+- 重复启动检测：Windows 命名互斥锁（Global\AgentMemorySyncMutex），重复双击时弹窗提示"已在运行中，请检查系统托盘"
+
+### Fixed (Earlier)
+
 - 修复 pyproject.toml build-backend（setuptools.backends._legacy → setuptools.build_meta）
 - 修复 pyproject.toml 版本号（0.1.0 → 1.3）并添加依赖声明
 - 清理 docs/ 中 MR.Dong 硬编码路径（设计文档附录 A 改为占位符）

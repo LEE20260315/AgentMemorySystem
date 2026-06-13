@@ -1,11 +1,15 @@
 # AgentMemorySystem 依赖
 # ========================
 #
-# 安装全部依赖:  pip install -r requirements.txt
-# 只装核心:      pip install pyyaml
-# 只装 GUI:      pip install pyyaml pystray Pillow
+# 推荐：下载 AgentMemorySync.exe（已内置所有依赖，无需安装）
+#       https://github.com/LEE20260315/AgentMemorySystem/releases
 #
-# 或者直接双击 "双击运行.pyw"，程序会自动检查并安装。
+# 源码运行：
+#   安装全部依赖:  pip install -r requirements.txt
+#   只装核心:      pip install pyyaml
+#   只装 GUI:      pip install pyyaml pystray Pillow
+#
+# 打包为 EXE:    python build.py
 
 # --- 核心依赖（必须）---
 pyyaml>=6.0                   # YAML 解析 (triggers.yaml)

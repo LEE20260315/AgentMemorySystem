@@ -4,16 +4,26 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.spec
+
+# 打包产物
+AgentMemorySync.exe
 
 # 运行时数据（自动生成，不提交）
 data/
+data.local.bak/
+data.bak*/
 .sync_backups/
 .sync_logs/
 .detected_agents.json
 .sync_state.json
+device_config.json
 
 # 日志
 .logs/
+
+# 锁文件
+*.lock
 
 # IDE
 .vscode/
@@ -22,3 +32,6 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# 用户上传（CodePilot）
+.codepilot-uploads/

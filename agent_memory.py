@@ -4663,7 +4663,8 @@ def _verify_agent_signature(path: Path, profile: dict) -> bool:
 
 def detect_agents(
     config: ConfigManager = None,
-    force_redetect: bool = False
+    force_redetect: bool = False,
+    write_cache: bool = True
 ) -> dict:
     """
     鲁棒性 Agent 路径探测
@@ -4688,8 +4689,20 @@ def detect_agents(
 
     logger = get_logger()
 
-    # 检查手动覆盖
-    overrides = config.get("agent_overrides", {})
+    # 检查手动覆盖（从 config.json 和 sync_settings.json 合并）
+    overrides = dict(config.get("agent_overrides", {}))
+    # 也读取 GUI 设置中保存的 override（~/.agent_memory/sync_settings.json）
+    sync_settings_path = Path.home() / ".agent_memory" / "sync_settings.json"
+    if sync_settings_path.exists():
+        try:
+            with open(sync_settings_path, "r", encoding="utf-8") as f:
+                sync_settings = json.load(f)
+            gui_overrides = sync_settings.get("agent_overrides", {})
+            for k, v in gui_overrides.items():
+                if k not in overrides or not overrides[k]:
+                    overrides[k] = v
+        except (json.JSONDecodeError, OSError):
+            pass
 
     # 检查缓存
     cache_path = Path.home() / ".agent_memory" / ".detected_agents.json"
@@ -4702,8 +4715,15 @@ def detect_agents(
             detected_at = datetime.fromisoformat(cache.get("detected_at", "2000-01-01T00:00:00+00:00"))
             age_hours = (datetime.now(timezone.utc) - detected_at).total_seconds() / 3600
             if age_hours < cache_ttl_hours:
-                # 合并手动覆盖
                 result = cache.get("agents", {})
+                # 清除已失效的 override（配置中已移除的覆盖）
+                stale_overrides = [
+                    aid for aid, info in result.items()
+                    if info.get("source") == "override" and aid not in overrides
+                ]
+                for aid in stale_overrides:
+                    del result[aid]
+                # 合并当前手动覆盖
                 for agent_id, override_path in overrides.items():
                     if override_path and Path(override_path).exists():
                         result[agent_id] = {
@@ -4745,8 +4765,20 @@ def detect_agents(
         for pattern in profile.get("candidate_paths", []):
             path = Path(pattern.replace("~", str(home))).expanduser()
             if _verify_agent_signature(path, profile):
-                # 扫描记忆文件
-                memory_files = _scan_agent_memory_files(agent_id, path)
+                memory_files = []
+
+                # SQLite 类型的 Agent（如 CodePilot）
+                if profile.get("storage_type") == "sqlite":
+                    sig_file = profile.get("signature_file", "")
+                    db_path = path / sig_file
+                    if db_path.exists():
+                        export_path = export_codepilot_memory(db_path)
+                        memory_files = [str(export_path)]
+                        logger.info("Agent {} SQLite 导出: {}".format(agent_id, export_path))
+                else:
+                    # 扫描记忆文件
+                    memory_files = _scan_agent_memory_files(agent_id, path)
+
                 found[agent_id] = {
                     "path": str(path),
                     "memory_files": memory_files,
@@ -4756,18 +4788,113 @@ def detect_agents(
                 logger.info("发现 Agent {}: {}".format(agent_id, path))
                 break
 
-    # 保存缓存
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "detected_at": datetime.now(timezone.utc).isoformat(),
-                "agents": found
-            }, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning("保存检测缓存失败: {}".format(e))
+    # 通用发现：扫描未被已知 profile 覆盖的 AI 工具目录
+    found = _discover_generic_agents(found, home, logger)
+
+    # 保存缓存（测试时可禁用）
+    if write_cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "detected_at": datetime.now(timezone.utc).isoformat(),
+                    "agents": found
+                }, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.warning("保存检测缓存失败: {}".format(e))
 
     return found
+
+
+def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
+    """
+    通用 Agent 发现：扫描常见 AI 工具目录，查找包含记忆文件的未识别 Agent。
+
+    已知 Agent 已通过 config.json 精确检测，这里只处理未知目录。
+    """
+    # 常见 AI 工具的配置/数据目录
+    generic_candidates = [
+        ("~/.config", "config"),
+        ("~/AppData/Local", "appdata_local"),
+        ("~/AppData/Roaming", "appdata_roaming"),
+    ]
+
+    # AI 工具名称关键词（目录名包含这些词的会被识别为潜在 Agent）
+    ai_keywords = [
+        "agent", "ai", "llm", "gpt", "copilot", "cursor", "windsurf",
+        "cline", "continue", "aider", "roo", "codex", "devin", "replit",
+        "tabby", "supermaven", "codeium", "mentat", "openhands",
+        "sweep", "factory", "magic", "augment", "poolside", "codepilot",
+    ]
+
+    # 排除的目录名（非 Agent 工具）
+    exclude_names = {
+        "microsoft", "google", "mozilla", "discord", "slack", "spotify",
+        "obsidian", "notion", "figma", "docker", "node", "npm", "pip",
+        "python", "java", "rust", "go", "dotnet", "nuget", "pipx",
+        "windows", "temp", "cache", "crashdumps", "logs",
+    }
+
+    detected_paths = {info["path"] for info in found.values()}
+
+    for pattern, source in generic_candidates:
+        base = Path(pattern.replace("~", str(home))).expanduser()
+        if not base.exists():
+            continue
+        try:
+            for item in base.iterdir():
+                if not item.is_dir():
+                    continue
+                name_lower = item.name.lower()
+
+                # 跳过已检测到的路径
+                if str(item) in detected_paths:
+                    continue
+
+                # 跳过排除列表
+                if name_lower in exclude_names:
+                    continue
+
+                # 检查是否包含 AI 关键词
+                is_ai = any(kw in name_lower for kw in ai_keywords)
+                if not is_ai:
+                    continue
+
+                # 检查是否有记忆文件
+                memory_files = _scan_generic_memory_files(item)
+                if memory_files:
+                    agent_id = "generic-" + name_lower
+                    found[agent_id] = {
+                        "path": str(item),
+                        "memory_files": memory_files,
+                        "detected_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "generic-discovery"
+                    }
+                    detected_paths.add(str(item))
+                    logger.info("通用发现 Agent {}: {}".format(agent_id, item))
+        except (PermissionError, OSError):
+            continue
+
+    return found
+
+
+def _scan_generic_memory_files(path: Path) -> list:
+    """扫描目录中的记忆文件"""
+    memory_files = []
+    candidates = ["MEMORY.md", "memory.md", "memories.md", "user_profile.md",
+                   "USER.md", "user.md", ".aider.memory.md"]
+    for c in candidates:
+        p = path / c
+        if p.exists():
+            memory_files.append(str(p))
+
+    # 也检查 memory/ 子目录
+    mem_dir = path / "memory"
+    if mem_dir.exists():
+        for md in mem_dir.glob("*.md"):
+            memory_files.append(str(md))
+
+    return memory_files
 
 
 def _detect_agents_legacy(config: ConfigManager) -> dict:
@@ -4837,6 +4964,117 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
                 memory_files.append(str(p))
 
     return memory_files
+
+
+def _sanitize_sensitive(text: str) -> str:
+    """过滤文本中的敏感信息（API 密钥、密码等）"""
+    import re
+    # API 密钥模式：sk-xxx, ms-xxx, Bearer xxx 等
+    patterns = [
+        (r'(sk-[a-zA-Z0-9]{20,})', 'sk-***REDACTED***'),
+        (r'(ms-[a-zA-Z0-9-]{20,})', 'ms-***REDACTED***'),
+        (r'(Bearer\s+[a-zA-Z0-9_-]{20,})', 'Bearer ***REDACTED***'),
+        (r'(api[_-]?key[=:]\s*\S+)', 'api_key=***REDACTED***'),
+        (r'(password[=:]\s*\S+)', 'password=***REDACTED***'),
+        (r'(token[=:]\s*[a-zA-Z0-9_-]{20,})', 'token=***REDACTED***'),
+        (r'(secret[=:]\s*\S+)', 'secret=***REDACTED***'),
+    ]
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
+
+
+def export_codepilot_memory(db_path: Path, output_path: Path = None) -> Path:
+    """
+    从 CodePilot SQLite 数据库导出对话历史为 Markdown 文件
+
+    Parameters
+    ----------
+    db_path : Path
+        codepilot.db 路径
+    output_path : Path, optional
+        输出文件路径，默认为 ~/.agent_memory/codepilot_export.md
+
+    Returns
+    -------
+    Path
+        导出的 Markdown 文件路径
+    """
+    import sqlite3
+
+    if output_path is None:
+        output_path = Path.home() / ".agent_memory" / "codepilot_export.md"
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        # 获取有实际消息的会话
+        sessions = conn.execute("""
+            SELECT s.id, s.title, s.created_at, s.model,
+                   COUNT(m.id) as msg_count
+            FROM chat_sessions s
+            JOIN messages m ON m.session_id = s.id
+            WHERE m.role IN ('user', 'assistant')
+            GROUP BY s.id
+            HAVING msg_count > 0
+            ORDER BY s.updated_at DESC
+            LIMIT 100
+        """).fetchall()
+
+        lines = ["# CodePilot Memory\n"]
+        total_entries = 0
+
+        for session in sessions:
+            title = session["title"] or "Untitled"
+            created = session["created_at"] or ""
+            model = session["model"] or ""
+
+            # 获取该会话的最后几轮对话（最多最近 10 条）
+            messages = conn.execute("""
+                SELECT role, content, created_at
+                FROM messages
+                WHERE session_id = ? AND role IN ('user', 'assistant')
+                ORDER BY created_at DESC
+                LIMIT 10
+            """, (session["id"],)).fetchall()
+
+            if not messages:
+                continue
+
+            # 反转为时间正序
+            messages = list(reversed(messages))
+
+            lines.append("## {}\n".format(title[:80]))
+            lines.append("Date: {} | Model: {}\n".format(created[:10], model))
+
+            for msg in messages:
+                content = msg["content"] or ""
+                # 过滤敏感信息
+                content = _sanitize_sensitive(content)
+                # 截断过长的内容
+                if len(content) > 1000:
+                    content = content[:1000] + "..."
+                role = "User" if msg["role"] == "user" else "Assistant"
+                lines.append("**{}**: {}\n".format(role, content))
+                total_entries += 1
+
+            lines.append("")
+
+        conn.close()
+
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+        return output_path
+
+    except Exception as e:
+        # 如果导出失败，创建一个最小的标记文件
+        output_path.write_text(
+            "# CodePilot Memory\n\nExport failed: {}\n".format(e),
+            encoding="utf-8"
+        )
+        return output_path
 
 
 def content_hash(text: str) -> str:

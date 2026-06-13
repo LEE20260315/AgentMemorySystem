@@ -12,6 +12,7 @@ Agent 记忆写回适配器
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -422,11 +423,19 @@ class HermesMemoryWriter(BaseMemoryWriter):
             result.errors.append("Hermes MEMORY.md 不存在: {}".format(md_path))
             return result
 
-        # 检查锁
+        # 检查锁（超过 60 秒视为过期锁，自动清理）
         if lock_path.exists():
-            result.errors.append("Hermes 记忆文件被锁定 ({}), 请先关闭 Hermes".format(lock_path))
-            self.logger.warning("Hermes 锁文件存在: {}".format(lock_path))
-            return result
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+                if age > 60:
+                    self.logger.warning("清理过期锁文件 ({}秒): {}".format(int(age), lock_path))
+                    lock_path.unlink()
+                else:
+                    result.errors.append("Hermes 记忆文件被锁定 ({}), 请先关闭 Hermes".format(lock_path))
+                    self.logger.warning("Hermes 锁文件存在: {}".format(lock_path))
+                    return result
+            except OSError:
+                pass
 
         # 过滤去重
         new_memories = []
@@ -482,6 +491,110 @@ class HermesMemoryWriter(BaseMemoryWriter):
 
 
 # ---------------------------------------------------------------------------
+# 通用 Writer（用于未知 Agent）
+# ---------------------------------------------------------------------------
+
+class GenericMarkdownWriter(BaseMemoryWriter):
+    """
+    通用 Markdown 记忆写回器
+
+    适用于任何使用 Markdown 记忆文件的 Agent。
+    写回策略：追加到 MEMORY.md / memory.md / memories.md 末尾。
+    如果文件不存在，自动创建。
+    """
+
+    MEMORY_FILENAMES = ["MEMORY.md", "memory.md", "memories.md"]
+
+    def write(
+        self,
+        agent_id: str,
+        target_path: Path,
+        memories: list[MemoryEntry],
+        backup_dir: Path = None
+    ) -> WriteBackResult:
+        result = WriteBackResult(
+            agent_id=agent_id,
+            target_path=str(target_path),
+            written=0,
+            skipped=0,
+            errors=[]
+        )
+
+        # 找到记忆文件
+        md_path = self._find_memory_file(target_path)
+        if md_path is None:
+            md_path = target_path / "MEMORY.md"
+            try:
+                target_path.mkdir(parents=True, exist_ok=True)
+                md_path.write_text("# Memory\n", encoding="utf-8")
+                self.logger.info("通用 Writer: 创建 {}".format(md_path))
+            except OSError as e:
+                result.errors.append("创建记忆文件失败: {}".format(e))
+                return result
+
+        lock_path = md_path.with_suffix(md_path.suffix + ".lock")
+        if lock_path.exists():
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+                if age > 60:
+                    self.logger.warning("清理过期锁文件 ({}秒): {}".format(int(age), lock_path))
+                    lock_path.unlink()
+                else:
+                    result.errors.append("记忆文件被锁定: {}".format(lock_path))
+                    return result
+            except OSError:
+                pass
+
+        new_memories = [m for m in memories if not self.sync_state.is_duplicate(agent_id, m.content)]
+        result.skipped = len(memories) - len(new_memories)
+
+        if not new_memories:
+            self.logger.info("通用 Writer ({}): 所有记忆已存在".format(agent_id))
+            return result
+
+        try:
+            lock_path.touch()
+            if backup_dir:
+                result.backup_path = self._do_backup(md_path, backup_dir)
+
+            content = md_path.read_text(encoding="utf-8")
+
+            for mem in new_memories:
+                marker = "[sync:{}]".format(mem.id)
+                entry = "\n---\n{} {} — 来自 {} ({})\n\n{}\n".format(
+                    marker, mem.content, mem.agent_id, mem.timestamp[:10], mem.content
+                )
+                content = content.rstrip() + entry
+
+            md_path.write_text(content, encoding="utf-8")
+            result.written = len(new_memories)
+            self.logger.info("通用 Writer ({}): 写入 {} 条记忆".format(agent_id, len(new_memories)))
+
+        except (OSError, UnicodeEncodeError) as e:
+            result.errors.append("写入失败: {}".format(e))
+            self.logger.error("通用 Writer 写入失败: {}".format(e))
+        finally:
+            if lock_path.exists():
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+
+        for mem in new_memories:
+            self.sync_state.mark_written(agent_id, mem.content)
+
+        return result
+
+    def _find_memory_file(self, target_path: Path) -> Optional[Path]:
+        """查找现有的记忆文件"""
+        for name in self.MEMORY_FILENAMES:
+            p = target_path / name
+            if p.exists():
+                return p
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Writer 工厂
 # ---------------------------------------------------------------------------
 
@@ -497,7 +610,8 @@ WRITER_REGISTRY = {
 
 def get_writer(agent_id: str, sync_state: SyncState = None) -> BaseMemoryWriter:
     """
-    根据 agent_id 获取对应的写回器
+    根据 agent_id 获取对应的写回器。
+    已知 agent 使用专用 writer，未知 agent 使用通用 Markdown writer。
 
     Parameters
     ----------
@@ -519,7 +633,8 @@ def get_writer(agent_id: str, sync_state: SyncState = None) -> BaseMemoryWriter:
                 writer_cls = cls
                 break
     if writer_cls is None:
-        raise ValueError("未知的 Agent ID: {}, 无法确定写回格式".format(agent_id))
+        # 使用通用 writer，不再抛异常
+        writer_cls = GenericMarkdownWriter
     return writer_cls(sync_state=sync_state)
 
 

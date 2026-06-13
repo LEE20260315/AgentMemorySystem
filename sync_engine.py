@@ -204,22 +204,25 @@ class SyncEngine:
                     return report
 
             # ③ 提取各 Agent 记忆到融合层
+            self._emit("融合层目录: {}".format(self.root))
             self._emit("开始提取各 Agent 记忆...")
             registry = AgentRegistry(root=self.root)
 
             for agent_id, agent_info in detected.items():
                 # 去掉 -appdata 后缀用于融合层目录
                 extract_id = agent_id.replace("-appdata", "")
+                agent_path = Path(agent_info["path"])
                 local_files = agent_info.get("memory_files", [])
 
                 # 如果缓存中没有 memory_files，从路径扫描
                 if not local_files:
                     from agent_memory import _scan_agent_memory_files
                     local_files = _scan_agent_memory_files(
-                        agent_id, Path(agent_info["path"])
+                        agent_id, agent_path
                     )
 
-                self._emit("提取 {}: {} 个文件".format(agent_id, len(local_files)))
+                self._emit("提取 {} ({}): {} 个文件".format(
+                    agent_id, agent_path, len(local_files)))
 
                 ext_result = extract_local_to_fused(
                     agent_id=extract_id,
@@ -237,12 +240,14 @@ class SyncEngine:
 
             # ④ 跨 Agent 融合
             self._emit("开始跨 Agent 融合...")
+            self._emit("共享数据库: {}".format(self.root / "shared.db"))
             agent_dbs = {}
             for agent_id in detected:
                 extract_id = agent_id.replace("-appdata", "")
                 db_path = self.root / ("agent_" + extract_id) / "memories.db"
                 if db_path.exists():
                     agent_dbs[extract_id] = db_path
+                    self._emit("  Agent DB: {} -> {}".format(extract_id, db_path))
 
             if len(agent_dbs) >= 2:
                 merger = create_merger(
@@ -263,6 +268,9 @@ class SyncEngine:
 
             # ⑤ 写回各 Agent
             self._emit("开始写回各 Agent...")
+            self._emit("写回目标: {}".format(
+                ", ".join("{}={}".format(aid, info["path"]) for aid, info in detected.items())
+            ))
 
             for agent_id, agent_info in detected.items():
                 extract_id = agent_id.replace("-appdata", "")
