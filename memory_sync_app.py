@@ -580,49 +580,6 @@ class SyncMainWindow:
         save_settings(new_settings)
         self._log("设置已保存")
 
-    def _minimize_to_tray(self):
-        """最小化到系统托盘"""
-        # 写日志方便排查
-        _tray_log = Path.home() / ".agent_memory" / "tray_error.log"
-        _tray_log.parent.mkdir(parents=True, exist_ok=True)
-
-        if not _load_tray_deps():
-            error_detail = ""
-            try:
-                import pystray as _test
-                error_detail += f"pystray OK: {_test}\n"
-            except Exception as e:
-                error_detail += f"pystray 导入失败: {e}\n"
-            try:
-                from PIL import Image as _Img
-                error_detail += f"PIL OK: {_Img}\n"
-            except Exception as e:
-                error_detail += f"PIL 导入失败: {e}\n"
-            if not error_detail:
-                error_detail = "pystray/PIL 导入成功但初始化失败"
-            with open(_tray_log, "w", encoding="utf-8") as f:
-                f.write(error_detail)
-            messagebox.showwarning("托盘功能不可用",
-                f"错误详情:\n{error_detail}\n"
-                "解决方案: pip install pystray Pillow")
-            return
-
-        try:
-            self._create_tray_icon()
-            # 等托盘图标注册完成再隐藏窗口
-            import time
-            time.sleep(0.3)
-            self.root.withdraw()
-            with open(_tray_log, "w", encoding="utf-8") as f:
-                f.write("OK: tray icon created, window withdrawn\n")
-        except Exception as e:
-            import traceback
-            with open(_tray_log, "w", encoding="utf-8") as f:
-                f.write(f"创建失败: {e}\n")
-                traceback.print_exc(file=f)
-            messagebox.showerror("托盘创建失败", f"创建托盘图标时出错:\n{e}")
-            self.tray_icon = None
-
     def _create_tray_icon(self):
         """创建系统托盘图标"""
         if self.tray_icon is not None:
@@ -683,12 +640,54 @@ class SyncMainWindow:
         self.root.after(0, self.root.destroy)
 
     def _on_close(self):
-        """关闭窗口"""
+        """关闭窗口 (X 按钮) → 默认最小化到托盘 + 气泡"""
         if self.settings.get("minimize_to_tray", True):
             self._minimize_to_tray()
         else:
             if messagebox.askyesno("退出", "确定退出多Agent记忆融合器？"):
                 self._quit()
+
+    def _minimize_to_tray(self):
+        """最小化到托盘 + 发送 'I'm here' 气泡提示 (X 按钮 和 主动按钮 共用)"""
+        _tray_log = Path.home() / ".agent_memory" / "tray_error.log"
+        _tray_log.parent.mkdir(parents=True, exist_ok=True)
+        if not _load_tray_deps():
+            error_detail = "pystray/PIL 导入失败: 无法创建托盘图标\n"
+            try:
+                import pystray as _test
+                error_detail += f"pystray OK: {_test}\n"
+            except Exception as e:
+                error_detail += f"pystray 导入失败: {e}\n"
+            error_detail += "解决方案: pip install pystray Pillow"
+            with open(_tray_log, "w", encoding="utf-8") as f:
+                f.write(error_detail)
+            messagebox.showerror("托盘失败", error_detail)
+            return
+        try:
+            if self.tray_icon is None:
+                self._create_tray_icon()
+                # 等托盘图标注册完成再隐藏窗口 + 发气泡
+                self.root.after(800, self._after_minimize)
+            else:
+                # 托盘已存在, 直接隐藏 + 气泡
+                self.root.after(0, self._after_minimize)
+        except Exception as e:
+            error_detail = f"pystray/PIL 导入成功但初始化失败: {e}"
+            with open(_tray_log, "w", encoding="utf-8") as f:
+                f.write(error_detail)
+            self.tray_icon = None
+
+    def _after_minimize(self):
+        """托盘就绪后: 隐藏窗口 + 发送 'I'm here' 气泡"""
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        # 发送气泡提示
+        self._notify(
+            "AgentMemorySystem",
+            "I'm here — 點擊托盤圖標可隨時喚回主窗口"
+        )
 
     def _notify(self, title: str, body: str):
         """发送通知（托盘气泡 + Windows 原生通知兜底）"""
