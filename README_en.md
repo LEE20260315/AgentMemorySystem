@@ -1,5 +1,5 @@
 <div align="center">
-<img src="docs/assets/banner-ink.jpg" alt="AgentMemorySystem — Multi-Agent Memory Fusion" width="900"/>
+<img src="docs/assets/banner-ink.svg" alt="AgentMemorySystem — Multi-Agent Memory Fusion" width="900"/>
 </div>
 
 # AgentMemorySystem

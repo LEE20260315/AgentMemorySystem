@@ -1,5 +1,5 @@
 <div align="center">
-<img src="docs/assets/banner-ink.jpg" alt="AgentMemorySystem — 多 AI Agent 記憶融合" width="900"/>
+<img src="docs/assets/banner-ink.svg" alt="AgentMemorySystem — 多 AI Agent 記憶融合" width="900"/>
 </div>
 
 # AgentMemorySystem

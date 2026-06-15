@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 480" width="1280" height="480" role="img" aria-label="AgentMemorySystem — 多 AI Agent 記憶融合">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#F4EFE3"/>
+      <stop offset="100%" stop-color="#E8DFCB"/>
+    </linearGradient>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="3"/>
+      <feColorMatrix values="0 0 0 0 0.08  0 0 0 0 0.08  0 0 0 0 0.08  0 0 0 0.05 0"/>
+      <feComposite in2="SourceGraphic" operator="in"/>
+    </filter>
+  </defs>
+
+  <!-- Paper background -->
+  <rect width="1280" height="480" fill="url(#paper)"/>
+  <rect width="1280" height="480" fill="url(#paper)" filter="url(#grain)"/>
+
+  <!-- Subtle frame -->
+  <rect x="24" y="24" width="1232" height="432" fill="none" stroke="#141414" stroke-width="1.5" opacity="0.5"/>
+  <rect x="32" y="32" width="1216" height="416" fill="none" stroke="#9C2A2A" stroke-width="0.5" opacity="0.6"/>
+
+  <!-- Three bamboo slips on the left, labelled with agent names -->
+  <g transform="translate(110, 130)">
+    <!-- Slip 1: 翰 (Claude) -->
+    <g>
+      <rect x="0" y="0" width="70" height="220" fill="#E8DFCB" stroke="#141414" stroke-width="1.2"/>
+      <line x1="0" y1="14" x2="70" y2="14" stroke="#141414" stroke-width="0.6"/>
+      <line x1="0" y1="206" x2="70" y2="206" stroke="#141414" stroke-width="0.6"/>
+      <text x="35" y="130" font-family="STKaiti, KaiTi, serif" font-size="44" fill="#141414" text-anchor="middle" font-weight="600">翰</text>
+      <text x="35" y="160" font-family="serif" font-size="11" fill="#141414" text-anchor="middle" opacity="0.6">Claude</text>
+    </g>
+    <!-- Slip 2: 玄 (Hermes) -->
+    <g transform="translate(95, 0)">
+      <rect x="0" y="0" width="70" height="220" fill="#E8DFCB" stroke="#141414" stroke-width="1.2"/>
+      <line x1="0" y1="14" x2="70" y2="14" stroke="#141414" stroke-width="0.6"/>
+      <line x1="0" y1="206" x2="70" y2="206" stroke="#141414" stroke-width="0.6"/>
+      <text x="35" y="130" font-family="STKaiti, KaiTi, serif" font-size="44" fill="#141414" text-anchor="middle" font-weight="600">玄</text>
+      <text x="35" y="160" font-family="serif" font-size="11" fill="#141414" text-anchor="middle" opacity="0.6">Hermes</text>
+    </g>
+    <!-- Slip 3: 智 (Trae) -->
+    <g transform="translate(190, 0)">
+      <rect x="0" y="0" width="70" height="220" fill="#E8DFCB" stroke="#141414" stroke-width="1.2"/>
+      <line x1="0" y1="14" x2="70" y2="14" stroke="#141414" stroke-width="0.6"/>
+      <line x1="0" y1="206" x2="70" y2="206" stroke="#141414" stroke-width="0.6"/>
+      <text x="35" y="130" font-family="STKaiti, KaiTi, serif" font-size="44" fill="#9C2A2A" text-anchor="middle" font-weight="600">智</text>
+      <text x="35" y="160" font-family="serif" font-size="11" fill="#141414" text-anchor="middle" opacity="0.6">Trae</text>
+    </g>
+  </g>
+
+  <!-- Central title -->
+  <g transform="translate(640, 0)" text-anchor="middle">
+    <text y="200" font-family="STKaiti, KaiTi, serif" font-size="84" fill="#141414" font-weight="700" letter-spacing="12">記憶融合</text>
+    <text y="240" font-family="serif" font-size="16" fill="#9C2A2A" letter-spacing="6" opacity="0.85">多  Agent  ·  跨  裝  置  ·  同  步</text>
+  </g>
+
+  <!-- Memory network: constellation of vermilion dots connected by thin ink lines, behind the title -->
+  <g opacity="0.75" stroke="#9C2A2A" stroke-width="0.6" fill="#9C2A2A">
+    <line x1="500" y1="170" x2="620" y2="100" stroke-width="0.5"/>
+    <line x1="620" y1="100" x2="780" y2="140" stroke-width="0.5"/>
+    <line x1="780" y1="140" x2="900" y2="80" stroke-width="0.5"/>
+    <line x1="900" y1="80" x2="1020" y2="130" stroke-width="0.5"/>
+    <line x1="1020" y1="130" x2="1140" y2="90" stroke-width="0.5"/>
+    <line x1="500" y1="170" x2="560" y2="240" stroke-width="0.5"/>
+    <line x1="560" y1="240" x2="700" y2="270" stroke-width="0.5"/>
+    <line x1="700" y1="270" x2="860" y2="260" stroke-width="0.5"/>
+    <line x1="860" y1="260" x2="980" y2="290" stroke-width="0.5"/>
+    <line x1="980" y1="290" x2="1100" y2="270" stroke-width="0.5"/>
+    <line x1="780" y1="140" x2="700" y2="270" stroke-width="0.5"/>
+    <line x1="1020" y1="130" x2="980" y2="290" stroke-width="0.5"/>
+    <circle cx="500" cy="170" r="4"/>
+    <circle cx="620" cy="100" r="5"/>
+    <circle cx="780" cy="140" r="6"/>
+    <circle cx="900" cy="80" r="4"/>
+    <circle cx="1020" cy="130" r="5"/>
+    <circle cx="1140" cy="90" r="4"/>
+    <circle cx="560" cy="240" r="4"/>
+    <circle cx="700" cy="270" r="5"/>
+    <circle cx="860" cy="260" r="6"/>
+    <circle cx="980" cy="290" r="4"/>
+    <circle cx="1100" cy="270" r="5"/>
+  </g>
+
+  <!-- Right side: brush + ink stone -->
+  <g transform="translate(1110, 320)">
+    <!-- Ink stone (砚台) -->
+    <ellipse cx="30" cy="40" rx="60" ry="20" fill="#1A1A1A" opacity="0.85"/>
+    <ellipse cx="30" cy="38" rx="50" ry="14" fill="#0A0A0A"/>
+    <ellipse cx="20" cy="34" rx="8" ry="3" fill="#1A1A1A" opacity="0.6"/>
+    <!-- Brush (毛笔) -->
+    <g transform="rotate(-25 70 50)">
+      <rect x="50" y="46" width="100" height="6" fill="#5C3A21"/>
+      <rect x="50" y="46" width="100" height="2" fill="#7A4F2E"/>
+      <polygon points="150,46 170,49 150,52" fill="#141414"/>
+      <line x1="148" y1="49" x2="158" y2="49" stroke="#9C2A2A" stroke-width="0.5"/>
+    </g>
+    <!-- Ink wash splashes -->
+    <circle cx="0" cy="45" r="2" fill="#141414" opacity="0.7"/>
+    <circle cx="10" cy="60" r="1.5" fill="#141414" opacity="0.5"/>
+    <circle cx="-10" cy="35" r="1" fill="#141414" opacity="0.4"/>
+  </g>
+
+  <!-- Vermilion seal (印章) bottom-right corner -->
+  <g transform="translate(1170, 410)">
+    <rect x="0" y="0" width="56" height="56" fill="none" stroke="#9C2A2A" stroke-width="2.5"/>
+    <rect x="3" y="3" width="50" height="50" fill="none" stroke="#9C2A2A" stroke-width="0.8"/>
+    <text x="28" y="26" font-family="STKaiti, KaiTi, serif" font-size="18" fill="#9C2A2A" text-anchor="middle" font-weight="700">閒</text>
+    <text x="28" y="46" font-family="STKaiti, KaiTi, serif" font-size="18" fill="#9C2A2A" text-anchor="middle" font-weight="700">人</text>
+  </g>
+
+  <!-- Subtitle / corner mark -->
+  <g transform="translate(80, 60)">
+    <text x="0" y="0" font-family="serif" font-size="14" fill="#141414" letter-spacing="2" opacity="0.7">AGENT MEMORY · FUSION · SYNC</text>
+  </g>
+  <g transform="translate(1200, 60)" text-anchor="end">
+    <text x="0" y="0" font-family="serif" font-size="12" fill="#9C2A2A" letter-spacing="1" opacity="0.7">v1.4</text>
+  </g>
+</svg>
