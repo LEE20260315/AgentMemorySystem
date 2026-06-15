@@ -1,5 +1,5 @@
 <div align="center">
-<img src="docs/assets/seal-xicheng.png" alt="西城閒人" width="120"/>
+<img src="docs/assets/banner-ink.jpg" alt="AgentMemorySystem — 多 AI Agent 記憶融合" width="900"/>
 </div>
 
 # AgentMemorySystem
