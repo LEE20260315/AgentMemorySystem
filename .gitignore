@@ -26,8 +26,15 @@ device_config.json
 *.lock
 
 # IDE
+.trae/
 .vscode/
 .idea/
+
+# OneDrive 冲突副本
+*-NZTZ_*
+
+# 机器专属
+_apply_onedrive_changes.py
 
 # OS
 .DS_Store

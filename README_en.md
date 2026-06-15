@@ -1,17 +1,18 @@
 <div align="center">
-
-<img src="docs/assets/banner-xicheng.jpg" alt="AgentMemorySystem" width="680"/>
+<img src="docs/assets/seal-xicheng.png" alt="西城閒人" width="120"/>
+</div>
 
 # AgentMemorySystem
 
+<div align="center">
+
 **Multi-Agent Memory Fusion & Cross-Device Sync**
 
-**English** | [中文](README.md)
+[**English**](README_en.md) | [中文](README.md)
 
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10+-yellow?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey?style=flat-square)
-![Stars](https://img.shields.io/github/stars/LEE20260315/AgentMemorySystem?style=flat-square&color=orange)
 
 </div>
 
@@ -19,15 +20,15 @@
 
 ## Overview
 
-**AgentMemorySystem** is a local-first memory synchronization system for multiple AI agents. It solves the problem of **fragmented memories across different AI clients** (Claude, Hermes, Trae, Cursor, CodePilot, etc.) with incompatible formats, scattered storage paths, and no way to share knowledge.
+Claude, Hermes, Trae, Cursor, CodePilot — each AI agent keeps its own memory, in its own format, scattered across directories like isolated islands.
 
-**Core pipeline:** Discover Agents → Extract Memories → Merge & Deduplicate → Write Back in Native Format
+**AgentMemorySystem** unifies them through a four-step pipeline: **Discover → Extract → Merge → Write Back**.
 
 **Design Principles:**
 - **Local-first** — All data stays on your machine, no cloud dependency
 - **Cross-device sync** — Via OneDrive or any sync folder
-- **Zero-config** — Double-click EXE to run, no Python required
-- **Safe & reliable** — Auto-backup, conflict detection, sensitive info filtering, one-click rollback
+- **Zero-config** — single-file release, no Python required
+- **Safe & reliable** — auto-backup, conflict detection, sensitive info filtering, one-click rollback
 
 ## Features
 
@@ -39,7 +40,6 @@
 | **Tiered Storage** | Hot / Warm / Cold data tiers with auto-archiving |
 | **Security** | Auto-backup, file locks, OneDrive conflict detection, sensitive info filtering |
 | **GUI + CLI** | System tray resident app + command-line tools |
-| **Out of the Box** | Single-file EXE with all dependencies bundled (~18MB) |
 
 ## Supported Agents
 
@@ -53,7 +53,7 @@
 
 ## Quick Start
 
-### Option 1: Pre-built EXE (Recommended)
+### Option 1: Pre-built Release (Recommended)
 
 Download `AgentMemorySync.exe` from [Releases](https://github.com/LEE20260315/AgentMemorySystem/releases) and double-click to run.
 
@@ -66,40 +66,22 @@ No Python installation required. All dependencies bundled (~18MB).
 - Windows 10+ / Linux (GUI requires a graphical environment)
 
 ```bash
-# Clone the repository
 git clone https://github.com/LEE20260315/AgentMemorySystem.git
 cd AgentMemorySystem
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Launch GUI
-python memory_sync_app.py
-
-# Or launch CLI
-python memory_sync_app.py --cli
+python memory_sync_app.py          # Launch GUI
+python memory_sync_app.py --cli    # Launch CLI
 ```
 
 ### Common Commands
 
 ```bash
-# Full sync (discover → extract → merge → write back)
-python memory_cli.py full-sync
-
-# Re-detect agents
-python memory_cli.py redetect
-
-# Write a memory entry
+python memory_cli.py full-sync                     # Full sync (discover → extract → merge → write back)
+python memory_cli.py redetect                      # Re-detect agents
 python memory_cli.py --agent claude write "Remember this design decision" --tags dev
-
-# Search memories
 python memory_cli.py --agent claude search "keyword"
-
-# Health check
-python memory_cli.py --agent claude health
-
-# Expire and archive old memories
-python memory_cli.py --agent claude expire
+python memory_cli.py --agent claude health         # Health check
+python memory_cli.py --agent claude expire         # Expire and archive old memories
 ```
 
 ## Architecture
@@ -110,7 +92,7 @@ Local Agent Memory Files (Claude / Hermes / Trae / ...)
     ▼
 ┌─────────────────────────────────────┐
 │  sync_engine.py — Orchestration     │
-│  detect → extract → merge → write   │
+│  Discover → Extract → Merge → Write │
 └─────────────┬───────────────────────┘
               │
     ┌─────────┴─────────┐
@@ -134,7 +116,7 @@ Local Agent Memory Files (Claude / Hermes / Trae / ...)
 
 ## Configuration
 
-The `config.json` file supports the following main options:
+`config.json` supports the following main options:
 
 ```jsonc
 {
@@ -194,19 +176,19 @@ AgentMemorySystem/
 ## FAQ
 
 **Q: Do I need OneDrive?**
-A: No. By default, data is stored in the project's `data/` directory. You can configure any path in `config.json`. OneDrive is only needed for cross-device sync.
+A: No. By default, data is stored in the project's `data/` directory. Configure any path in `config.json`. OneDrive is only needed for cross-device sync.
 
 **Q: Does it support macOS?**
-A: The CLI works directly. The GUI uses tkinter, which requires Python to be installed with tcl/tk support on macOS.
+A: CLI works directly. GUI uses tkinter, which requires Python with tcl/tk support on macOS.
 
 **Q: What if a memory file is locked?**
 A: Lock files have a 60-second auto-expiry mechanism. Stale lock files are automatically cleaned up.
 
 **Q: How do I rollback a sync?**
-A: Original files are auto-backed up to `.sync_backups/` before each sync. You can rollback via GUI or CLI.
+A: Original files are auto-backed up to `.sync_backups/` before each sync. Rollback via GUI or CLI.
 
 **Q: How is privacy protected?**
-A: Sensitive info (passwords, keys, tokens) is automatically detected on write. You can configure it to block or just warn. All data is stored locally, never uploaded.
+A: Sensitive info (passwords, keys, tokens) is automatically detected on write. Configure to block or warn. All data is local, never uploaded.
 
 ## Contributing
 
@@ -225,6 +207,11 @@ Issues and Pull Requests are welcome!
 ---
 
 <div align="center">
-<sub>紙承墨，墨載意，意馭器</sub><br>
+
+<img src="docs/assets/seal-xicheng.png" alt="西城閒人" width="64"/>
+
+<sub>紙承墨，墨載意，意馭器</sub>
+
 <sub>西城閒人 · 識</sub>
+
 </div>
