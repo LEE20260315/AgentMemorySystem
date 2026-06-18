@@ -372,6 +372,105 @@ COLORS = {
 }
 
 
+class RoundedButton(tk.Canvas):
+    """macOS 风格圆角按钮（基于 Canvas 绘制）"""
+
+    def __init__(
+        self,
+        parent,
+        text: str,
+        command=None,
+        style: str = "accent",
+        width: int = 120,
+        height: int = 32,
+        font=(_FONT, 10),
+        **kwargs,
+    ):
+        self.style = style
+        self.command = command
+        self._text = text
+        self._width = width
+        self._height = height
+        self._font = font
+
+        bg = kwargs.pop("bg", COLORS["bg"])
+        super().__init__(
+            parent,
+            width=width,
+            height=height,
+            bg=bg,
+            highlightthickness=0,
+            cursor="hand2",
+            **kwargs,
+        )
+
+        self._normal_bg = COLORS["accent"] if style == "accent" else COLORS["card_bg"]
+        self._hover_bg = COLORS["accent_hover"] if style == "accent" else "#e8e8ed"
+        self._active_bg = "#0056cc" if style == "accent" else "#dcdce0"
+        self._fg = "#ffffff" if style == "accent" else COLORS["text"]
+        self._border = COLORS["border"] if style != "accent" else ""
+        self._current_bg = self._normal_bg
+
+        self._draw()
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+
+    def _draw(self):
+        self.delete("all")
+        radius = self._height // 2
+        self._rect = self.create_rounded_rect(
+            1, 1, self._width - 1, self._height - 1, radius,
+            fill=self._current_bg, outline=self._border,
+        )
+        self.create_text(
+            self._width // 2,
+            self._height // 2,
+            text=self._text,
+            fill=self._fg,
+            font=self._font,
+        )
+
+    def create_rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
+        """用圆弧和线段绘制圆角矩形"""
+        points = [
+            x1 + radius, y1,
+            x2 - radius, y1,
+            x2, y1,
+            x2, y1 + radius,
+            x2, y2 - radius,
+            x2, y2,
+            x2 - radius, y2,
+            x1 + radius, y2,
+            x1, y2,
+            x1, y2 - radius,
+            x1, y1 + radius,
+            x1, y1,
+        ]
+        return self.create_polygon(points, smooth=True, **kwargs)
+
+    def _on_enter(self, _):
+        self._current_bg = self._hover_bg
+        self.itemconfig(self._rect, fill=self._current_bg)
+
+    def _on_leave(self, _):
+        self._current_bg = self._normal_bg
+        self.itemconfig(self._rect, fill=self._current_bg)
+
+    def _on_press(self, _):
+        self.itemconfig(self._rect, fill=self._active_bg)
+
+    def _on_release(self, _):
+        self.itemconfig(self._rect, fill=self._current_bg)
+        if self.command:
+            self.command()
+
+    def config_text(self, text: str):
+        self._text = text
+        self._draw()
+
+
 def apply_modern_style(root: tk.Tk):
     """应用 macOS 风格的现代化样式"""
     # 高 DPI 缩放修正
@@ -390,17 +489,36 @@ def apply_modern_style(root: tk.Tk):
     # 全局背景
     style.configure(".", background=COLORS["bg"], foreground=COLORS["text"])
 
-    # 按钮样式 - 圆角感
+    # 按钮样式 - macOS 胶囊风格
     style.configure(
         "Accent.TButton",
         background=COLORS["accent"],
         foreground="white",
         padding=(20, 10),
         font=(_FONT, 10, "bold"),
+        borderwidth=0,
+        relief="flat",
+        focusthickness=0,
     )
     style.map(
         "Accent.TButton",
-        background=[("active", COLORS["accent_hover"]), ("disabled", "#ccc")],
+        background=[("active", COLORS["accent_hover"]), ("disabled", "#d2d2d7")],
+        foreground=[("disabled", "#ffffff")],
+    )
+    # 让 Accent 按钮尽可能圆角（clam 主题下 borderadius 有限，用大 padding 模拟胶囊）
+    style.layout(
+        "Accent.TButton",
+        [
+            (
+                "Button.button",
+                {
+                    "children": [
+                        ("Button.focus", {"children": [("Button.padding", {"children": [("Button.label", {"sticky": "nswe"})], "sticky": "nswe"})], "sticky": "nswe"})
+                    ],
+                    "sticky": "nswe",
+                },
+            )
+        ],
     )
 
     style.configure(
@@ -415,6 +533,7 @@ def apply_modern_style(root: tk.Tk):
     style.map(
         "TButton",
         background=[("active", "#e8e8ed")],
+        foreground=[("disabled", COLORS["text_secondary"])],
     )
 
     # 框架样式
@@ -515,7 +634,9 @@ class SyncMainWindow:
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("多Agent记忆融合器")
+        # 必须在窗口显示前移除系统标题栏
+        self.root.overrideredirect(True)
+        self.root.title("AgentMemorySync")
         # 设置窗口图标
         if _ICON_PATH.exists():
             try:
@@ -525,6 +646,12 @@ class SyncMainWindow:
         self.root.geometry(load_settings().get("window_geometry", "720x520"))
         self.root.minsize(560, 420)
         self.root.configure(bg=COLORS["bg"])
+
+        # macOS 风格自定义标题栏状态
+        self._normal_geometry = load_settings().get("window_geometry", "720x520")
+        self._is_maximized = False
+        self._drag_offset_x = 0
+        self._drag_offset_y = 0
 
         # macOS 风格窗口属性
         try:
@@ -545,30 +672,17 @@ class SyncMainWindow:
 
         apply_modern_style(self.root)
         self._build_ui()
+        self._bind_window_drag()
+        # 窗口显示后再裁剪圆角，否则 winfo_width/height 为 1
+        self.root.after(100, self._apply_rounded_corners)
 
         # 关闭按钮 → 最小化到托盘（而非退出）
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
-        """构建 macOS 风格 UI"""
-        # 顶部标题区域
-        header = ttk.Frame(self.root)
-        header.pack(fill=tk.X, padx=20, pady=(20, 10))
-
-        title = ttk.Label(header, text="多Agent记忆融合器", style="Title.TLabel")
-        title.pack(side=tk.LEFT)
-
-        subtitle = ttk.Label(header, text="Agent Memory Sync", style="Subtitle.TLabel")
-        subtitle.pack(side=tk.LEFT, padx=(10, 0), pady=(5, 0))
-
-        # 状态指示器
-        self.status_dot = tk.Canvas(header, width=12, height=12, bg=COLORS["bg"], highlightthickness=0)
-        self.status_dot.pack(side=tk.RIGHT, padx=(0, 8))
-        self._draw_status_dot(COLORS["success"])
-
-        self.status_var = tk.StringVar(value="就绪")
-        status_label = ttk.Label(header, textvariable=self.status_var, style="Subtitle.TLabel")
-        status_label.pack(side=tk.RIGHT)
+        """构建 macOS 风格 UI（无边框 + 自定义标题栏）"""
+        # 自定义标题栏
+        self._build_title_bar()
 
         # 主内容区
         content = ttk.Frame(self.root)
@@ -639,30 +753,178 @@ class SyncMainWindow:
         # 底部留白
         tk.Frame(summary_card, bg=COLORS["card_bg"], height=8).pack()
 
-        # 按钮区域
+        # 按钮区域 - macOS 胶囊按钮
         btn_frame = tk.Frame(right_panel, bg=COLORS["bg"])
         btn_frame.pack(fill=tk.X, pady=(15, 0))
 
-        self.run_btn = ttk.Button(
-            btn_frame, text="立即同步", style="Accent.TButton",
-            command=self._start_sync
-        )
-        self.run_btn.pack(fill=tk.X, pady=(0, 8))
+        btn_width = 216
+        btn_height = 34
 
-        self.rollback_btn = ttk.Button(
-            btn_frame, text="回滚上次", command=self._rollback
+        self.run_btn = RoundedButton(
+            btn_frame, text="立即同步", style="accent",
+            width=btn_width, height=btn_height,
+            command=self._start_sync,
         )
-        self.rollback_btn.pack(fill=tk.X, pady=(0, 8))
+        self.run_btn.pack(pady=(0, 8))
 
-        self.settings_btn = ttk.Button(
-            btn_frame, text="设置", command=self._open_settings
+        self.rollback_btn = RoundedButton(
+            btn_frame, text="回滚上次", style="secondary",
+            width=btn_width, height=btn_height,
+            command=self._rollback,
         )
-        self.settings_btn.pack(fill=tk.X, pady=(0, 8))
+        self.rollback_btn.pack(pady=(0, 8))
 
-        self.minimize_btn = ttk.Button(
-            btn_frame, text="最小化到托盘", command=self._minimize_to_tray
+        self.settings_btn = RoundedButton(
+            btn_frame, text="设置", style="secondary",
+            width=btn_width, height=btn_height,
+            command=self._open_settings,
         )
-        self.minimize_btn.pack(fill=tk.X)
+        self.settings_btn.pack(pady=(0, 8))
+
+        self.minimize_btn = RoundedButton(
+            btn_frame, text="最小化到托盘", style="secondary",
+            width=btn_width, height=btn_height,
+            command=self._minimize_to_tray,
+        )
+        self.minimize_btn.pack()
+
+    def _build_title_bar(self):
+        """构建 macOS 风格自定义标题栏"""
+        self.title_bar = tk.Frame(self.root, bg=COLORS["bg"], height=40)
+        self.title_bar.pack(fill=tk.X, side=tk.TOP)
+        self.title_bar.pack_propagate(False)
+        self.title_bar.grid_columnconfigure(1, weight=1)
+
+        # 左侧：三个 macOS 风格圆点按钮
+        btn_frame = tk.Frame(self.title_bar, bg=COLORS["bg"])
+        btn_frame.grid(row=0, column=0, sticky="w", padx=(16, 0))
+
+        self._title_close_btn = self._create_traffic_light_button(
+            btn_frame, "#ff5f57", "#e0443e", "×", self._on_close
+        )
+        self._title_min_btn = self._create_traffic_light_button(
+            btn_frame, "#febc2e", "#d89e24", "−", self._minimize_window
+        )
+        self._title_max_btn = self._create_traffic_light_button(
+            btn_frame, "#28c840", "#24aa34", "+", self._toggle_maximize
+        )
+        self._title_close_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._title_min_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._title_max_btn.pack(side=tk.LEFT)
+
+        # 中间：标题
+        self.title_label = tk.Label(
+            self.title_bar,
+            text="AgentMemorySync",
+            bg=COLORS["bg"],
+            fg=COLORS["text_secondary"],
+            font=(_FONT, 10),
+        )
+        self.title_label.grid(row=0, column=1, sticky="nsew")
+
+        # 右侧：状态指示器
+        status_frame = tk.Frame(self.title_bar, bg=COLORS["bg"])
+        status_frame.grid(row=0, column=2, sticky="e", padx=(0, 16))
+
+        self.status_var = tk.StringVar(value="就绪")
+        status_label = tk.Label(
+            status_frame,
+            textvariable=self.status_var,
+            bg=COLORS["bg"],
+            fg=COLORS["text_secondary"],
+            font=(_FONT, 9),
+        )
+        status_label.pack(side=tk.RIGHT)
+
+        self.status_dot = tk.Canvas(
+            status_frame, width=12, height=12, bg=COLORS["bg"], highlightthickness=0
+        )
+        self.status_dot.pack(side=tk.RIGHT, padx=(0, 6))
+        self._draw_status_dot(COLORS["success"])
+
+    def _create_traffic_light_button(self, parent, color, hover_color, symbol, command):
+        """创建一个 macOS 风格交通灯按钮"""
+        size = 14
+        canvas = tk.Canvas(parent, width=size, height=size, bg=COLORS["bg"], highlightthickness=0)
+        cid = canvas.create_oval(1, 1, size - 1, size - 1, fill=color, outline="")
+        text_id = canvas.create_text(
+            size // 2, size // 2,
+            text=symbol,
+            fill="#4a4a4a",
+            font=(_FONT, 8, "bold"),
+            state=tk.HIDDEN,
+        )
+
+        def on_enter(_):
+            canvas.itemconfig(cid, fill=hover_color)
+            canvas.itemconfig(text_id, state=tk.NORMAL)
+
+        def on_leave(_):
+            canvas.itemconfig(cid, fill=color)
+            canvas.itemconfig(text_id, state=tk.HIDDEN)
+
+        canvas.bind("<Enter>", on_enter)
+        canvas.bind("<Leave>", on_leave)
+        canvas.bind("<Button-1>", lambda _: command())
+        return canvas
+
+    def _bind_window_drag(self):
+        """绑定标题栏拖动事件"""
+        self.title_bar.bind("<Button-1>", self._on_title_bar_press)
+        self.title_bar.bind("<B1-Motion>", self._on_title_bar_drag)
+        self.title_label.bind("<Button-1>", self._on_title_bar_press)
+        self.title_label.bind("<B1-Motion>", self._on_title_bar_drag)
+
+    def _on_title_bar_press(self, event):
+        """记录鼠标按下时的窗口位置偏移"""
+        self._drag_offset_x = event.x_root - self.root.winfo_x()
+        self._drag_offset_y = event.y_root - self.root.winfo_y()
+
+    def _on_title_bar_drag(self, event):
+        """拖动标题栏移动窗口"""
+        if self._is_maximized:
+            return
+        x = event.x_root - self._drag_offset_x
+        y = event.y_root - self._drag_offset_y
+        self.root.geometry(f"+{x}+{y}")
+        self._normal_geometry = self.root.geometry()
+
+    def _minimize_window(self):
+        """最小化窗口（本应用统一最小化到托盘）"""
+        self._minimize_to_tray()
+
+    def _toggle_maximize(self):
+        """最大化/还原窗口"""
+        if self._is_maximized:
+            self.root.overrideredirect(False)
+            self.root.geometry(self._normal_geometry)
+            self.root.overrideredirect(True)
+            self._is_maximized = False
+        else:
+            self._normal_geometry = self.root.geometry()
+            self.root.overrideredirect(False)
+            self.root.state("zoomed")
+            self.root.overrideredirect(True)
+            self._is_maximized = True
+        self._apply_rounded_corners()
+
+    def _apply_rounded_corners(self):
+        """给无边框窗口裁剪圆角区域"""
+        if sys.platform != "win32":
+            return
+        try:
+            self.root.update_idletasks()
+            hwnd = self.root.winfo_id()
+            width = self.root.winfo_width()
+            height = self.root.winfo_height()
+            if hwnd == 0 or width < 10 or height < 10:
+                self.root.after(100, self._apply_rounded_corners)
+                return
+            radius = 16
+            hrgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius)
+            ctypes.windll.user32.SetWindowRgn(hwnd, hrgn, True)
+        except Exception:
+            pass
 
     def _draw_status_dot(self, color: str):
         """绘制状态指示点"""
