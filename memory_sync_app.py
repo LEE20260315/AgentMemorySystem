@@ -84,7 +84,7 @@ if sys.platform == "win32":
     _WM_TASKBARCREATED = _user32.RegisterWindowMessageW("TaskbarCreated")
     _TRAY_CLASS_NAME = "AgentMemorySyncTray"
     _HWND_MESSAGE = ctypes.wintypes.HWND(-3)  # 消息专用窗口父句柄
-    _APP_USER_MODEL_ID = "AgentMemorySync.App.1"
+    _APP_USER_MODEL_ID = "AgentMemorySync"
     # 固定 GUID 用于托盘图标识别（Win11 推荐用 GUID 而非 uID）
     _TRAY_GUID = bytes([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
                         0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0])
@@ -749,7 +749,7 @@ class SyncMainWindow:
                 )
                 if report.errors:
                     notify_body += " | 错误: {} 个".format(len(report.errors))
-                self._notify("多Agent记忆融合器 - 同步完成", notify_body)
+                self._notify("AgentMemorySync", notify_body)
 
             except Exception as e:
                 self._log("同步失败: {}".format(e))
@@ -856,10 +856,9 @@ class SyncMainWindow:
                 self.root.withdraw()
             except Exception:
                 pass
-            self._log("已最小化到托盘，图标在右下角（Win11 可能在 ^ 溢出区）")
+            self._log("已最小化到托盘")
             try:
-                self._notify("多Agent记忆融合器",
-                             "已最小化到托盘。Win11 请点任务栏右侧的 ^ 箭头，找到蓝色 M 图标后拖到任务栏上")
+                self._notify("AgentMemorySync", "I'm here")
                 notify_status = "notify=OK"
             except Exception as e:
                 notify_status = "notify_fail={}".format(e)
@@ -878,7 +877,7 @@ class SyncMainWindow:
             self._log("托盘图标创建失败，窗口保持显示")
             # 托盘失败时不隐藏窗口，让用户能继续操作；同时弹出提示
             try:
-                self._notify("多Agent记忆融合器",
+                self._notify("AgentMemorySync",
                              "托盘图标创建失败，窗口保持显示。请查看 tray_error.log")
             except Exception:
                 pass
