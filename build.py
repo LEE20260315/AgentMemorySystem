@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import shutil
+import time
 from pathlib import Path
 
 
@@ -49,13 +50,20 @@ def _create_shortcut(target: Path, shortcut_path: Path, icon: Path = None):
 
 
 def _install_local(source_dir: Path, dist_name: str) -> Path:
-    """把构建结果复制到本地 AppData 并创建快捷方式，避免 OneDrive 权限限制"""
-    local_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "AgentMemorySystem" / "App"
+    """把构建结果复制到可运行位置（优先 Temp，避免 OneDrive 和权限限制）"""
+    # 优先安装到 Temp 下的固定路径（沙箱允许 + 非 OneDrive）
+    temp_base = Path(os.environ.get("TEMP", "."))
+    local_dir = temp_base / "AgentMemorySync_Run"
     local_exe = local_dir / f"{dist_name}.exe"
 
-    print(f"正在安装到本地: {local_dir}")
+    print(f"正在安装到: {local_dir}")
     if local_dir.exists():
-        shutil.rmtree(local_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(local_dir, ignore_errors=True)
+        except Exception:
+            pass
+        # 等待文件系统释放
+        time.sleep(0.5)
     shutil.copytree(source_dir, local_dir)
 
     # 创建快捷方式

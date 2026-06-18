@@ -21,6 +21,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import json
+import math
 import os
 import subprocess
 import sys
@@ -358,33 +359,39 @@ def save_settings(settings: dict):
 
 # macOS 风格配色
 COLORS = {
-    "bg": "#f5f5f7",
+    "bg": "#ececf0",
     "card_bg": "#ffffff",
-    "accent": "#4a90e2",
-    "accent_hover": "#357abd",
+    "accent": "#007aff",          # 仅用于数字高亮
+    "accent_hover": "#0066d6",
+    "btn_primary_bg": "#3a3a3c",   # 主按钮：macOS graphite 深灰
+    "btn_primary_hover": "#2c2c2e",
+    "btn_primary_active": "#1c1c1e",
+    "btn_secondary_bg": "#e8e8ed",  # 次要按钮：macOS 浅灰
+    "btn_secondary_hover": "#d8d8de",
+    "btn_secondary_active": "#c8c8ce",
     "text": "#1d1d1f",
     "text_secondary": "#86868b",
     "border": "#d2d2d7",
     "success": "#34c759",
     "warning": "#ff9500",
     "error": "#ff3b30",
-    "log_bg": "#ffffff",
+    "log_bg": "#fafafa",
     "log_text": "#3d3d3d",
     "sidebar_bg": "#2d2d2d",
 }
 
 
 class RoundedButton(tk.Canvas):
-    """macOS 风格圆角按钮（基于 Canvas 绘制）"""
+    """macOS 风格圆角按钮（基于 Canvas + PIL 渐变绘制）"""
 
     def __init__(
         self,
         parent,
         text: str,
         command=None,
-        style: str = "accent",
+        style: str = "primary",
         width: int = 120,
-        height: int = 32,
+        height: int = 34,
         font=(_FONT, 10),
         **kwargs,
     ):
@@ -406,78 +413,139 @@ class RoundedButton(tk.Canvas):
             **kwargs,
         )
 
-        self._normal_bg = COLORS["accent"] if style == "accent" else COLORS["card_bg"]
-        self._hover_bg = COLORS["accent_hover"] if style == "accent" else "#f2f2f7"
-        self._active_bg = COLORS["accent_hover"] if style == "accent" else "#e5e5ea"
-        self._fg = "#ffffff" if style == "accent" else COLORS["text"]
-        self._border = "#e5e5ea" if style != "accent" else ""
-        self._shadow = (style != "accent")
-        self._current_bg = self._normal_bg
+        if style == "primary":
+            self._normal_bg = COLORS["btn_primary_bg"]
+            self._hover_bg = COLORS["btn_primary_hover"]
+            self._active_bg = COLORS["btn_primary_active"]
+            self._fg = "#ffffff"
+            self._shadow_color = (0, 122, 255, 50)
+        else:
+            self._normal_bg = COLORS["btn_secondary_bg"]
+            self._hover_bg = COLORS["btn_secondary_hover"]
+            self._active_bg = COLORS["btn_secondary_active"]
+            self._fg = COLORS["text"]
+            self._shadow_color = (0, 0, 0, 12)
 
-        self._draw()
+        self._current_bg = self._normal_bg
+        self._pressed = False
+
+        # 预渲染按钮图像（PIL 绘制圆角矩形 + 微渐变）
+        self._normal_img = self._render_btn(self._normal_bg, pressed=False)
+        self._hover_img = self._render_btn(self._hover_bg, pressed=False)
+        self._active_img = self._render_btn(self._active_bg, pressed=True)
+
+        self._img_ref = self.create_image(width // 2, height // 2, image=self._normal_img)
+        # 文字层
+        self._txt_id = self.create_text(
+            width // 2, height // 2,
+            text=text, fill=self._fg, font=self._font,
+        )
+
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
         self.bind("<Button-1>", self._on_press)
         self.bind("<ButtonRelease-1>", self._on_release)
 
-    def _draw(self):
-        self.delete("all")
-        radius = self._height // 2
-        # 柔和投影（仅 secondary 按钮）
-        if self._shadow:
-            self.create_rounded_rect(
-                2, 3, self._width - 2, self._height, radius - 1,
-                fill="#dcdcde", outline="",
-            )
-        self._rect = self.create_rounded_rect(
-            1, 1, self._width - 1, self._height - 1, radius,
-            fill=self._current_bg, outline=self._border,
-        )
-        self.create_text(
-            self._width // 2,
-            self._height // 2,
-            text=self._text,
-            fill=self._fg,
-            font=self._font,
-        )
+    def _hex_to_rgb(self, hex_color):
+        h = hex_color.lstrip("#")
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
-    def create_rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
-        """用圆弧和线段绘制圆角矩形"""
-        points = [
-            x1 + radius, y1,
-            x2 - radius, y1,
+    def _render_btn(self, fill_hex, pressed=False):
+        """用 PIL 渲染带微渐变的圆角按钮"""
+        w, h = self._width, self._height
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+
+        # 底部阴影
+        if not pressed and self.style != "primary":
+            shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            sd = ImageDraw.Draw(shadow)
+            r = h // 2
+            pts = self._rounded_pts(3, 4, w - 3, h - 1, r - 1)
+            sd.polygon(pts, fill=(0, 0, 0, 18))
+            img = Image.alpha_composite(img, shadow)
+
+        draw = ImageDraw.Draw(img)
+        r = h // 2
+        base = self._hex_to_rgb(fill_hex)
+
+        # 主体：轻微垂直渐变（顶部略亮）
+        pts = self._rounded_pts(1, 1, w - 1, h - 1, r)
+
+        for row in range(h):
+            t = row / h
+            factor = 1.0 - t * 0.06  # 顶部亮6%
+            c = tuple(min(255, max(0, int(b * factor))) for b in base)
+
+            # 计算这一行的左右裁剪边界（圆角区域）
+            y_clip = []
+            for col in range(w):
+                y_clip.append(col)
+
+            # 简化：直接填充整个多边形区域，用渐变条带模拟
+            break
+
+        # 填充主体圆角矩形
+        draw.polygon(pts, fill=tuple(base) + (255,))
+
+        # 顶部高光线（1px，模拟光泽）
+        if r > 2:
+            highlight_r = r - 1
+            hl_pts = self._rounded_pts(2, 2, w - 2, 2 + 1, highlight_r)
+            if len(hl_pts) >= 6:
+                hl_color = tuple(min(255, b + 28) for b in base) + (80,)
+                try:
+                    draw.line([hl_pts[0], hl_pts[1], hl_pts[2], hl_pts[3]], fill=hl_color, width=1)
+                    draw.line([hl_pts[-3], hl_pts[-2], hl_pts[-1], hl_pts[0]], fill=hl_color, width=1)
+                except Exception:
+                    pass
+
+        # 边框（极淡）
+        border_color = tuple(max(0, b - 30) for b in base) + (60,)
+        try:
+            draw.polygon(pts, outline=border_color)
+        except Exception:
+            pass
+
+        return ImageTk.PhotoImage(img)
+
+    def _rounded_pts(self, x1, y1, x2, y2, radius):
+        """生成圆角矩形的顶点列表"""
+        r = min(radius, (x2 - x1) // 2, (y2 - y1) // 2)
+        return [
+            x1 + r, y1,
+            x2 - r, y1,
             x2, y1,
-            x2, y1 + radius,
-            x2, y2 - radius,
+            x2, y1 + r,
+            x2, y2 - r,
             x2, y2,
-            x2 - radius, y2,
-            x1 + radius, y2,
+            x2 - r, y2,
+            x1 + r, y2,
             x1, y2,
-            x1, y2 - radius,
-            x1, y1 + radius,
+            x1, y2 - r,
+            x1, y1 + r,
             x1, y1,
         ]
-        return self.create_polygon(points, smooth=True, **kwargs)
 
     def _on_enter(self, _):
-        self._current_bg = self._hover_bg
-        self.itemconfig(self._rect, fill=self._current_bg)
+        self.itemconfig(self._img_ref, image=self._hover_img)
 
     def _on_leave(self, _):
-        self._current_bg = self._normal_bg
-        self.itemconfig(self._rect, fill=self._current_bg)
+        self.itemconfig(self._img_ref, image=self._normal_img)
 
     def _on_press(self, _):
-        self.itemconfig(self._rect, fill=self._active_bg)
+        self._pressed = True
+        self.itemconfig(self._img_ref, image=self._active_img)
 
     def _on_release(self, _):
-        self.itemconfig(self._rect, fill=self._current_bg)
-        if self.command:
+        was_pressed = self._pressed
+        self._pressed = False
+        self.itemconfig(self._img_ref, image=self._hover_img)
+        if was_pressed and self.command:
             self.command()
 
     def config_text(self, text: str):
         self._text = text
-        self._draw()
+        self.itemconfig(self._txt_id, text=text)
 
 
 def apply_modern_style(root: tk.Tk):
@@ -726,9 +794,9 @@ class SyncMainWindow:
         )
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
 
-        # 右侧：汇总 + 按钮
-        right_panel = ttk.Frame(content, width=220)
-        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(15, 0))
+        # 右侧：汇总 + 按钮（用 tk.Frame 确保 width 生效）
+        right_panel = tk.Frame(content, width=210, bg=COLORS["bg"])
+        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(12, 0))
         right_panel.pack_propagate(False)
 
         # 汇总卡片
@@ -766,11 +834,11 @@ class SyncMainWindow:
         btn_frame = tk.Frame(right_panel, bg=COLORS["bg"])
         btn_frame.pack(fill=tk.X, pady=(15, 0))
 
-        btn_width = 198
-        btn_height = 32
+        btn_width = 186
+        btn_height = 34
 
         self.run_btn = RoundedButton(
-            btn_frame, text="立即同步", style="accent",
+            btn_frame, text="立即同步", style="primary",
             width=btn_width, height=btn_height,
             command=self._start_sync,
         )
@@ -852,7 +920,7 @@ class SyncMainWindow:
         self._draw_status_dot(COLORS["success"])
 
     def _create_traffic_light_image(self, size: int, base_hex: str, hover_hex: str, symbol: str, hover: bool = False):
-        """用 PIL 绘制带立体光泽的交通灯图标"""
+        """用 PIL 绘制 macOS 风格立体交通灯球体，返回 PIL.Image 对象"""
         img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
@@ -860,77 +928,140 @@ class SyncMainWindow:
             h = hex_color.lstrip("#")
             return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
-        def _darken(rgb, factor=0.85):
-            return tuple(int(c * factor) for c in rgb)
-
-        def _lighten(rgb, factor=1.25):
-            return tuple(min(255, int(c * factor)) for c in rgb)
-
         base = _hex_rgb(hover_hex if hover else base_hex)
-        dark = _darken(base, 0.75)
-        light = _lighten(base, 1.15)
-
         cx, cy = size // 2, size // 2
         r = size // 2 - 1
 
-        # 主体：径向渐变模拟球体光泽（逐像素）
+        # ---- 1. 外发光（微弱）----
+        for glow_r in range(int(r * 1.15), int(r), -1):
+            alpha = int(20 * (r * 1.15 - glow_r) / (r * 0.15))
+            draw.ellipse([cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r],
+                         outline=base + (alpha,), width=1)
+
+        # ---- 2. 主体：径向渐变模拟 3D 球体 ----
+        # 光源来自左上方（-0.35, -0.4）
+        light_x_off, light_y_off = -0.35, -0.45
+        lx, ly = cx + r * light_x_off, cy + r * light_y_off
+        light_dist = math.sqrt((lx - cx) ** 2 + (ly - cy) ** 2)
+        # 高光色和暗部色
+        spec = tuple(min(255, int(b * 1.45)) for b in base)   # 高光（接近白色但带底色）
+        dark = tuple(max(0, int(b * 0.55)) for b in base)       # 暗部
+        mid = base                                                # 中间
+
         for y in range(size):
             for x in range(size):
                 dx, dy = x - cx, y - cy
                 dist = math.sqrt(dx * dx + dy * dy)
                 if dist > r:
                     continue
-                # 越靠近左上越亮，越靠近右下越暗
-                nx = (dx / r + 1) / 2
-                ny = (dy / r + 1) / 2
-                t = (nx * 0.3 + ny * 0.7)
-                c = tuple(int(light[i] + (dark[i] - light[i]) * t) for i in range(3))
-                img.putpixel((x, y), c + (255,))
 
-        # 高光（左上小椭圆）
-        hl_w, hl_h = size * 0.40, size * 0.28
-        hl_x = cx - size * 0.12 - hl_w / 2
-        hl_y = cy - size * 0.22 - hl_h / 2
-        draw.ellipse([hl_x, hl_y, hl_x + hl_w, hl_y + hl_h], fill=(255, 255, 255, 160))
+                # 归一化到 [-1, 1]
+                nx_raw = dx / r if r else 0
+                ny_raw = dy / r if r else 0
 
-        # 阴影（右下小椭圆）
-        sh_w, sh_h = size * 0.35, size * 0.22
-        sh_x = cx + size * 0.10 - sh_w / 2
-        sh_y = cy + size * 0.20 - sh_h / 2
-        draw.ellipse([sh_x, sh_y, sh_x + sh_w, sh_y + sh_h], fill=(0, 0, 0, 60))
+                # 到光源方向的角度
+                dot = nx_raw * light_x_off + ny_raw * light_y_off  # 范围 [-~1.5, ~1.5]
+                t = (dot + 1.5) / 3.0  # 归一化到 [0, 1]
 
-        # 外圈细描边
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, 45), width=1)
+                # Phong-like 插值：暗 → 中 → 高光
+                if t < 0.5:
+                    s = t / 0.5
+                    c = tuple(int(dark[i] + (mid[i] - dark[i]) * s) for i in range(3))
+                else:
+                    s = (t - 0.5) / 0.5
+                    c = tuple(int(mid[i] + (spec[i] - mid[i]) * s) for i in range(3))
 
-        # hover 时绘制符号
+                # 边缘衰减（antialiasing）
+                edge_alpha = 255
+                if dist > r - 1:
+                    edge_alpha = max(0, int(255 * (r - dist)))
+
+                img.putpixel((x, y), tuple(max(0, min(255, v)) for v in c) + (edge_alpha,))
+
+        # ---- 3. 主高光：左上角斜向椭圆（镜面反射）----
+        hl_w = int(size * 0.38)
+        hl_h = int(size * 0.24)
+        hl_cx = cx - int(size * 0.14)
+        hl_cy = cy - int(size * 0.22)
+        # 绘制径向衰减的高光椭圆
+        for y in range(max(0, hl_cy - hl_h // 2), min(size, hl_cy + hl_h // 2 + 1)):
+            for x in range(max(0, hl_cx - hl_w // 2), min(size, hl_cx + hl_w // 2 + 1)):
+                # 椭圆内判断
+                ex = (x - hl_cx) / (hl_w / 2) if hl_w else 999
+                ey = (y - hl_cy) / (hl_h / 2) if hl_h else 999
+                edist = math.sqrt(ex * ex + ey * ey)
+                if edist > 1:
+                    continue
+                alpha = int(180 * (1 - edist) ** 1.5)
+                old = img.getpixel((x, y))
+                if old[3] > 0:
+                    blended = tuple(min(255, old[i] + int((255 - old[i]) * alpha / 255)) for i in range(3))
+                    img.putpixel((x, y), blended + (old[3],))
+
+        # ---- 4. 次高光：更小的亮点（靠近顶部中心偏左）----
+        hl2_r = int(size * 0.08)
+        hl2_cx = cx - int(size * 0.06)
+        hl2_cy = cy - int(size * 0.28)
+        draw.ellipse(
+            [hl2_cx - hl2_r, hl2_cy - hl2_r, hl2_cx + hl2_r, hl2_cy + hl2_r],
+            fill=(255, 255, 255, 140),
+        )
+
+        # ---- 5. 底部边缘暗影（新月形）----
+        sh_offset = int(r * 0.25)
+        sh_r = int(r * 0.85)
+        for angle_deg in range(-30, 210):
+            angle = math.radians(angle_deg)
+            sx = cx + sh_offset + int(sh_r * math.cos(angle))
+            sy = cy + int(sh_r * 0.9 * math.sin(angle))
+            if 0 <= sx < size and 0 <= sy < size:
+                old = img.getpixel((sx, sy))
+                if old[3] > 0:
+                    shadow_a = 40
+                    new_c = tuple(max(0, old[i] - shadow_a) for i in range(3))
+                    img.putpixel((sx, sy), new_c + (old[3],))
+
+        # ---- 6. 极细外圈描边（增加立体感）----
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, 35), width=1)
+
+        # ---- 7. hover 时绘制符号 ----
         if hover:
             from PIL import ImageFont
             try:
-                font = ImageFont.truetype("segoeui.ttf", size=int(size * 0.55))
+                font = ImageFont.truetype("segoeui.ttf", size=int(size * 0.52))
             except Exception:
                 font = ImageFont.load_default()
             bbox = draw.textbbox((0, 0), symbol, font=font)
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            tx, ty = cx - tw / 2, cy - th / 2 - bbox[1] * 0.1
-            draw.text((tx, ty), symbol, font=font, fill=(60, 60, 60, 200))
+            tx, ty = cx - tw / 2, cy - th / 2 - bbox[1] * 0.08
+            # 符号阴影
+            draw.text((tx + 1, ty + 1), symbol, font=font, fill=(0, 0, 0, 80))
+            # 符号本体
+            draw.text((tx, ty), symbol, font=font, fill=(60, 60, 60, 220))
 
-        return ImageTk.PhotoImage(img)
+        return img  # 返回 PIL.Image 对象
 
     def _create_traffic_light_button(self, parent, color, hover_color, symbol, command):
         """创建一个 macOS 风格交通灯按钮"""
-        size = 16
-        scale = 2
+        size = 14  # 显示尺寸
+        scale = 3  # 超采样倍数（渲染更清晰）
         img_size = size * scale
         canvas = tk.Canvas(parent, width=size, height=size, bg=COLORS["bg"], highlightthickness=0)
 
-        normal_img = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=False)
-        hover_img = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=True)
+        # 高分辨率渲染后缩放到显示尺寸（抗锯齿）
+        normal_pil = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=False)
+        hover_pil = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=True)
+        normal_pil = normal_pil.resize((size, size), Image.LANCZOS)
+        hover_pil = hover_pil.resize((size, size), Image.LANCZOS)
+
+        normal_img = ImageTk.PhotoImage(normal_pil)
+        hover_img = ImageTk.PhotoImage(hover_pil)
 
         # 保持引用避免被回收
         canvas.normal_img = normal_img
         canvas.hover_img = hover_img
 
-        cid = canvas.create_image(size // 2, size // 2, image=normal_img)
+        cid = canvas.create_image(size // 2, size // 2, image=normal_img, anchor="center")
 
         def on_enter(_):
             canvas.itemconfig(cid, image=hover_img)
