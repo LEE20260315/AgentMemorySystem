@@ -145,29 +145,39 @@ def build():
     print("AgentMemorySync 打包中...")
     print("=" * 60)
 
-    # 输出到根目录
-    cmd.extend(["--distpath", str(here)])
+    # 输出到本地 Temp 目录，避免 OneDrive 路径锁定导致无法清理旧构建
+    temp_build = Path(os.environ.get("TEMP", here)) / "AgentMemoryBuild"
+    temp_work = Path(os.environ.get("TEMP", here)) / "AgentMemoryWork"
+    for d in [temp_build, temp_work]:
+        if d.exists():
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+        d.mkdir(parents=True, exist_ok=True)
+    cmd.extend(["--distpath", str(temp_build), "--workpath", str(temp_work)])
 
     result = subprocess.run(cmd, cwd=str(here))
 
     if result.returncode == 0:
-        exe_path = here / dist_name / f"{dist_name}.exe"
+        source_dir = temp_build / dist_name
+        exe_path = source_dir / f"{dist_name}.exe"
         if exe_path.exists():
             exe_size = exe_path.stat().st_size / 1024 / 1024
             internal_size = sum(
-                f.stat().st_size for f in (here / dist_name / "_internal").rglob("*") if f.is_file()
+                f.stat().st_size for f in (source_dir / "_internal").rglob("*") if f.is_file()
             ) / 1024 / 1024
             print()
             print("=" * 60)
             print(f"打包成功！")
-            print(f"输出目录: {here / dist_name}")
+            print(f"输出目录: {source_dir}")
             print(f"EXE 大小: {exe_size:.1f} MB")
             print(f"依赖大小: {internal_size:.1f} MB")
             print("=" * 60)
             print()
             # 安装到本地并创建快捷方式（避免 OneDrive 路径导致托盘图标失败）
             try:
-                local_dir, shortcuts = _install_local(here / dist_name, dist_name)
+                local_dir, shortcuts = _install_local(source_dir, dist_name)
                 print("=" * 60)
                 print("已安装到本地目录并创建快捷方式")
                 print(f"本地安装目录: {local_dir}")
