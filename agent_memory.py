@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+from safe_io import _safe_write_text
+
 
 # ---------------------------------------------------------------------------
 # 配置管理器 - 新增
@@ -5065,12 +5067,15 @@ def export_codepilot_memory(db_path: Path, output_path: Path = None) -> Path:
 
         conn.close()
 
-        output_path.write_text("\n".join(lines), encoding="utf-8")
+        if not _safe_write_text(output_path, "\n".join(lines), encoding="utf-8"):
+            logger = get_logger()
+            logger.warning("CodePilot 导出文件写入失败（可能被锁定）: {}".format(output_path))
         return output_path
 
     except Exception as e:
-        # 如果导出失败，创建一个最小的标记文件
-        output_path.write_text(
+        # 如果导出失败，尝试创建一个最小的标记文件
+        _safe_write_text(
+            output_path,
             "# CodePilot Memory\n\nExport failed: {}\n".format(e),
             encoding="utf-8"
         )
@@ -5977,8 +5982,9 @@ def extract_local_to_fused(agent_id: str, root: Path = None,
 
             result["extracted"] += 1
 
-    # 一次性写入文件
-    private_md.write_text(existing_content, encoding="utf-8")
+    # 一次性写入文件（使用安全写回，绕过 Agent/杀软文件锁）
+    if not _safe_write_text(private_md, existing_content, encoding="utf-8"):
+        result["errors"].append("写入融合层文件失败（可能被锁定）: {}".format(private_md))
     result["fused_file"] = str(private_md)
     return result
 

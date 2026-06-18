@@ -19,7 +19,10 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import json
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -53,38 +56,263 @@ def _resource_path(relative: str) -> Path:
 _ICON_PATH = _resource_path("assets/app_icon.ico")
 _TRAY_ICON_PATH = _resource_path("assets/tray_icon.png")
 
-# 延迟导入，避免在 CLI 模式下加载 GUI 依赖
-pystray = None
-PIL = None
+# ---------------------------------------------------------------------------
+# Windows 原生系统托盘 API（不依赖 pystray，--windowed 模式也能正常工作）
+# ---------------------------------------------------------------------------
+if sys.platform == "win32":
+    _user32 = ctypes.windll.user32
+    _shell32 = ctypes.windll.shell32
+    _kernel32 = ctypes.windll.kernel32
 
+    # 常量
+    _NIM_ADD = 0x00000000
+    _NIM_MODIFY = 0x00000001
+    _NIM_DELETE = 0x00000002
+    _NIM_SETVERSION = 0x00000004
+    _NOTIFYICON_VERSION_4 = 4
+    _NIF_MESSAGE = 0x00000001
+    _NIF_ICON = 0x00000002
+    _NIF_TIP = 0x00000004
+    _NIF_INFO = 0x00000010
+    _NIF_GUID = 0x00000020
+    _NIF_REALTIME = 0x00000040
+    _NIF_SHOWTIP = 0x00000080
+    _NIIF_INFO = 0x00000001
+    _WM_TRAYICON = 0x0400 + 0x1F00  # 自定义消息
+    _WM_LBUTTONUP = 0x0202
+    _WM_RBUTTONUP = 0x0205
+    _WM_TASKBARCREATED = _user32.RegisterWindowMessageW("TaskbarCreated")
+    _TRAY_CLASS_NAME = "AgentMemorySyncTray"
+    _HWND_MESSAGE = ctypes.wintypes.HWND(-3)  # 消息专用窗口父句柄
+    _APP_USER_MODEL_ID = "AgentMemorySync.App.1"
+    # 固定 GUID 用于托盘图标识别（Win11 推荐用 GUID 而非 uID）
+    _TRAY_GUID = bytes([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+                        0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0])
 
-def _load_tray_deps():
-    """延迟加载系统托盘依赖"""
-    global pystray, PIL
-    try:
-        import pystray as _pystray
-        from PIL import Image, ImageDraw, ImageFont
-        pystray = _pystray
-        PIL = type("PIL", (), {
-            "Image": Image, "ImageDraw": ImageDraw, "ImageFont": ImageFont
-        })()
-        return True
-    except Exception as e:
-        # 把错误写到日志文件，方便排查
-        import traceback
-        log_path = Path.home() / ".agent_memory" / "tray_error.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"pystray/PIL import failed: {e}\n")
-            traceback.print_exc(file=f)
-        return False
+    _user32.UnregisterClassW.argtypes = [ctypes.wintypes.LPWSTR, ctypes.c_void_p]
+    _user32.UnregisterClassW.restype = ctypes.wintypes.BOOL
+
+    # 64 位安全的 WPARAM/LPARAM
+    _WPARAM = ctypes.c_size_t
+    _LPARAM = ctypes.c_ssize_t
+
+    # 设置 API 函数参数类型（64 位系统上句柄是 8 字节，必须声明否则溢出）
+    # 注意：所有句柄类型统一用 c_void_p，避免 HINSTANCE/HWND 等子类型转换问题
+    _user32.CreateWindowExW.argtypes = [
+        ctypes.wintypes.DWORD,      # dwExStyle
+        ctypes.c_wchar_p,           # lpClassName
+        ctypes.c_wchar_p,           # lpWindowName
+        ctypes.wintypes.DWORD,      # dwStyle
+        ctypes.c_int,               # x
+        ctypes.c_int,               # y
+        ctypes.c_int,               # nWidth
+        ctypes.c_int,               # nHeight
+        ctypes.c_void_p,            # hWndParent
+        ctypes.c_void_p,            # hMenu
+        ctypes.c_void_p,            # hInstance
+        ctypes.c_void_p,            # lpParam
+    ]
+    _user32.CreateWindowExW.restype = ctypes.c_void_p
+
+    _user32.RegisterClassW.argtypes = [ctypes.c_void_p]
+    _user32.RegisterClassW.restype = ctypes.wintypes.ATOM
+
+    _user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+    _user32.DestroyWindow.restype = ctypes.wintypes.BOOL
+
+    _user32.DestroyIcon.argtypes = [ctypes.c_void_p]
+    _user32.DestroyIcon.restype = ctypes.wintypes.BOOL
+
+    _user32.PeekMessageW.argtypes = [
+        ctypes.c_void_p,            # lpMsg
+        ctypes.c_void_p,            # hWnd
+        ctypes.wintypes.UINT,       # wMsgFilterMin
+        ctypes.wintypes.UINT,       # wMsgFilterMax
+        ctypes.wintypes.UINT,       # wRemoveMsg
+    ]
+    _user32.PeekMessageW.restype = ctypes.wintypes.BOOL
+
+    _user32.TranslateMessage.argtypes = [ctypes.c_void_p]
+    _user32.TranslateMessage.restype = ctypes.wintypes.BOOL
+
+    _user32.DispatchMessageW.argtypes = [ctypes.c_void_p]
+    _user32.DispatchMessageW.restype = _LPARAM
+
+    _user32.DefWindowProcW.argtypes = [
+        ctypes.c_void_p, ctypes.wintypes.UINT, _WPARAM, _LPARAM
+    ]
+    _user32.DefWindowProcW.restype = _LPARAM
+
+    _shell32.Shell_NotifyIconW.argtypes = [
+        ctypes.wintypes.DWORD, ctypes.c_void_p
+    ]
+    _shell32.Shell_NotifyIconW.restype = ctypes.wintypes.BOOL
+
+    _shell32.ExtractIconW.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.wintypes.UINT
+    ]
+    _shell32.ExtractIconW.restype = ctypes.c_void_p
+
+    _kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+    _kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+
+    class _NOTIFYICONDATAW(ctypes.Structure):
+        # 匹配 Windows Vista+ NOTIFYICONDATAW 结构体 (cbSize=968)
+        # 字段顺序必须与 commctrl.h 完全一致
+        _fields_ = [
+            ("cbSize", ctypes.wintypes.DWORD),          # 0
+            ("hWnd", ctypes.wintypes.HWND),              # 8
+            ("uID", ctypes.wintypes.UINT),               # 16
+            ("uFlags", ctypes.wintypes.UINT),            # 20
+            ("uCallbackMessage", ctypes.wintypes.UINT),  # 24
+            ("hIcon", ctypes.wintypes.HICON),             # 32
+            ("szTip", ctypes.c_wchar * 128),             # 40..295
+            ("dwState", ctypes.wintypes.DWORD),          # 296
+            ("dwStateMask", ctypes.wintypes.DWORD),      # 300
+            ("szInfo", ctypes.c_wchar * 256),            # 304..815  ← 气泡内容
+            ("uTimeout", ctypes.wintypes.UINT),          # 816 (union with uVersion)
+            ("szInfoTitle", ctypes.c_wchar * 64),        # 820..947  ← 气泡标题
+            ("dwInfoFlags", ctypes.wintypes.DWORD),      # 948
+            ("guidItem", ctypes.c_byte * 16),            # 952..967
+        ]
+
+    class _WNDCLASSW(ctypes.Structure):
+        _fields_ = [
+            ("style", ctypes.wintypes.UINT),
+            ("lpfnWndProc", ctypes.c_void_p),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", ctypes.wintypes.HINSTANCE),
+            ("hIcon", ctypes.wintypes.HICON),
+            ("hCursor", ctypes.wintypes.HANDLE),
+            ("hbrBackground", ctypes.wintypes.HBRUSH),
+            ("lpszMenuName", ctypes.c_wchar_p),
+            ("lpszClassName", ctypes.c_wchar_p),
+        ]
+
+    def _load_icon_from_file(icon_path: str):
+        """从 ICO/PNG 文件加载 HICON"""
+        hIcon = _shell32.ExtractIconW(0, icon_path, 0)
+        # ExtractIconW 返回 0=无图标, 1=非有效文件, >1=有效句柄
+        if hIcon and hIcon > 1:
+            return hIcon
+        # 尝试用 PIL 转 ICO 再加载
+        try:
+            from PIL import Image
+            img = Image.open(icon_path)
+            ico_buf = str(_data_dir() / "_tray_tmp.ico")
+            Path(ico_buf).parent.mkdir(parents=True, exist_ok=True)
+            img.save(ico_buf, format="ICO", sizes=[(16, 16), (32, 32)])
+            hIcon = _shell32.ExtractIconW(0, ico_buf, 0)
+            if hIcon and hIcon > 1:
+                return hIcon
+        except Exception:
+            pass
+        return None
+
+    def _create_default_icon():
+        """创建默认蓝色圆形 M 图标"""
+        try:
+            from PIL import Image, ImageDraw
+            img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse([2, 2, 30, 30], fill="#4A90D9")
+            draw.text((9, 7), "M", fill="white")
+            ico_buf = str(_data_dir() / "_tray_default.ico")
+            Path(ico_buf).parent.mkdir(parents=True, exist_ok=True)
+            img.save(ico_buf, format="ICO", sizes=[(16, 16), (32, 32)])
+            hIcon = _shell32.ExtractIconW(0, ico_buf, 0)
+            if hIcon and hIcon > 1:
+                return hIcon
+        except Exception:
+            pass
+        # 最终兜底：系统默认应用图标
+        return _shell32.ExtractIconW(0, "shell32.dll", 0)
 
 
 # ---------------------------------------------------------------------------
 # 设置文件
 # ---------------------------------------------------------------------------
 
-SETTINGS_PATH = Path.home() / ".agent_memory" / "sync_settings.json"
+def _safe_home() -> Path:
+    """获取用户主目录（PyInstaller --windowed 模式下 Path.home() 可能返回异常路径）"""
+    try:
+        h = Path.home()
+        if h.exists():
+            return h
+    except Exception:
+        pass
+    # 回退：Windows API SHGetFolderPathW 获取 CSIDL_PROFILE
+    if sys.platform == "win32":
+        try:
+            buf = ctypes.create_unicode_buffer(260)
+            ctypes.windll.shell32.SHGetFolderPathW(0, 0x0040, 0, 0, buf)
+            if buf.value:
+                p = Path(buf.value)
+                if p.exists():
+                    return p
+        except Exception:
+            pass
+    # 最终回退：环境变量
+    for var in ("USERPROFILE", "HOME", "HOMEPATH"):
+        val = os.environ.get(var)
+        if val:
+            p = Path(val)
+            if p.exists():
+                return p
+    return Path.home()
+
+
+def _data_dir() -> Path:
+    r"""获取应用数据目录
+
+    Windows 优先使用 EXE 所在目录下的 data 子目录（避免 OneDrive/Defender
+    对 AppData/Local 的权限拦截），非 Windows 或无法写入时回退到标准位置。
+    """
+    if sys.platform == "win32":
+        # 优先：EXE 同级目录下的 data/，便于读写且不触发 AppData 保护
+        exe_dir = Path(sys.executable).parent
+        candidate = exe_dir / "data"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            # 验证可写
+            test_file = candidate / ".write_test"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink()
+            return candidate
+        except Exception:
+            pass
+        # 回退：标准 LOCALAPPDATA
+        base = Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local"))
+        return base / "AgentMemorySystem"
+    else:
+        return _safe_home() / ".local" / "share" / "AgentMemorySystem"
+
+
+def _migrate_old_data():
+    """把旧版本数据迁移到新目录"""
+    new_dir = _data_dir()
+    if new_dir.exists():
+        return
+    candidates = [
+        _safe_home() / ".agent_memory",
+        Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local")) / "AgentMemorySystem",
+    ]
+    try:
+        new_dir.mkdir(parents=True, exist_ok=True)
+        for old_dir in candidates:
+            if not old_dir.exists():
+                continue
+            old_settings = old_dir / "sync_settings.json"
+            if old_settings.exists():
+                import shutil
+                shutil.copy2(old_settings, new_dir / "sync_settings.json")
+                break
+    except Exception:
+        pass
+
+
+SETTINGS_PATH = _data_dir() / "sync_settings.json"
 
 DEFAULT_SETTINGS = {
     "auto_interval_hours": 2,
@@ -106,9 +334,20 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict):
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
+    _data_dir().mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS_PATH.with_suffix(".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(SETTINGS_PATH)
+    except OSError:
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass  # 设置写入失败不应崩溃
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +536,11 @@ class SyncMainWindow:
         self.is_syncing = False
         self.last_report = None
         self.sync_thread = None
-        self.tray_icon = None
+        self._tray_nid = None  # Windows 原生托盘 NOTIFYICONDATA
+        self._tray_hicon = None
+        self._tray_hwnd = None
+        self._tray_class_registered = False  # 窗口类是否已注册
+        self._start_minimized = "--minimized" in sys.argv
         self._last_sync_time = 0  # timestamp of last sync
 
         apply_modern_style(self.root)
@@ -578,170 +821,500 @@ class SyncMainWindow:
         """设置保存回调"""
         self.settings = new_settings
         save_settings(new_settings)
-        self._log("设置已保存")
+        # 验证写入成功
+        try:
+            saved = load_settings()
+            if saved.get("auto_interval_hours") != new_settings.get("auto_interval_hours"):
+                self._log("⚠ 设置保存验证失败，文件可能未更新")
+            else:
+                self._log("设置已保存 (间隔={}小时)".format(saved.get("auto_interval_hours")))
+        except Exception:
+            self._log("设置已保存")
 
     def _minimize_to_tray(self):
-        """最小化到系统托盘"""
-        # 写日志方便排查
-        _tray_log = Path.home() / ".agent_memory" / "tray_error.log"
+        """最小化到系统托盘（Windows 原生 API）"""
+        _tray_log = _data_dir() / "tray_error.log"
         _tray_log.parent.mkdir(parents=True, exist_ok=True)
 
-        if not _load_tray_deps():
-            error_detail = ""
-            try:
-                import pystray as _test
-                error_detail += f"pystray OK: {_test}\n"
-            except Exception as e:
-                error_detail += f"pystray 导入失败: {e}\n"
-            try:
-                from PIL import Image as _Img
-                error_detail += f"PIL OK: {_Img}\n"
-            except Exception as e:
-                error_detail += f"PIL 导入失败: {e}\n"
-            if not error_detail:
-                error_detail = "pystray/PIL 导入成功但初始化失败"
-            with open(_tray_log, "w", encoding="utf-8") as f:
-                f.write(error_detail)
-            messagebox.showwarning("托盘功能不可用",
-                f"错误详情:\n{error_detail}\n"
-                "解决方案: pip install pystray Pillow")
-            return
+        self._log("正在最小化到系统托盘...")
 
+        tray_ok = False
         try:
-            self._create_tray_icon()
-            # 等托盘图标注册完成再隐藏窗口
-            import time
-            time.sleep(0.3)
-            self.root.withdraw()
-            with open(_tray_log, "w", encoding="utf-8") as f:
-                f.write("OK: tray icon created, window withdrawn\n")
+            tray_ok = self._create_tray_icon()
         except Exception as e:
             import traceback
-            with open(_tray_log, "w", encoding="utf-8") as f:
-                f.write(f"创建失败: {e}\n")
-                traceback.print_exc(file=f)
-            messagebox.showerror("托盘创建失败", f"创建托盘图标时出错:\n{e}")
-            self.tray_icon = None
+            try:
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    f.write("FAIL: tray create error: {}\n".format(e))
+                    traceback.print_exc(file=f)
+            except OSError:
+                pass
+
+        # 托盘创建成功后再隐藏主窗口；失败时保留窗口，避免"程序不见了"的错觉
+        if tray_ok:
+            try:
+                self.root.withdraw()
+            except Exception:
+                pass
+            self._log("已最小化到托盘，图标在右下角（Win11 可能在 ^ 溢出区）")
+            try:
+                self._notify("多Agent记忆融合器",
+                             "已最小化到托盘。Win11 请点任务栏右侧的 ^ 箭头，找到蓝色 M 图标后拖到任务栏上")
+                notify_status = "notify=OK"
+            except Exception as e:
+                notify_status = "notify_fail={}".format(e)
+
+            try:
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    f.write("OK: tray created\n")
+                    f.write("  hwnd={} hicon={} nid={}\n".format(
+                        self._tray_hwnd, self._tray_hicon, self._tray_nid is not None))
+                    f.write("  {}\n".format(notify_status))
+                    f.write("  提示: Win11 托盘图标可能在溢出区(^箭头)，可拖到任务栏可见区域\n")
+            except OSError:
+                pass
+
+        else:
+            self._log("托盘图标创建失败，窗口保持显示")
+            # 托盘失败时不隐藏窗口，让用户能继续操作；同时弹出提示
+            try:
+                self._notify("多Agent记忆融合器",
+                             "托盘图标创建失败，窗口保持显示。请查看 tray_error.log")
+            except Exception:
+                pass
+            try:
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    f.write("WARN: tray icon unavailable, window stays visible\n")
+            except OSError:
+                pass
+            try:
+                msg = (
+                    "系统托盘图标创建失败，窗口保持显示。\n\n"
+                    "可能原因：当前 EXE 位于 OneDrive 目录，系统限制了托盘 API。\n\n"
+                    "解决方案（任选其一）：\n"
+                    "1. 使用 build.py 打包后生成的桌面快捷方式启动\n"
+                    "2. 手动复制整个 AgentMemorySync/ 目录到本地非 OneDrive 位置\n"
+                    "3. 从该本地目录双击 AgentMemorySync.exe 启动\n\n"
+                    "如果仍有问题，请检查 tray_error.log 并把内容反馈给我。"
+                )
+                messagebox.showwarning("托盘图标未创建", msg)
+            except Exception:
+                pass
 
     def _create_tray_icon(self):
-        """创建系统托盘图标"""
-        if self.tray_icon is not None:
-            return
+        """用 Windows 原生 Shell_NotifyIconW 创建系统托盘图标
 
-        # 使用托盘专用图标，没有则用应用图标，再没有则生成简单图标
-        if _TRAY_ICON_PATH.exists():
-            image = PIL.Image.open(str(_TRAY_ICON_PATH)).resize((32, 32), PIL.Image.LANCZOS)
-        elif _ICON_PATH.exists():
-            image = PIL.Image.open(str(_ICON_PATH)).resize((32, 32), PIL.Image.LANCZOS)
+        Returns:
+            bool: True 表示托盘图标创建成功
+        """
+        if self._tray_nid is not None:
+            return True
+
+        _tray_log = _data_dir() / "tray_error.log"
+
+        # 加载图标
+        self._tray_hicon = None
+        icon_path_used = None
+        if _ICON_PATH.exists():
+            self._tray_hicon = _load_icon_from_file(str(_ICON_PATH))
+            if self._tray_hicon:
+                icon_path_used = str(_ICON_PATH)
+        if self._tray_hicon is None and _TRAY_ICON_PATH.exists():
+            self._tray_hicon = _load_icon_from_file(str(_TRAY_ICON_PATH))
+            if self._tray_hicon:
+                icon_path_used = str(_TRAY_ICON_PATH)
+        if self._tray_hicon is None:
+            self._tray_hicon = _create_default_icon()
+            if self._tray_hicon:
+                icon_path_used = "default"
+
+        try:
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("DEBUG: icon_path={} hicon={}\n".format(icon_path_used, self._tray_hicon))
+        except OSError:
+            pass
+
+        if not self._tray_hicon:
+            self._log("⚠ 无法加载托盘图标，将使用系统默认图标")
         else:
-            image = PIL.Image.new("RGBA", (32, 32), (0, 0, 0, 0))
-            draw = PIL.ImageDraw.Draw(image)
-            draw.ellipse([2, 2, 30, 30], fill="#4A90D9")
-            draw.text((9, 7), "M", fill="white")
+            self._log("托盘图标已加载: {}".format(icon_path_used))
 
-        menu = pystray.Menu(
-            pystray.MenuItem("显示主窗口", self._show_window),
-            pystray.MenuItem("立即同步", self._tray_sync),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("设置", self._tray_settings),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("退出", self._quit),
+        # 创建独立的隐藏 Win32 窗口来接收托盘消息
+        self._log("正在创建托盘消息窗口...")
+        self._tray_hwnd = self._create_message_window()
+        if not self._tray_hwnd:
+            err = ctypes.windll.kernel32.GetLastError()
+            self._log("⚠ 托盘消息窗口创建失败 (error={})".format(err))
+            try:
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    f.write("DEBUG: message window creation failed last_error={}\n".format(err))
+            except OSError:
+                pass
+            return False
+
+        self._log("托盘消息窗口已创建")
+        try:
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("DEBUG: message window created hwnd={}\n".format(self._tray_hwnd))
+        except OSError:
+            pass
+
+        # 先删除同一 hWnd/uID 的旧图标，避免重复注册或脏状态
+        del_nid = _NOTIFYICONDATAW()
+        del_nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
+        del_nid.hWnd = ctypes.wintypes.HWND(self._tray_hwnd)
+        del_nid.uID = 1
+        _shell32.Shell_NotifyIconW(_NIM_DELETE, ctypes.byref(del_nid))
+
+        # 构建 NOTIFYICONDATA（Vista+ 大小 968，使用 uID 标识）
+        nid = _NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
+        nid.hWnd = ctypes.wintypes.HWND(self._tray_hwnd)
+        nid.uID = 1
+        nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP | _NIF_SHOWTIP
+        nid.uCallbackMessage = _WM_TRAYICON
+        nid.hIcon = ctypes.wintypes.HICON(self._tray_hicon) if self._tray_hicon else None
+        nid.szTip = "多Agent记忆融合器"
+        self._tray_nid = nid
+
+        # 注册托盘图标
+        self._log("正在注册系统托盘图标...")
+        ok = _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid))
+        err = ctypes.windll.kernel32.GetLastError()
+        try:
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("DEBUG: Shell_NotifyIconW add={} last_error={} hwnd={} cbSize={} hicon={}\n".format(
+                    ok, err, self._tray_hwnd, nid.cbSize, self._tray_hicon))
+        except OSError:
+            pass
+
+        if not ok:
+            self._tray_nid = None
+            self._log("⚠ 系统托盘图标注册失败 (error={})".format(err))
+            return False
+
+        self._log("系统托盘图标注册成功")
+        # 启动消息泵轮询
+        self._pump_tray_messages()
+        return True
+
+    def _pump_tray_messages(self):
+        """定期从隐藏窗口的消息队列中取出并分发消息"""
+        if self._tray_nid is None:
+            return
+        msg = ctypes.wintypes.MSG()
+        while _user32.PeekMessageW(ctypes.byref(msg), self._tray_hwnd, 0, 0, 1):  # PM_REMOVE=1
+            _user32.TranslateMessage(ctypes.byref(msg))
+            _user32.DispatchMessageW(ctypes.byref(msg))
+        # 在 tkinter 主线程中处理点击动作，避免在 ctypes 回调里调用 tkinter
+        action = getattr(self, "_tray_click_action", None)
+        if action:
+            self._tray_click_action = None
+            try:
+                _tray_log = _data_dir() / "tray_error.log"
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    f.write("DEBUG: pump processing action={}\n".format(action))
+            except Exception:
+                pass
+            if action == "show":
+                self._show_window()
+            elif action == "menu":
+                self._show_tray_menu()
+        # 每 50ms 轮询一次
+        self._tray_after_id = self.root.after(50, self._pump_tray_messages)
+
+    def _create_message_window(self):
+        """创建一个隐藏的 Win32 消息窗口来接收托盘回调"""
+        _tray_log = _data_dir() / "tray_error.log"
+
+        WNDPROC = ctypes.WINFUNCTYPE(
+            _LPARAM, ctypes.wintypes.HWND, ctypes.wintypes.UINT,
+            _WPARAM, _LPARAM
         )
 
-        self.tray_icon = pystray.Icon(
-            "AgentMemorySync",
-            image,
-            "Agent Memory Sync",
-            menu,
-        )
+        # 保存为实例属性防止被 GC（关键：旧 wndproc 被 GC 后窗口类指向野指针）
+        self._wndproc = WNDPROC(self._tray_wndproc)
 
-        # 在后台线程运行托盘
-        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        # 获取 hInstance 并单独保存（从 struct 读出会变成超大 int 导致溢出）
+        self._hInstance = _kernel32.GetModuleHandleW(None)
+
+        # 注册窗口类（处理崩溃残留：若类已存在则先注销再注册）
+        if not self._tray_class_registered:
+            wnd_class = _WNDCLASSW()
+            wnd_class.lpfnWndProc = ctypes.cast(self._wndproc, ctypes.c_void_p)
+            wnd_class.hInstance = self._hInstance
+            wnd_class.lpszClassName = _TRAY_CLASS_NAME
+            atom = _user32.RegisterClassW(ctypes.byref(wnd_class))
+            reg_err = ctypes.windll.kernel32.GetLastError()
+            if atom:
+                self._tray_class_registered = True
+                try:
+                    with open(_tray_log, "a", encoding="utf-8") as f:
+                        f.write("DEBUG: RegisterClassW OK atom={}\n".format(atom))
+                except OSError:
+                    pass
+            else:
+                try:
+                    with open(_tray_log, "a", encoding="utf-8") as f:
+                        f.write("DEBUG: RegisterClassW failed error={}; try unregister\n".format(reg_err))
+                except OSError:
+                    pass
+                # 类已存在（上次崩溃未清理），注销旧类后重新注册
+                _user32.UnregisterClassW(_TRAY_CLASS_NAME, ctypes.c_void_p(self._hInstance))
+                atom = _user32.RegisterClassW(ctypes.byref(wnd_class))
+                reg_err2 = ctypes.windll.kernel32.GetLastError()
+                if atom:
+                    self._tray_class_registered = True
+                    try:
+                        with open(_tray_log, "a", encoding="utf-8") as f:
+                            f.write("DEBUG: RegisterClassW retry OK atom={}\n".format(atom))
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        with open(_tray_log, "a", encoding="utf-8") as f:
+                            f.write("DEBUG: RegisterClassW retry failed error={}\n".format(reg_err2))
+                    except OSError:
+                        pass
+
+        hwnd = _user32.CreateWindowExW(
+            0, _TRAY_CLASS_NAME, _TRAY_CLASS_NAME,
+            0, 0, 0, 0, 0,              # dwStyle, x, y, nWidth, nHeight
+            _HWND_MESSAGE,             # hWndParent: 消息专用窗口，不显示也不占任务栏
+            ctypes.wintypes.HMENU(0),  # hMenu
+            ctypes.c_void_p(self._hInstance),  # hInstance
+            None,                       # lpParam
+        )
+        cw_err = ctypes.windll.kernel32.GetLastError()
+        try:
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("DEBUG: CreateWindowExW hwnd={} error={}\n".format(hwnd, cw_err))
+        except OSError:
+            pass
+        return hwnd
+
+    def _tray_wndproc(self, hwnd, msg, wparam, lparam):
+        """托盘消息窗口的窗口过程"""
+        try:
+            if msg == _WM_TRAYICON:
+                try:
+                    _tray_log = _data_dir() / "tray_error.log"
+                    with open(_tray_log, "a", encoding="utf-8") as f:
+                        f.write("DEBUG: tray msg lparam={}\n".format(lparam))
+                except Exception:
+                    pass
+                if lparam == _WM_LBUTTONUP:
+                    self._tray_click_action = "show"
+                    return 0
+                elif lparam == _WM_RBUTTONUP:
+                    self._tray_click_action = "menu"
+                    return 0
+            elif msg == _WM_TASKBARCREATED:
+                # 资源管理器重启后恢复托盘图标
+                if self._tray_nid:
+                    _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(self._tray_nid))
+                return 0
+        except Exception as e:
+            try:
+                _tray_log = _data_dir() / "tray_error.log"
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    import traceback
+                    f.write("ERROR: wndproc exception: {}\n".format(e))
+                    traceback.print_exc(file=f)
+            except Exception:
+                pass
+        return int(_user32.DefWindowProcW(hwnd, msg, wparam, lparam))
+
+    def _show_tray_menu(self):
+        """显示托盘右键菜单"""
+        try:
+            _tray_log = _data_dir() / "tray_error.log"
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("DEBUG: show tray menu\n")
+        except Exception:
+            pass
+
+        try:
+            # 窗口被 withdraw 时 tk_popup 可能行为异常，先恢复再弹出
+            was_withdrawn = str(self.root.wm_state()) == "withdrawn"
+            if was_withdrawn:
+                self.root.deiconify()
+                self.root.update_idletasks()
+
+            menu = tk.Menu(self.root, tearoff=0, font=(_FONT, 10))
+            menu.add_command(label="显示主窗口", command=self._show_window)
+            menu.add_command(label="立即同步", command=self._tray_sync)
+            menu.add_separator()
+            menu.add_command(label="设置", command=self._tray_settings)
+            menu.add_separator()
+            menu.add_command(label="退出", command=self._quit)
+
+            # 在鼠标位置弹出
+            try:
+                x = self.root.winfo_pointerx()
+                y = self.root.winfo_pointery()
+                menu.tk_popup(x, y)
+            finally:
+                menu.grab_release()
+
+            # 如果弹出前是隐藏状态且用户没选"显示主窗口"等会恢复窗口的命令，
+            # 这里不再自动隐藏，避免窗口闪烁；由用户通过菜单命令控制。
+        except Exception as e:
+            try:
+                _tray_log = _data_dir() / "tray_error.log"
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    import traceback
+                    f.write("ERROR: show tray menu failed: {}\n".format(e))
+                    traceback.print_exc(file=f)
+            except Exception:
+                pass
 
     def _show_window(self, icon=None, item=None):
         """显示主窗口"""
-        self.root.after(0, self.root.deiconify)
-        if self.tray_icon:
-            self.tray_icon.stop()
-            self.tray_icon = None
+        try:
+            _tray_log = _data_dir() / "tray_error.log"
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("DEBUG: show window called\n")
+        except Exception:
+            pass
+        try:
+            self.root.after(100, self._deiconify_and_remove_tray)
+        except Exception as e:
+            try:
+                _tray_log = _data_dir() / "tray_error.log"
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    import traceback
+                    f.write("ERROR: show window failed: {}\n".format(e))
+                    traceback.print_exc(file=f)
+            except Exception:
+                pass
+
+    def _deiconify_and_remove_tray(self):
+        """恢复窗口并移除托盘图标"""
+        try:
+            _tray_log = _data_dir() / "tray_error.log"
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("DEBUG: deiconify and remove tray\n")
+        except Exception:
+            pass
+        # 先移除托盘图标，再显示窗口，避免消息泵和窗口销毁冲突
+        try:
+            self._remove_tray_icon()
+        except Exception as e:
+            try:
+                _tray_log = _data_dir() / "tray_error.log"
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    import traceback
+                    f.write("ERROR: remove tray icon failed: {}\n".format(e))
+                    traceback.print_exc(file=f)
+            except Exception:
+                pass
+        try:
+            self.root.deiconify()
+        except Exception as e:
+            try:
+                _tray_log = _data_dir() / "tray_error.log"
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    import traceback
+                    f.write("ERROR: deiconify failed: {}\n".format(e))
+                    traceback.print_exc(file=f)
+            except Exception:
+                pass
+
+    def _remove_tray_icon(self):
+        """移除系统托盘图标"""
+        # 先停止消息泵，避免销毁窗口时还在 PeekMessage
+        try:
+            if hasattr(self, "_tray_after_id") and self._tray_after_id:
+                self.root.after_cancel(self._tray_after_id)
+                self._tray_after_id = None
+        except Exception:
+            pass
+        if self._tray_nid is not None:
+            _shell32.Shell_NotifyIconW(_NIM_DELETE, ctypes.byref(self._tray_nid))
+            self._tray_nid = None
+        if self._tray_hicon:
+            _user32.DestroyIcon(self._tray_hicon)
+            self._tray_hicon = None
+        if self._tray_hwnd:
+            _user32.DestroyWindow(self._tray_hwnd)
+            self._tray_hwnd = None
+        # 注销窗口类，允许下次重新注册（旧 wndproc 可能已被 GC）
+        if self._tray_class_registered:
+            _user32.UnregisterClassW(_TRAY_CLASS_NAME, ctypes.c_void_p(self._hInstance))
+            self._tray_class_registered = False
 
     def _tray_sync(self, icon=None, item=None):
         """从托盘触发同步"""
-        self.root.after(0, self._show_window)
+        self.root.after(0, self._deiconify_and_remove_tray)
         self.root.after(100, self._start_sync)
 
     def _tray_settings(self, icon=None, item=None):
         """从托盘打开设置"""
-        self.root.after(0, self._show_window)
+        self.root.after(0, self._deiconify_and_remove_tray)
         self.root.after(100, self._open_settings)
 
     def _quit(self, icon=None, item=None):
         """退出程序"""
-        if self.tray_icon:
-            self.tray_icon.stop()
-            self.tray_icon = None
+        self._remove_tray_icon()
         self.root.after(0, self.root.destroy)
 
     def _on_close(self):
         """关闭窗口"""
-        if self.settings.get("minimize_to_tray", True):
-            self._minimize_to_tray()
-        else:
-            if messagebox.askyesno("退出", "确定退出多Agent记忆融合器？"):
-                self._quit()
+        self._log("点击关闭按钮，根据设置最小化到托盘...")
+        try:
+            if self.settings.get("minimize_to_tray", True):
+                self._minimize_to_tray()
+            else:
+                if messagebox.askyesno("退出", "确定退出多Agent记忆融合器？"):
+                    self._quit()
+        except Exception as e:
+            self._log("关闭处理异常: {}".format(e))
+            # 任何异常都直接退出，避免窗口卡死
+            self._quit()
 
     def _notify(self, title: str, body: str):
-        """发送通知（托盘气泡 + Windows 原生通知兜底）"""
-        # 方法 1: pystray 托盘气泡
+        """发送 Windows Toast 通知"""
+        # 方案1: Shell_NotifyIconW 气泡通知（托盘图标存在时最可靠）
+        if self._tray_nid is not None and self._tray_hwnd:
+            try:
+                # 复用缓存的 nid，保留 uCallbackMessage 和 hIcon 字段
+                nid = self._tray_nid
+                nid.uFlags = _NIF_INFO
+                nid.szInfoTitle = title[:63]
+                nid.szInfo = body[:255]
+                nid.dwInfoFlags = _NIIF_INFO
+                ok = _shell32.Shell_NotifyIconW(_NIM_MODIFY, ctypes.byref(nid))
+                # 重置 uFlags，避免影响后续操作
+                nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP | _NIF_SHOWTIP
+                if ok:
+                    return
+            except Exception:
+                pass
+
+        # 方案2: PowerShell Toast 通知（无托盘图标时使用）
         try:
-            if self.tray_icon:
-                self.tray_icon.notify(body, title)
-                return
-        except Exception:
-            pass
-
-        # 方法 2: Windows 原生通知（ctypes Shell_NotifyIcon）
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            class NOTIFYICONDATA(ctypes.Structure):
-                _fields_ = [
-                    ("cbSize", ctypes.c_uint),
-                    ("hWnd", ctypes.c_void_p),
-                    ("uID", ctypes.c_uint),
-                    ("uFlags", ctypes.c_uint),
-                    ("uCallbackMessage", ctypes.c_uint),
-                    ("hIcon", ctypes.c_void_p),
-                    ("szTip", ctypes.c_wchar * 128),
-                    ("dwState", ctypes.c_uint),
-                    ("dwStateMask", ctypes.c_uint),
-                    ("szInfo", ctypes.c_wchar * 256),
-                    ("uTimeoutOrVersion", ctypes.c_uint),
-                    ("szInfoTitle", ctypes.c_wchar * 64),
-                    ("dwInfoFlags", ctypes.c_uint),
-                    ("guidItem", ctypes.c_byte * 16),
-                    ("hBalloonIcon", ctypes.c_void_p),
-                ]
-
-            NIM_ADD = 0x00
-            NIM_MODIFY = 0x01
-            NIM_DELETE = 0x02
-            NIF_INFO = 0x10
-            NIIF_INFO = 0x01
-
-            nid = NOTIFYICONDATA()
-            nid.cbSize = ctypes.sizeof(NOTIFYICONDATA)
-            nid.uID = 1
-            nid.uFlags = NIF_INFO
-            nid.szInfoTitle = title[:63]
-            nid.szInfo = body[:255]
-            nid.dwInfoFlags = NIIF_INFO
-            nid.uTimeoutOrVersion = 3000
-
-            ctypes.windll.shell32.Shell_NotifyIconW(NIM_ADD, nid)
-            # 3 秒后清理
-            self.root.after(3500, lambda: ctypes.windll.shell32.Shell_NotifyIconW(NIM_DELETE, nid))
+            xml_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            xml_body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            ps_title = xml_title.replace("'", "''")
+            ps_body = xml_body.replace("'", "''")
+            ps_script = (
+                "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
+                "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] > $null; "
+                f"$template = '<toast><visual><binding template=\"ToastText02\">"
+                f"<text id=\"1\">{ps_title}</text>"
+                f"<text id=\"2\">{ps_body}</text>"
+                f"</binding></visual></toast>'; "
+                "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
+                "$xml.LoadXml($template); "
+                "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
+                "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AgentMemorySync').Show($toast)"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True,
+                creationflags=0x08000000
+            )
         except Exception:
             pass
 
@@ -759,6 +1332,14 @@ class SyncMainWindow:
         if self.settings.get("auto_start", False):
             self.root.after(1000, self._start_sync)
 
+        # 启动时最小化到托盘（--minimized 参数或设置中 auto_start）
+        if self._start_minimized:
+            self.root.after(500, self._minimize_to_tray)
+
+        # 若启用最小化到托盘，启动时即创建托盘图标，方便用户随时找到
+        if self.settings.get("minimize_to_tray", True):
+            self.root.after(500, self._create_tray_icon)
+
         # 定时自动同步调度器（每 60 秒检查一次）
         self._schedule_next_sync()
 
@@ -774,6 +1355,8 @@ class SettingsDialog:
 
     def __init__(self, parent, settings: dict, on_save):
         self.settings = settings.copy()
+        # 保存原始设置，用于检测是否有改动
+        self._original_settings = settings.copy()
         self.on_save = on_save
 
         self.win = tk.Toplevel(parent)
@@ -786,8 +1369,8 @@ class SettingsDialog:
 
         self._build()
 
-        # 点 X 关闭时也保存
-        self.win.protocol("WM_DELETE_WINDOW", self._save)
+        # 点 X 关闭时先询问是否保存改动
+        self.win.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         # 居中
         self.win.update_idletasks()
@@ -869,22 +1452,62 @@ class SettingsDialog:
         btn_frame = tk.Frame(self.win, bg=COLORS["bg"])
         btn_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
 
-        ttk.Button(btn_frame, text="取消", command=self.win.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btn_frame, text="取消", command=self._close).pack(side=tk.RIGHT)
         ttk.Button(btn_frame, text="保存", style="Accent.TButton", command=self._save).pack(side=tk.RIGHT, padx=(0, 10))
 
-    def _save(self):
-        self.settings["auto_interval_hours"] = int(self.interval_var.get())
-        self.settings["conflict_action"] = self.conflict_var.get()
-        self.settings["minimize_to_tray"] = self.tray_var.get()
-        self.settings["auto_start"] = self.auto_start_var.get()
-
+    def _current_settings(self) -> dict:
+        """根据当前控件值生成设置字典"""
         overrides = {}
         for agent, var in self.override_vars.items():
             val = var.get().strip()
             if val:
                 overrides[agent] = val
-        self.settings["agent_overrides"] = overrides
+        return {
+            "auto_interval_hours": int(self.interval_var.get()),
+            "conflict_action": self.conflict_var.get(),
+            "minimize_to_tray": self.tray_var.get(),
+            "auto_start": self.auto_start_var.get(),
+            "agent_overrides": overrides,
+            "window_geometry": self._original_settings.get("window_geometry", "720x520"),
+        }
 
+    def _has_changes(self) -> bool:
+        """检测当前控件值是否与原始设置不同"""
+        return self._current_settings() != self._original_settings
+
+    def _on_window_close(self):
+        """点击窗口 X 按钮时：有改动则询问是否保存"""
+        if self._has_changes():
+            answer = messagebox.askyesnocancel(
+                "保存设置",
+                "设置已修改，是否保存？\n\n"
+                "- 是：保存并关闭\n"
+                "- 否：放弃改动并关闭\n"
+                "- 取消：返回设置",
+                parent=self.win,
+            )
+            if answer is True:
+                self._save()
+            elif answer is False:
+                self._close_without_save()
+            else:
+                # 取消：什么都不做，保持窗口打开
+                return
+        else:
+            self._close_without_save()
+
+    def _close_without_save(self):
+        """直接关闭设置窗口，不保存"""
+        self.win.grab_release()
+        self.win.destroy()
+
+    def _close(self):
+        """取消按钮：行为与点 X 一致"""
+        self._on_window_close()
+
+    def _save(self):
+        """保存按钮：把当前控件值写回设置并关闭"""
+        self.settings = self._current_settings()
         self.on_save(self.settings)
         self.win.destroy()
 
@@ -895,19 +1518,52 @@ class SettingsDialog:
 
 def run_cli():
     """命令行模式同步"""
-    print("=== 多Agent记忆融合器 (CLI 模式) ===")
-    print()
+    # Windows 默认 GBK 编码无法输出 emoji/警告符号，强制 UTF-8
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    # 收集所有输出（EXE 模式下 stdout 没有 console，写到文件）
+    output_lines = []
+    log_path = _data_dir() / "sync_report.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def flush_log():
+        """渐进式写日志（防止 EXE 崩溃时丢失所有输出）"""
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(output_lines))
+                f.write("\n")
+        except OSError:
+            pass
+
+    def emit(msg=""):
+        print(msg)
+        output_lines.append(msg)
+        flush_log()  # 每次输出都立即写日志
+
+    emit("=== 多Agent记忆融合器 (CLI 模式) ===")
+    emit("开始时间: {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    emit("")
 
     from sync_engine import SyncEngine
 
     def cli_progress(msg):
-        print("  {}".format(msg))
+        emit("  {}".format(msg))
 
     engine = SyncEngine(on_progress=cli_progress)
     report = engine.run()
 
-    print()
-    print(report.summary_text())
+    emit("")
+    emit(report.summary_text())
+    emit("")
+    emit("结束时间: {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    emit("日志文件: {}".format(log_path))
+    flush_log()  # 最后再写一次确保完整
+
     return report
 
 
@@ -933,7 +1589,230 @@ def _check_single_instance():
         return True
 
 
+def _is_onedrive_path(path: Path) -> bool:
+    """判断路径是否位于 OneDrive 同步目录内"""
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    parts = [p.lower() for p in resolved.parts]
+    # 常见 OneDrive 目录特征
+    if "onedrive" in parts:
+        return True
+    # 也检查环境变量指向的 OneDrive 根目录
+    for env in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        root = os.environ.get(env)
+        if root:
+            try:
+                if resolved.is_relative_to(Path(root)):
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+def _ensure_local_install():
+    """OneDrive 内运行的 EXE 会被系统限制托盘图标 API，自动复制到本地再启动。
+
+    仅对 PyInstaller 打包后的 Windows EXE 生效；本地 Python 源码运行时不处理。
+    可通过命令行参数 --no-relocate 禁用。
+    """
+    def _reloc_log(msg: str):
+        """记录迁移诊断信息到 tray_error.log（ OneDrive 进程失败时这里最有价值）"""
+        try:
+            d = Path(sys.executable).parent / "data"
+            d.mkdir(parents=True, exist_ok=True)
+            with open(d / "tray_error.log", "a", encoding="utf-8") as f:
+                f.write(f"[RELOC] {msg}\n")
+        except Exception:
+            pass
+
+    _reloc_log(f"start frozen={getattr(sys, 'frozen', None)} argv={sys.argv}")
+    if sys.platform != "win32":
+        _reloc_log("skip: not win32")
+        return
+    if "--no-relocate" in sys.argv:
+        _reloc_log("skip: --no-relocate")
+        return
+    if not getattr(sys, "frozen", False):
+        _reloc_log(f"skip: not frozen (frozen={getattr(sys, 'frozen', None)})")
+        return
+
+    exe_path = Path(sys.executable)
+    _reloc_log(f"exe_path={exe_path}")
+    is_od = _is_onedrive_path(exe_path)
+    _reloc_log(f"is_onedrive_path={is_od}")
+    if not is_od:
+        return
+
+    # 候选本地目录：优先持久化的 LOCALAPPDATA，不可写时回退到 TEMP
+    local_dir_candidates = [
+        Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local")) / "AgentMemorySystem" / "App",
+        Path(os.environ.get("TEMP", "C:\\temp")) / "AgentMemorySystem" / "App",
+    ]
+    # 测试环境可覆盖本地目录（不会暴露给最终用户）
+    _env_local = os.environ.get("AGENT_MEMORY_LOCAL_DIR")
+    if _env_local:
+        local_dir_candidates.insert(0, Path(_env_local))
+
+    local_dir = None
+    local_exe = None
+    for candidate in local_dir_candidates:
+        _reloc_log(f"trying local_dir={candidate}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            test_file = candidate / ".write_test"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink()
+            local_dir = candidate
+            local_exe = candidate / exe_path.name
+            _reloc_log(f"local_dir selected={candidate}")
+            break
+        except Exception as e:
+            _reloc_log(f"local_dir not writable: {e}")
+            continue
+
+    # 如果 Python 无法写入任何候选目录，尝试用 PowerShell 迁到 TEMP
+    # （某些沙箱/工具会限制 OneDrive 内 EXE 的文件写入，但通常不限制 powershell.exe）
+    if local_dir is None or local_exe is None:
+        _reloc_log("no writable local dir via Python, trying PowerShell fallback")
+        _try_powershell_relocate(exe_path)
+        return
+
+    # 判断是否需要复制：按 EXE 修改时间比较
+    need_copy = True
+    if local_exe.exists():
+        try:
+            if local_exe.stat().st_mtime >= exe_path.stat().st_mtime:
+                need_copy = False
+        except Exception:
+            pass
+
+    _reloc_log(f"need_copy={need_copy}")
+    if need_copy:
+        try:
+            import shutil
+            # 复制整个 EXE 目录（onedir 模式）
+            src_dir = exe_path.parent
+            _reloc_log(f"copying {src_dir} -> {local_dir}")
+            if local_dir.exists():
+                shutil.rmtree(local_dir, ignore_errors=True)
+            shutil.copytree(src_dir, local_dir)
+            _reloc_log("copy done")
+        except Exception as e:
+            _reloc_log(f"copy failed: {e}")
+            _try_powershell_relocate(exe_path)
+            return
+
+    if not local_exe.exists():
+        _reloc_log("local_exe missing after copy")
+        _try_powershell_relocate(exe_path)
+        return
+
+    # 从本地副本重启，带上相同参数（去掉 --no-relocate 无关）
+    args = [str(local_exe)] + [a for a in sys.argv[1:] if a != "--no-relocate"]
+    _reloc_log(f"relaunching with args={args}")
+    try:
+        subprocess.Popen(args, cwd=str(local_dir))
+        _reloc_log("relaunch Popen ok, exiting")
+        sys.exit(0)
+    except Exception as e:
+        _reloc_log(f"relaunch failed: {e}")
+        _try_powershell_relocate(exe_path)
+
+
+def _try_powershell_relocate(exe_path: Path):
+    """PowerShell 后备方案：把 EXE 目录复制到 TEMP 并启动本地副本。"""
+    temp_dir = Path(os.environ.get("TEMP", "C:\\temp")) / "AgentMemorySystem" / "App"
+    temp_dir_str = str(temp_dir)
+    src_dir_str = str(exe_path.parent)
+    local_exe = temp_dir / exe_path.name
+
+    # 先用 PowerShell 完成复制（某些环境会限制 OneDrive 内 EXE 的文件写入）
+    ps_cmd = (
+        f"$src='{src_dir_str}'; $dst='{temp_dir_str}'; "
+        f"if (Test-Path $dst) {{ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dst }}; "
+        f"Copy-Item -Recurse -Force $src $dst"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            creationflags=0x08000000,
+            timeout=30,
+        )
+        _reloc_log(f"powershell copy rc={result.returncode} stderr={result.stderr[:500]}")
+    except Exception as e:
+        _reloc_log(f"powershell copy failed: {e}")
+        return
+
+    if not local_exe.exists():
+        _reloc_log("local_exe missing after powershell copy")
+        return
+
+    # 复制成功后再用 Python 启动本地副本
+    args = [str(local_exe)] + [a for a in sys.argv[1:] if a != "--no-relocate"]
+    _reloc_log(f"relaunching from temp with args={args}")
+    try:
+        subprocess.Popen(args, cwd=str(temp_dir))
+        _reloc_log("relaunch from temp ok, exiting")
+        sys.exit(0)
+    except Exception as e:
+        _reloc_log(f"relaunch from temp failed: {e}")
+
+
 def main():
+    # OneDrive 内运行会导致 Shell_NotifyIconW 拒绝访问，优先迁移到本地
+    _ensure_local_install()
+
+    # 全局替换 Path.home() 为 _safe_home()，确保所有模块（包括 agent_memory.py）
+    # 在 PyInstaller --windowed 模式下也能获取正确路径
+    _home = _safe_home()
+    _original_home = Path.home
+    Path.home = staticmethod(lambda: _home)
+
+    # Windows 11 要求设置 AppUserModelID，否则托盘图标/任务栏可能不显示
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_APP_USER_MODEL_ID)
+        except Exception:
+            pass
+
+    # 启动诊断日志（文件可能被锁定，不能因此崩溃）
+    _diag_lines = [
+        "APP STARTING v3-final\n",
+        f"  _safe_home() = {_home}\n",
+        f"  _data_dir() = {_data_dir()}\n",
+        f"  _original_home() = {_original_home()}\n",
+        f"  sys.executable = {sys.executable}\n",
+        f"  _MEIPASS = {getattr(sys, '_MEIPASS', 'N/A')}\n",
+        f"  SETTINGS_PATH = {SETTINGS_PATH}\n",
+    ]
+    _migrate_old_data()
+    try:
+        _startup_log = _data_dir() / "tray_error.log"
+        _data_dir().mkdir(parents=True, exist_ok=True)
+        # 追加模式，保留 _ensure_local_install() 可能已写入的迁移日志
+        with open(_startup_log, "a", encoding="utf-8") as f:
+            f.writelines(_diag_lines)
+    except Exception as _log_err:
+        # 主日志写入失败时，回退到项目根目录或临时目录，方便排查
+        try:
+            _fallback_root = Path(__file__).parent if "__file__" in globals() else Path.cwd()
+            _fallback_log = _fallback_root / "tray_error.log"
+            with open(_fallback_log, "w", encoding="utf-8") as f:
+                f.writelines(_diag_lines)
+                f.write(f"  PRIMARY_LOG_ERROR = {_log_err}\n")
+        except Exception:
+            try:
+                _fallback_log2 = Path(os.environ.get("TEMP", "C:\\temp")) / "agent_memory_tray_error.log"
+                with open(_fallback_log2, "w", encoding="utf-8") as f:
+                    f.writelines(_diag_lines)
+                    f.write(f"  PRIMARY_LOG_ERROR = {_log_err}\n")
+            except Exception:
+                pass
+
     if "--cli" in sys.argv:
         run_cli()
         return

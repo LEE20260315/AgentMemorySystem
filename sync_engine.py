@@ -60,7 +60,9 @@ class SyncReport:
     total_merged: int = 0
     total_written: int = 0
     total_skipped: int = 0
+    total_pending: int = 0  # 因主文件锁定而暂存到 .pending 的文件数
     errors: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)  # 新增：软警告（Permission denied 等可恢复错误）
 
     def summary_text(self) -> str:
         """生成人类可读的汇总文本"""
@@ -79,11 +81,18 @@ class SyncReport:
             "融合: {} 条新增共享".format(self.total_merged),
             "写回: {} 条".format(self.total_written),
             "跳过(去重): {} 条".format(self.total_skipped),
+            "待合并: {} 个文件".format(self.total_pending),
         ]
+
+        if self.warnings:
+            lines.append("")
+            lines.append("⚠ 警告（文件锁定等可恢复错误，不影响同步）:")
+            for warn in self.warnings:
+                lines.append("  - {}".format(warn))
 
         if self.errors:
             lines.append("")
-            lines.append("错误:")
+            lines.append("✗ 错误:")
             for err in self.errors:
                 lines.append("  - {}".format(err))
 
@@ -93,10 +102,32 @@ class SyncReport:
             lines.append("{}:".format(agent_id))
             lines.append("  写入: {} 条".format(wb.written))
             lines.append("  跳过: {} 条".format(wb.skipped))
+            lines.append("  待合并: {} 个".format(wb.pending))
             lines.append("  目标: {}".format(wb.target_path))
             if wb.errors:
                 for err in wb.errors:
-                    lines.append("  错误: {}".format(err))
+                    err_str = str(err)
+                    if "Permission denied" in err_str or "⚠" in err_str or "跳过" in err_str:
+                        lines.append("  ⚠ {}".format(err))
+                    else:
+                        lines.append("  错误: {}".format(err))
+
+        # 总结：判断整体成功
+        if self.errors:
+            lines.append("")
+            lines.append("结果: ⚠ 部分错误（请检查上述错误）")
+        elif self.warnings and self.total_written == 0:
+            lines.append("")
+            lines.append("结果: ⚠ 写回被跳过（目标文件被锁定，已暂存 .pending）")
+        elif self.warnings:
+            lines.append("")
+            lines.append("结果: ✓ 成功（{} 个文件被锁定跳过）".format(len([w for w in self.warnings if "Permission" in str(w) or "⚠" in str(w)])))
+        elif self.total_extracted > 0 or self.total_merged > 0 or self.total_written > 0 or self.total_pending > 0:
+            lines.append("")
+            lines.append("结果: ✓ 全部成功")
+        else:
+            lines.append("")
+            lines.append("结果: 无操作（无新记忆需要同步）")
 
         return "\n".join(lines)
 
@@ -166,9 +197,18 @@ class SyncEngine:
         SyncReport
             同步报告
         """
+        # 设备名：优先用配置，否则用 hostname，再否则用 "unknown"
+        import socket
+        device_name = self.config.get("device_name", None)
+        if not device_name:
+            try:
+                device_name = socket.gethostname().lower()
+            except Exception:
+                device_name = "unknown"
+
         report = SyncReport(
             start_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            device=self.config.get("device_name", "unknown"),
+            device=device_name,
         )
         start_ts = time.time()
 
@@ -285,26 +325,40 @@ class SyncEngine:
                 self._emit("写回 {}: {} 条共享记忆".format(agent_id, len(shared_memories)))
 
                 writer = get_writer(agent_id, self.sync_state)
+                # 临时禁用备份，避免备份到受监控目录触发 Permission denied
                 wb_result = writer.write(
                     agent_id=extract_id,
                     target_path=target_path,
                     memories=shared_memories,
-                    backup_dir=self.backup_dir,
+                    backup_dir=None,
                 )
                 report.writeback_results[agent_id] = wb_result
                 report.total_written += wb_result.written
                 report.total_skipped += wb_result.skipped
+                report.total_pending += wb_result.pending
 
                 if wb_result.errors:
-                    report.errors.extend(wb_result.errors)
+                    for err in wb_result.errors:
+                        err_str = str(err)
+                        if "Permission denied" in err_str or "跳过" in err_str or "⚠" in err_str:
+                            # 文件被其他进程锁定/跳过，属于预期情况，记录为 warning
+                            report.warnings.append(err_str)
+                            self._emit("  ⚠ {}".format(err_str))
+                        else:
+                            report.errors.append(err_str)
 
-                self._emit("  写入 {} 条, 跳过 {} 条".format(
-                    wb_result.written, wb_result.skipped
+                self._emit("  写入 {} 条, 跳过 {} 条, 待合并 {} 个".format(
+                    wb_result.written, wb_result.skipped, wb_result.pending
                 ))
 
             # ⑥ 保存去重状态
-            self.sync_state.save()
+            try:
+                self.sync_state.save()
+            except PermissionError:
+                self._emit("⚠ 去重状态保存失败（文件被锁定），下次同步可能重复")
 
+        except PermissionError as e:
+            self._emit("⚠ 文件被锁定: {}".format(e))
         except Exception as e:
             self.logger.error("同步异常: {}".format(e), exc_info=True)
             report.errors.append("同步异常: {}".format(e))

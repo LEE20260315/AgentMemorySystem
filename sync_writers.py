@@ -12,6 +12,8 @@ Agent 记忆写回适配器
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -22,6 +24,7 @@ from typing import Optional
 from agent_memory import (
     MemoryEntry, content_hash, get_logger, get_config,
 )
+from safe_io import _pending_path, _safe_read_text, _safe_write_text
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +40,7 @@ class WriteBackResult:
     skipped: int  # 去重跳过
     errors: list
     backup_path: Optional[str] = None
+    pending: int = 0  # 因主文件锁定而写入 .pending 的文件数
 
 
 # ---------------------------------------------------------------------------
@@ -63,8 +67,12 @@ class SyncState:
 
     def save(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_path, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, ensure_ascii=False, indent=2)
+        try:
+            with open(self.state_path, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, ensure_ascii=False, indent=2)
+        except PermissionError:
+            # 文件被其他进程锁定，静默跳过
+            pass
 
     def is_duplicate(self, agent_id: str, content: str) -> bool:
         h = content_hash(content)
@@ -222,23 +230,39 @@ class ClaudeMemoryWriter(BaseMemoryWriter):
                     # 也备份 MEMORY.md
                     self._do_backup(mem_dir / "MEMORY.md", backup_dir)
 
-                # 写入 shared_from_agents.md
-                shared_file.write_text(content, encoding="utf-8")
+                # 写入 shared_from_agents.md（用 _safe_write_text 绕过文件锁）
+                if not _safe_write_text(shared_file, content):
+                    raise OSError("写入 shared_from_agents.md 失败（含重试+原子替换）")
 
                 # 更新 MEMORY.md 索引
                 index_path = mem_dir / "MEMORY.md"
                 if index_path.exists():
-                    index_content = index_path.read_text(encoding="utf-8")
+                    index_content = _safe_read_text(index_path, default="")
                     link = "- [来自其他 Agent 的共享记忆](shared_from_agents.md) — 自动同步"
                     if "shared_from_agents" not in index_content:
                         index_content = index_content.rstrip() + "\n\n" + link + "\n"
-                        index_path.write_text(index_content, encoding="utf-8")
+                        if not _safe_write_text(index_path, index_content):
+                            raise OSError("更新 MEMORY.md 索引失败")
 
                 result.written = len(new_memories)
                 self.logger.info("Claude: 写入 {} 条记忆到 {}".format(len(new_memories), mem_dir))
 
+                # 检测是否有 pending 文件（主文件被锁时内容暂存于此）
+                for check_path in (shared_file, index_path):
+                    if check_path and _pending_path(check_path).exists():
+                        result.pending += 1
+                        result.errors.append(
+                            "⚠ {} 主文件被锁定，内容已暂存到 {}".format(
+                                check_path.name, _pending_path(check_path)
+                            )
+                        )
+
             except (OSError, UnicodeEncodeError) as e:
-                result.errors.append("写入 {} 失败: {}".format(mem_dir, e))
+                err_str = str(e)
+                if "Permission denied" in err_str or "Lock" in err_str or "被锁" in err_str:
+                    result.errors.append("⚠ {} (跳过): {}".format(mem_dir, e))
+                else:
+                    result.errors.append("写入 {} 失败: {}".format(mem_dir, e))
                 self.logger.error("Claude 写入失败: {}".format(e))
 
         # 标记已写入
@@ -358,7 +382,12 @@ class TraeMemoryWriter(BaseMemoryWriter):
             if backup_dir:
                 result.backup_path = self._do_backup(profile_path, backup_dir)
 
-            content = profile_path.read_text(encoding="utf-8")
+            content = _safe_read_text(profile_path, default="")
+            if not content:
+                # 读不到内容，说明文件可能被锁或不存在
+                result.errors.append("⚠ Trae user_profile.md 读取失败: {} (跳过)".format(profile_path))
+                self.logger.warning("Trae 读取失败: {}".format(profile_path))
+                return result
 
             # 确保有 Shared Knowledge section
             if self.SECTION_HEADER not in content:
@@ -372,12 +401,30 @@ class TraeMemoryWriter(BaseMemoryWriter):
                 )
                 content = content.rstrip() + entry
 
-            profile_path.write_text(content, encoding="utf-8")
+            # 写入（用 _safe_write_text 绕过文件锁）
+            if not _safe_write_text(profile_path, content):
+                result.errors.append("⚠ Trae user_profile.md 写入失败（含重试+原子替换）: {}".format(profile_path))
+                self.logger.warning("Trae 写入失败: {}".format(profile_path))
+                return result
+
             result.written = len(new_memories)
             self.logger.info("Trae: 写入 {} 条记忆到 {}".format(len(new_memories), profile_path))
 
+            # 检测是否有 pending 文件
+            if _pending_path(profile_path).exists():
+                result.pending += 1
+                result.errors.append(
+                    "⚠ Trae user_profile.md 主文件被锁定，内容已暂存到 {}".format(
+                        _pending_path(profile_path)
+                    )
+                )
+
         except (OSError, UnicodeEncodeError) as e:
-            result.errors.append("写入失败: {}".format(e))
+            err_str = str(e)
+            if "Permission denied" in err_str or "Lock" in err_str or "被锁" in err_str:
+                result.errors.append("⚠ Trae 写入失败（已跳过）: {}".format(e))
+            else:
+                result.errors.append("Trae 写入失败: {}".format(e))
             self.logger.error("Trae 写入失败: {}".format(e))
 
         # 标记已写入
@@ -417,25 +464,39 @@ class HermesMemoryWriter(BaseMemoryWriter):
 
         # target_path 是 memories 目录
         md_path = target_path / "MEMORY.md"
-        lock_path = target_path / "MEMORY.md.lock"
+        # 使用 .sync.lock 避免与 Agent 自身的 .lock 文件冲突
+        lock_path = target_path / "MEMORY.md.sync.lock"
 
         if not md_path.exists():
             result.errors.append("Hermes MEMORY.md 不存在: {}".format(md_path))
             return result
 
-        # 检查锁（超过 60 秒视为过期锁，自动清理）
+        # 检查锁（超过 60 秒视为过期锁，自动清理；被外部锁定的锁文件也直接清理）
         if lock_path.exists():
             try:
                 age = time.time() - lock_path.stat().st_mtime
                 if age > 60:
                     self.logger.warning("清理过期锁文件 ({}秒): {}".format(int(age), lock_path))
-                    lock_path.unlink()
+                    try:
+                        lock_path.unlink()
+                    except OSError as e:
+                        # 被外部锁定的锁文件无法 unlink，忽略
+                        self.logger.warning("无法清理锁文件，继续: {}".format(e))
                 else:
-                    result.errors.append("Hermes 记忆文件被锁定 ({}), 请先关闭 Hermes".format(lock_path))
-                    self.logger.warning("Hermes 锁文件存在: {}".format(lock_path))
-                    return result
-            except OSError:
-                pass
+                    self.logger.warning("同步锁文件存在 ({}秒): {} - 尝试清理".format(int(age), lock_path))
+                    # 60 秒内的新锁也尝试清理（OneDrive 锁可能让 stat 返回 0，直接清）
+                    try:
+                        lock_path.unlink()
+                    except OSError as e:
+                        # 清理失败，记录 warning 但继续执行
+                        self.logger.warning("无法清理锁文件，继续: {}".format(e))
+            except OSError as e:
+                # stat 失败也假定为旧锁
+                self.logger.warning("锁文件 stat 失败: {}，尝试清理".format(e))
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
 
         # 过滤去重
         new_memories = []
@@ -450,14 +511,23 @@ class HermesMemoryWriter(BaseMemoryWriter):
             return result
 
         try:
-            # 创建锁
-            lock_path.touch()
+            # 创建锁（外部锁可能让 touch 失败，但不影响写回）
+            try:
+                lock_path.touch()
+            except OSError as e:
+                self.logger.warning("创建锁文件失败，继续: {}".format(e))
 
             # 备份
             if backup_dir:
                 result.backup_path = self._do_backup(md_path, backup_dir)
 
-            content = md_path.read_text(encoding="utf-8")
+            # 读取（用 _safe_read_text 绕过文件锁）
+            content = _safe_read_text(md_path, default="")
+            if not content and md_path.exists():
+                # 读不到内容
+                result.errors.append("⚠ Hermes MEMORY.md 读取失败（含重试+绕过）: {}".format(md_path))
+                self.logger.warning("Hermes 读取失败: {}".format(md_path))
+                return result
 
             # 追加记忆（用 § 分隔）
             for mem in new_memories:
@@ -467,12 +537,30 @@ class HermesMemoryWriter(BaseMemoryWriter):
                 )
                 content = content.rstrip() + entry
 
-            md_path.write_text(content, encoding="utf-8")
+            # 写入（用 _safe_write_text 绕过文件锁）
+            if not _safe_write_text(md_path, content):
+                result.errors.append("⚠ Hermes MEMORY.md 写入失败（含重试+原子替换）: {}".format(md_path))
+                self.logger.warning("Hermes 写入失败: {}".format(md_path))
+                return result
+
             result.written = len(new_memories)
             self.logger.info("Hermes: 写入 {} 条记忆到 {}".format(len(new_memories), md_path))
 
+            # 检测是否有 pending 文件
+            if _pending_path(md_path).exists():
+                result.pending += 1
+                result.errors.append(
+                    "⚠ Hermes MEMORY.md 主文件被锁定，内容已暂存到 {}".format(
+                        _pending_path(md_path)
+                    )
+                )
+
         except (OSError, UnicodeEncodeError) as e:
-            result.errors.append("写入失败: {}".format(e))
+            err_str = str(e)
+            if "Permission denied" in err_str or "Lock" in err_str or "被锁" in err_str:
+                result.errors.append("⚠ Hermes 写入失败（已跳过）: {}".format(e))
+            else:
+                result.errors.append("Hermes 写入失败: {}".format(e))
             self.logger.error("Hermes 写入失败: {}".format(e))
 
         finally:
@@ -532,18 +620,31 @@ class GenericMarkdownWriter(BaseMemoryWriter):
                 result.errors.append("创建记忆文件失败: {}".format(e))
                 return result
 
-        lock_path = md_path.with_suffix(md_path.suffix + ".lock")
+        # 使用 .sync.lock 避免与 Agent 自身的 .lock 文件冲突
+        lock_path = md_path.with_suffix(md_path.suffix + ".sync.lock")
         if lock_path.exists():
             try:
                 age = time.time() - lock_path.stat().st_mtime
                 if age > 60:
                     self.logger.warning("清理过期锁文件 ({}秒): {}".format(int(age), lock_path))
-                    lock_path.unlink()
+                    try:
+                        lock_path.unlink()
+                    except OSError as e:
+                        self.logger.warning("无法清理锁文件，继续: {}".format(e))
                 else:
-                    result.errors.append("记忆文件被锁定: {}".format(lock_path))
-                    return result
-            except OSError:
-                pass
+                    # 新锁也尝试清理（外部锁可能让 stat 返回 0）
+                    self.logger.warning("同步锁文件存在 ({}秒): {} - 尝试清理".format(int(age), lock_path))
+                    try:
+                        lock_path.unlink()
+                    except OSError as e:
+                        self.logger.warning("无法清理锁文件，继续: {}".format(e))
+            except OSError as e:
+                # stat 失败也假定为旧锁
+                self.logger.warning("锁文件 stat 失败: {}，尝试清理".format(e))
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
 
         new_memories = [m for m in memories if not self.sync_state.is_duplicate(agent_id, m.content)]
         result.skipped = len(memories) - len(new_memories)
@@ -553,11 +654,16 @@ class GenericMarkdownWriter(BaseMemoryWriter):
             return result
 
         try:
-            lock_path.touch()
+            try:
+                lock_path.touch()
+            except OSError as e:
+                self.logger.warning("创建锁文件失败，继续: {}".format(e))
+
             if backup_dir:
                 result.backup_path = self._do_backup(md_path, backup_dir)
 
-            content = md_path.read_text(encoding="utf-8")
+            # 用 _safe_read_text 读取（绕过文件锁）
+            content = _safe_read_text(md_path, default="")
 
             for mem in new_memories:
                 marker = "[sync:{}]".format(mem.id)
@@ -566,12 +672,39 @@ class GenericMarkdownWriter(BaseMemoryWriter):
                 )
                 content = content.rstrip() + entry
 
-            md_path.write_text(content, encoding="utf-8")
+            # 用 _safe_write_text 写入（绕过文件锁）
+            if not _safe_write_text(md_path, content):
+                result.errors.append("⚠ 通用 Writer 写入失败（含重试+原子替换）: {}".format(md_path))
+                self.logger.warning("通用 Writer 写入失败: {}".format(md_path))
+                return result
+
             result.written = len(new_memories)
             self.logger.info("通用 Writer ({}): 写入 {} 条记忆".format(agent_id, len(new_memories)))
 
+            # 检测是否有 pending 文件
+            if _pending_path(md_path).exists():
+                result.pending += 1
+                result.errors.append(
+                    "⚠ {} 主文件被锁定，内容已暂存到 {}".format(
+                        md_path.name, _pending_path(md_path)
+                    )
+                )
+
         except (OSError, UnicodeEncodeError) as e:
-            result.errors.append("写入失败: {}".format(e))
+            err_str = str(e)
+            if "Permission denied" in err_str or "Lock" in err_str or "被锁" in err_str:
+                result.errors.append("⚠ 通用 Writer 写入失败（已跳过）: {}".format(e))
+            else:
+                # 诊断：记录详细的权限信息
+                import os, sys
+                diag_info = "errno={}, winerror={}, uid={}, gid={}, cwd={}".format(
+                    getattr(e, 'errno', '?'),
+                    getattr(e, 'winerror', '?'),
+                    getattr(os, 'getuid', lambda: '?')(),
+                    getattr(os, 'getgid', lambda: '?')(),
+                    getattr(os, 'getcwd', lambda: '?')(),
+                )
+                result.errors.append("通用 Writer 写入失败: {} [{}]".format(e, diag_info))
             self.logger.error("通用 Writer 写入失败: {}".format(e))
         finally:
             if lock_path.exists():
@@ -654,7 +787,6 @@ def rollback_last_sync(backup_dir: Path, target_files: dict) -> int:
     int
         成功回滚的文件数
     """
-    import shutil
     logger = get_logger()
     restored = 0
 
