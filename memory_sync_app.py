@@ -32,6 +32,8 @@ from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Optional
 
+from PIL import Image, ImageDraw, ImageTk
+
 # Windows DPI 感知 —— 必须在创建任何 tkinter 窗口之前调用
 if sys.platform == "win32":
     try:
@@ -358,8 +360,8 @@ def save_settings(settings: dict):
 COLORS = {
     "bg": "#f5f5f7",
     "card_bg": "#ffffff",
-    "accent": "#007aff",
-    "accent_hover": "#0056cc",
+    "accent": "#4a90e2",
+    "accent_hover": "#357abd",
     "text": "#1d1d1f",
     "text_secondary": "#86868b",
     "border": "#d2d2d7",
@@ -405,10 +407,11 @@ class RoundedButton(tk.Canvas):
         )
 
         self._normal_bg = COLORS["accent"] if style == "accent" else COLORS["card_bg"]
-        self._hover_bg = COLORS["accent_hover"] if style == "accent" else "#e8e8ed"
-        self._active_bg = "#0056cc" if style == "accent" else "#dcdce0"
+        self._hover_bg = COLORS["accent_hover"] if style == "accent" else "#f2f2f7"
+        self._active_bg = COLORS["accent_hover"] if style == "accent" else "#e5e5ea"
         self._fg = "#ffffff" if style == "accent" else COLORS["text"]
-        self._border = COLORS["border"] if style != "accent" else ""
+        self._border = "#e5e5ea" if style != "accent" else ""
+        self._shadow = (style != "accent")
         self._current_bg = self._normal_bg
 
         self._draw()
@@ -420,6 +423,12 @@ class RoundedButton(tk.Canvas):
     def _draw(self):
         self.delete("all")
         radius = self._height // 2
+        # 柔和投影（仅 secondary 按钮）
+        if self._shadow:
+            self.create_rounded_rect(
+                2, 3, self._width - 2, self._height, radius - 1,
+                fill="#dcdcde", outline="",
+            )
         self._rect = self.create_rounded_rect(
             1, 1, self._width - 1, self._height - 1, radius,
             fill=self._current_bg, outline=self._border,
@@ -757,8 +766,8 @@ class SyncMainWindow:
         btn_frame = tk.Frame(right_panel, bg=COLORS["bg"])
         btn_frame.pack(fill=tk.X, pady=(15, 0))
 
-        btn_width = 216
-        btn_height = 34
+        btn_width = 198
+        btn_height = 32
 
         self.run_btn = RoundedButton(
             btn_frame, text="立即同步", style="accent",
@@ -808,8 +817,8 @@ class SyncMainWindow:
         self._title_max_btn = self._create_traffic_light_button(
             btn_frame, "#28c840", "#24aa34", "+", self._toggle_maximize
         )
-        self._title_close_btn.pack(side=tk.LEFT, padx=(0, 8))
-        self._title_min_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._title_close_btn.pack(side=tk.LEFT, padx=(0, 9))
+        self._title_min_btn.pack(side=tk.LEFT, padx=(0, 9))
         self._title_max_btn.pack(side=tk.LEFT)
 
         # 中间：标题
@@ -842,26 +851,92 @@ class SyncMainWindow:
         self.status_dot.pack(side=tk.RIGHT, padx=(0, 6))
         self._draw_status_dot(COLORS["success"])
 
+    def _create_traffic_light_image(self, size: int, base_hex: str, hover_hex: str, symbol: str, hover: bool = False):
+        """用 PIL 绘制带立体光泽的交通灯图标"""
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        def _hex_rgb(hex_color):
+            h = hex_color.lstrip("#")
+            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+        def _darken(rgb, factor=0.85):
+            return tuple(int(c * factor) for c in rgb)
+
+        def _lighten(rgb, factor=1.25):
+            return tuple(min(255, int(c * factor)) for c in rgb)
+
+        base = _hex_rgb(hover_hex if hover else base_hex)
+        dark = _darken(base, 0.75)
+        light = _lighten(base, 1.15)
+
+        cx, cy = size // 2, size // 2
+        r = size // 2 - 1
+
+        # 主体：径向渐变模拟球体光泽（逐像素）
+        for y in range(size):
+            for x in range(size):
+                dx, dy = x - cx, y - cy
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist > r:
+                    continue
+                # 越靠近左上越亮，越靠近右下越暗
+                nx = (dx / r + 1) / 2
+                ny = (dy / r + 1) / 2
+                t = (nx * 0.3 + ny * 0.7)
+                c = tuple(int(light[i] + (dark[i] - light[i]) * t) for i in range(3))
+                img.putpixel((x, y), c + (255,))
+
+        # 高光（左上小椭圆）
+        hl_w, hl_h = size * 0.40, size * 0.28
+        hl_x = cx - size * 0.12 - hl_w / 2
+        hl_y = cy - size * 0.22 - hl_h / 2
+        draw.ellipse([hl_x, hl_y, hl_x + hl_w, hl_y + hl_h], fill=(255, 255, 255, 160))
+
+        # 阴影（右下小椭圆）
+        sh_w, sh_h = size * 0.35, size * 0.22
+        sh_x = cx + size * 0.10 - sh_w / 2
+        sh_y = cy + size * 0.20 - sh_h / 2
+        draw.ellipse([sh_x, sh_y, sh_x + sh_w, sh_y + sh_h], fill=(0, 0, 0, 60))
+
+        # 外圈细描边
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, 45), width=1)
+
+        # hover 时绘制符号
+        if hover:
+            from PIL import ImageFont
+            try:
+                font = ImageFont.truetype("segoeui.ttf", size=int(size * 0.55))
+            except Exception:
+                font = ImageFont.load_default()
+            bbox = draw.textbbox((0, 0), symbol, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            tx, ty = cx - tw / 2, cy - th / 2 - bbox[1] * 0.1
+            draw.text((tx, ty), symbol, font=font, fill=(60, 60, 60, 200))
+
+        return ImageTk.PhotoImage(img)
+
     def _create_traffic_light_button(self, parent, color, hover_color, symbol, command):
         """创建一个 macOS 风格交通灯按钮"""
-        size = 14
+        size = 16
+        scale = 2
+        img_size = size * scale
         canvas = tk.Canvas(parent, width=size, height=size, bg=COLORS["bg"], highlightthickness=0)
-        cid = canvas.create_oval(1, 1, size - 1, size - 1, fill=color, outline="")
-        text_id = canvas.create_text(
-            size // 2, size // 2,
-            text=symbol,
-            fill="#4a4a4a",
-            font=(_FONT, 8, "bold"),
-            state=tk.HIDDEN,
-        )
+
+        normal_img = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=False)
+        hover_img = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=True)
+
+        # 保持引用避免被回收
+        canvas.normal_img = normal_img
+        canvas.hover_img = hover_img
+
+        cid = canvas.create_image(size // 2, size // 2, image=normal_img)
 
         def on_enter(_):
-            canvas.itemconfig(cid, fill=hover_color)
-            canvas.itemconfig(text_id, state=tk.NORMAL)
+            canvas.itemconfig(cid, image=hover_img)
 
         def on_leave(_):
-            canvas.itemconfig(cid, fill=color)
-            canvas.itemconfig(text_id, state=tk.HIDDEN)
+            canvas.itemconfig(cid, image=normal_img)
 
         canvas.bind("<Enter>", on_enter)
         canvas.bind("<Leave>", on_leave)
