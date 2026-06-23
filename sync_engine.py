@@ -360,8 +360,9 @@ class SyncEngine:
         except PermissionError as e:
             self._emit("⚠ 文件被锁定: {}".format(e))
         except Exception as e:
-            self.logger.error("同步异常: {}".format(e), exc_info=True)
-            report.errors.append("同步异常: {}".format(e))
+            err_msg = str(e) or repr(e) or type(e).__name__
+            self.logger.error("同步异常: {}".format(err_msg), exc_info=True)
+            report.errors.append("同步异常: {}".format(err_msg))
 
         finally:
             end_ts = time.time()

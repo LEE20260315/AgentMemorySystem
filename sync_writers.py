@@ -667,8 +667,10 @@ class GenericMarkdownWriter(BaseMemoryWriter):
 
             for mem in new_memories:
                 marker = "[sync:{}]".format(mem.id)
+                # 用内容第一行作为标题摘要，避免重复写入完整内容
+                first_line = mem.content.split("\n", 1)[0][:80]
                 entry = "\n---\n{} {} — 来自 {} ({})\n\n{}\n".format(
-                    marker, mem.content, mem.agent_id, mem.timestamp[:10], mem.content
+                    marker, first_line, mem.agent_id, mem.timestamp[:10], mem.content
                 )
                 content = content.rstrip() + entry
 
