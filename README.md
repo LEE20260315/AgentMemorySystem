@@ -25,9 +25,10 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 **AgentMemorySystem** 以一統之策，行「發現 → 提取 → 融合 → 寫回」四步，貫通各 Agent 記憶，使孤島成大陸。
 
 **設計之道：**
-- **本地為先** — 數據盡存本機，不上傳雲端
-- **跨裝置同步** — 藉 OneDrive 或任意同步目錄，多機共享
-- **即裝即用** — 單檔發佈，免 Python 環境
+
+- **本地為先** — 記憶與執行資料皆落於本機
+- **跨裝置同步** — 專案與 data/ 透過 OneDrive（或任意同步目錄）跨機同步；每台機器自己裝一份本地副本實際執行
+- **綠軟式體驗** — 一檔啟動器自動同步 + 開啟托盤常駐
 - **安全可靠** — 自動備份、衝突檢測、敏感詞過濾、一鍵回溯
 
 ## 特性
@@ -53,15 +54,27 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 
 ## 速覽
 
-### 其一：發佈版（推薦）
+### 其一：一鍵啟動器（推薦，跨裝置用）
 
-自 [Releases](https://github.com/LEE20260315/AgentMemorySystem/releases) 下載 `AgentMemorySync.exe`，雙擊即行。
+1. 將本專案放在你的 **OneDrive**（或任一同步目錄）下。
+2. 雙擊專案根目錄的 `AgentMemorySync.bat`。
 
-無需安裝 Python，諸依賴皆內置（約 18MB）。
+它會：
+
+- 將專案內的 `AgentMemorySync/` 分發包同步到 `%TEMP%\AgentMemorySync_Run\`
+- 設定 `AGENT_MEMORY_DATA_DIR` 指回專案的 `data/`（仍在 OneDrive 中），保證記憶跟著 OneDrive 跨機同步
+- 啟動本地副本並讓托盤常駐
+
+第一次用 `python build.py` 後還會同時建立桌面與開始功能表的捷徑。
+
+> **不要雙擊 `AgentMemorySync/` 裡的 EXE。** 啟動器是唯一指定進入點，目的是永遠從本地路徑跑程序，而不是從 OneDrive 直接跑。
+
+之後用 `python build.py` 重新打包的話，下次啟動 `AgentMemorySync.bat` 會自動刷新本地副本，無需手動複製。
 
 ### 其二：源碼執行
 
 **所需環境：**
+
 - Python 3.10+
 - Windows 10+ / Linux（GUI 需圖形環境）
 
@@ -86,7 +99,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 ## 架構
 
-```
+```text
 本機 Agent 記憶檔案（Claude / Hermes / Trae / ...）
     │
     ▼
@@ -107,6 +120,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 ```
 
 **分層之序：**
+
 - **核心層** (`agent_memory.py`) — SQLite 儲存、並發控制、備份、壓縮、健康檢查
 - **適配層** (`sync_writers.py`) — 各 Agent 寫回適配器
 - **編排層** (`sync_engine.py`) — 發現 → 提取 → 融合 → 寫回
@@ -143,6 +157,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v1.3.1** | 2026-06 | 跨裝置啟動器：OneDrive 分發包 + 本地副本 + OneDrive `data/` 綁定。托盤常駐恢復。 |
 | **v1.3** | 2026-06 | GUI + 系統匣、EXE 封裝、自動同步排程、通用 Agent 發現、CodePilot 支援、鎖檔案過期修復 |
 | **v1.2** | 2026-05 | 同步引擎、寫回適配器、SQLite 融合索引、OneDrive 衝突檢測 |
 | **v1.1** | 2026-05 | 配置管理系統、日誌系統、敏感資訊檢測、健康檢查、記憶過期機制 |

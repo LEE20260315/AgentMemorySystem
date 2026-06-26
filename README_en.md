@@ -25,10 +25,11 @@ Claude, Hermes, Trae, Cursor, CodePilot — each AI agent keeps its own memory, 
 **AgentMemorySystem** unifies them through a four-step pipeline: **Discover → Extract → Merge → Write Back**.
 
 **Design Principles:**
-- **Local-first** — All data stays on your machine, no cloud dependency
-- **Cross-device sync** — Via OneDrive or any sync folder
-- **Zero-config** — single-file release, no Python required
-- **Safe & reliable** — auto-backup, conflict detection, sensitive info filtering, one-click rollback
+
+- **Local-first** — Memory and runtime data stay on your machine.
+- **Cross-device sync** — Sync the project & data through OneDrive (or any sync folder); the running process locally on each machine is a freshly installed runtime copy.
+- **Green-software style UX** — One-click Windows launcher handles sync + run.
+- **Safe & reliable** — Auto-backup, conflict detection, sensitive info filtering, one-click rollback.
 
 ## Features
 
@@ -53,11 +54,22 @@ Claude, Hermes, Trae, Cursor, CodePilot — each AI agent keeps its own memory, 
 
 ## Quick Start
 
-### Option 1: Pre-built Release (Recommended)
+### Option 1: One-click Launcher (Recommended, cross-device)
 
-Download `AgentMemorySync.exe` from [Releases](https://github.com/LEE20260315/AgentMemorySystem/releases) and double-click to run.
+1. Make sure the project lives under your **OneDrive** (or any sync folder) on your machine.
+2. Double-click `AgentMemorySync.bat` in the project root.
 
-No Python installation required. All dependencies bundled (~18MB).
+It will:
+
+- Sync the OneDrive `AgentMemorySync/` distribution bundle to your local `%TEMP%\AgentMemorySync_Run\`.
+- Set `AGENT_MEMORY_DATA_DIR` to point at the project's `data/` (still OneDrive) so your memories keep syncing across machines.
+- Launch the local runtime copy with the system tray resident.
+
+A desktop and start-menu shortcut are also created the first time you run `python build.py`.
+
+> **Do not double-click the EXE inside `AgentMemorySync/`.** The launcher is the only intended entry point so that the actual program always runs locally instead of from OneDrive.
+
+If you `rebuild` with `python build.py`, the next launch of `AgentMemorySync.bat` automatically refreshes the local runtime copy — no manual copying needed.
 
 ### Option 2: Run from Source
 
@@ -145,6 +157,7 @@ See `config.json` in the repository for the full configuration reference.
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v1.3.1** | 2026-06 | Cross-device launcher: OneDrive bundle + local runtime copy + OneDrive `data/` binding. System tray restored. |
 | **v1.3** | 2026-06 | GUI + system tray, EXE packaging, auto-sync scheduler, generic agent discovery, CodePilot support, lock file expiry fix |
 | **v1.2** | 2026-05 | Sync engine, write-back adapters, SQLite fusion index, OneDrive conflict detection |
 | **v1.1** | 2026-05 | Config management, logging system, sensitive info detection, health checks, memory expiry |

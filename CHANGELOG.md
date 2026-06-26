@@ -1,13 +1,55 @@
-# Changelog
+﻿# Changelog
 
 本项目的所有重要变更都记录在此文件中。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [v1.3.1] - 2026-06-25
 
 ### Fixed
+- 恢复并稳态化系统托盘常驻：跨设备启动器在每台机器上把 OneDrive 里的 `AgentMemorySync/` 分发包同步到 `%TEMP%\AgentMemorySync_Run\`，本地副本启动，从此避免直接从 OneDrive 目录运行 EXE 触发 `Shell_NotifyIconW` 失败
+- `_data_dir()` 升级支持 `AGENT_MEMORY_DATA_DIR` 环境变量优先：跨设备启动器把数据目录显式绑定回 OneDrive 项目的 `data/` 子目录，保证本地副本与 OneDrive 数据真正共用
+- `build.py` 同步 OneDrive 分发包时遇到 OneDrive 句柄锁导致 `WinError 183`：增加 `_safe_remove_dir()` 重命名兜底，让旧分发包稳定被替换，不再出现"打包失败"
+- 跨设备启动器原计划包含中文提示，遇到编码问题；改为纯 ASCII + 显式变量回显，兼容 Windows 老版本 cmd.exe 与 ISE
+
+### Changed
+- `build.py` 流程改造：先构建到本地 Temp，再拷贝一份干净的 `AgentMemorySync/` 同步到项目根目录供 OneDrive 分发，最后安装一份到 `%TEMP%\AgentMemorySync_Run\` 作为本地运行副本
+- 编写并提交跨设备启动器 `AgentMemorySync.bat`，仅作为项目唯一用户入口（双击即可在任意设备运行；不直接运行 OneDrive 包内 EXE）
+
+### Removed
+- 移除本轮排查遗留的本地日志（`bootstrap.log` / `early_boot.log` / `build_v3.txt` / `test_output.txt` / `$null` 等）和多个临时构建目录（`build_output/`、`AgentMemorySync.old_*/`）
+
+### Security / Privacy
+- 项目内不再附带任何用户路径、个人数据、real log：所有运行时数据写入 `.gitignore` 之外的 `data/`，不会进入 Git 仓库
+
+## [Unreleased]
+
+### Added
+
+- 新增 CodeBuddy Agent 检测支持（`~/.codebuddy/memery/*_memery.md`）
+- 新增 `safe_io.get_data_root()` 统一路径解析函数
+- 新增 `ConfirmDialog` 统一风格确认对话框（替代系统 messagebox）
+- 新增 `_copy_overwrite()` 构建后备方案（重命名失败时逐个复制文件）
+
+### Fixed
+
+- 修复 CodePilot SQLite 读取失败：改用只读 URI 连接（`mode=ro&immutable=1`），不再与 CodePilot 进程争抢 WAL 锁
+- 修复 CodePilot MEMORY.md（230MB）可能被误读导致内存耗尽：超 1MB 时只读最后 512KB
+- 修复 `_data_dir()` 非打包模式下 `sys.executable` 指向 python.exe 导致数据写入 Python 安装目录
+- 修复 `sync_engine.rollback()` 引用不存在的 `self.report` 属性（改为 `self._last_report`）
+- 修复写回时 `backup_dir=None` 禁用了所有备份，导致回滚功能完全失效
+- 修复 `sync_engine` 在打包模式下 `Path(__file__).parent / "data"` 指向 _MEIPASS 临时目录
+- 修复 `SyncState` 在打包模式下 `Path.home()` 可能异常
+- 修复通知中 `agents_found`（不存在）改为 `agents_detected`（正确字段）
+- 修复 `__init__` 中 `load_settings()` 被调用两次
+- 修复 IMA Copilot（Chromium 壳）被误扫描导致同步缓慢
+- 修复 `agent_memory.py` 中 `\A` 无效转义序列警告
+- 修复 `agent_memory.py` 8.3 短路径 bug：`str.replace("~", str(home))` → `os.path.expanduser(pattern)`
+- 修复 `memory_sync_app.py` `_WILL_RELOCATE` 重置逻辑：迁移失败返回时重置为 `False`
+- 修复 `test_full.py` mock patch 目标：`patch.object(am, "detect_agents")` → `patch("sync_engine.detect_agents")`
+
+### Fixed (Earlier)
 
 - 修复 EXE 打包缺少 tkinter.ttk 导致启动崩溃（ImportError: cannot import name 'ttk'）
 - 修复托盘依赖安装：pythonw.exe 不支持 pip，改用同目录的 python.exe 安装
@@ -15,11 +57,11 @@
 - 修复 Agent 检测缓存被测试污染问题（test_detect_agents 写入全局缓存导致真实检测失败）
 - 修复 VBScript 启动器 UTF-8 编码问题（改用纯英文避免 Windows Script Host 解析失败）
 
-### Changed
+### Changed (Earlier)
 
 - 启动器重命名：`双击运行.bat` → `dev_run.bat`，`启动记忆同步.vbs` → `dev_run.vbs`（仅开发用）
 
-### Added
+### Added (Earlier)
 
 - CodePilot Agent 支持：自动检测 `~/.codepilot/codepilot.db`，从 SQLite 导出对话历史为 Markdown
 - 导出时自动过滤敏感信息（API 密钥、密码、token 等），8 种模式脱敏
@@ -29,7 +71,7 @@
 - 同步日志显示各阶段路径：融合层目录、Agent 源路径、共享数据库、写回目标
 - 定时自动同步调度器：基于 `auto_interval_hours` 设置自动触发同步
 
-### Changed
+### Changed (Earlier)
 
 - EXE 输出位置从 `dist/` 改为项目根目录
 - 打包后自动清理 `build/`、`dist/`、`*.spec` 临时文件
@@ -135,3 +177,4 @@
 - 设备配置文件 (`device_config.json`)
 - 一次性部署脚本 (`_apply_onedrive_changes.py`)
 - 5 个测试用例 (`test_memory.py`)
+

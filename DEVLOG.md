@@ -1,5 +1,87 @@
 # 开发日志
 
+## 2026-06-25：v1.3.1 跨设备启动器 + 本地副本 + OneDrive data 绑定（收官）
+
+### 背景
+
+之前一直在尝试「OneDrive 路径直接跑 EXE」或「EXE 自己迁移到本地复跑」，但环境很容易触发：
+- `Shell_NotifyIconW add=0 last_error=5`（托盘消失）
+- 数据被静默写到 `%TEMP%` 的副本目录里，Onedrive 共享数据反向变孤岛
+- `build.py` 在 `WinError 183` 上反复栽跟头。
+
+决定切换到「绿色软件式启动器」：项目根的 `AgentMemorySync.bat` 是唯一入口，复制本地副本后再启动。
+
+### 改动清单
+
+1. **build.py：分发包 + 本地副本 + 启动器三件套**
+   - 新增 `_sync_repo_bundle()` 把构建结果同步到 OneDrive 项目的 `AgentMemorySync/`
+   - 新增 `_write_repo_launcher()` 生成纯 ASCII `AgentMemorySync.bat`
+   - 新增 `_safe_remove_dir()` 兼容 OneDrive 锁目录（重命名兜底）
+2. **memory_sync_app.py：把数据目录绑定到 OneDrive**
+   - `_data_dir()` 增加 `AGENT_MEMORY_DATA_DIR` 环境变量优先
+   - 保证 BAT 启动的子进程在 OneDrive 的 `data/` 里真正写数据
+3. **MEMORY_SYNC_APP.bat**
+   - robocopy 同步 → 检查时间戳 → 设置 env → start 启动本地副本
+4. **清理**
+   - 删除调试残留：`bootstrap.log` `early_boot.log` `build_v3.txt` `test_output.txt` `$null`
+   - 删除所有 `build_output*` 与 `AgentMemorySync.old_*` 临时目录
+5. **文档**
+   - pyproject.toml: 1.3 → 1.3.1
+   - CHANGELOG：新增 v1.3.1，删除过期的 Known Issues / UI RectButton / onefile 等条目
+   - README/READMEN_CN：跨设备启动模型改成「OneDrive + 本地副本 + BAT 启动器」
+   - docs/cross-device-launcher-v1.3.1-closeout.md：经验教训总文档
+
+### 验证
+
+- `python build.py` 三件套全部产出：
+  - `[OneDrive 包]\AgentMemorySync/`
+  - `[本地运行副本]%TEMP%\AgentMemorySync_Run\`
+  - `[跨设备启动器]AgentMemorySync.bat`
+- BAT 双击验证：
+  - 进程从 `%TEMP%\AgentMemorySync_Run\AgentMemorySync.exe` 启动
+  - `Shell_NotifyIconW add=1 last_error=0`
+  - OneDrive `data/tray_error.log` 写入成功
+  - `_data_dir() = <OneDrive>\data`
+
+失败教训见 [docs/cross-device-launcher-v1.3.1-closeout.md](docs/cross-device-launcher-v1.3.1-closeout.md)
+
+## 2026-06-23：UI 重构 + Agent 检测优化 + 跨设备适配 + Bug 修复
+
+### 背景
+
+用户要求 4 项改进：UI 矩形按钮化、Agent 检测与内存管理优化、跨设备部署适配、项目结构整理。
+同时要求项目根目录有可直接启动的 EXE，并顺手修复发现的 Bug。
+
+### 改动清单
+
+1. **UI 重构**：`RoundedButton` → `RectButton`（矩形直角），新增 `ConfirmDialog` 替代 `messagebox`
+2. **Agent 检测优化**：
+   - 新增 `codebuddy` 检测 profile
+   - 修复 CodePilot SQLite 只读读取（`mode=ro&immutable=1`）
+   - 排除 IMA Copilot 等 Chromium 壳目录
+   - 记忆文件扫描增加 10MB 大小限制
+3. **跨设备适配**：
+   - 新增 `safe_io.get_data_root()` 统一路径解析
+   - `_ensure_local_install()` 迁移时传递 `AGENT_MEMORY_DATA_DIR` 环境变量
+   - 修复非打包模式下数据写入 Python 安装目录的 Bug
+4. **Bug 修复（共 10 个）**：
+   - `sync_engine.rollback()` 引用不存在的 `self.report`
+   - 写回时 `backup_dir=None` 禁用了所有备份
+   - 打包模式下 `Path(__file__).parent` 指向 _MEIPASS 临时目录
+   - `SyncState` 在打包模式下 `Path.home()` 异常
+   - 通知中 `agents_found` → `agents_detected`
+   - `load_settings()` 重复调用
+   - `\A` 无效转义序列
+   - 等等
+5. **build.py**：改用 `--onefile` 模式，EXE 输出到项目根目录
+
+### 测试结果
+
+- Agent 检测：hermes, trae, codepilot, codebuddy 全部正确发现
+- CodePilot 导出：87 条对话成功导出（只读模式不再锁定）
+- 路径解析：开发和打包模式均正确指向 `data/` 目录
+- Writer 注册：codebuddy/codepilot 均能获取正确 writer
+
 ## 2026-06-12：系统鲁棒性强化
 
 ### 背景
@@ -1114,3 +1196,282 @@ data/
 
 - `python test_memory.py`：129/129 通过
 - EXE 重新打包：19.4 MB
+
+---
+
+## 2026-06-15：README 风格重构 + Banner 本地化
+
+### 背景
+
+准备开源发布，需要提升 README 视觉风格。同时原 banner 依赖外网加载，需改为本地资源。
+
+### 改动清单
+
+#### 1. README 静谧文人风格重构
+
+**文件**：`README.md`、`README_en.md`、`.gitignore`
+
+**改了什么**：
+- 重构中英文 README 为静谧文人风格（水墨/印章主题）
+- 替换横幅为印章风格
+- `.gitignore` 新增相关忽略项
+
+#### 2. 水墨风格 Banner
+
+**文件**：`docs/assets/banner-ink.jpg`、`docs/assets/banner-prompt.md`
+
+**改了什么**：
+- 新增水墨风格主题横幅 `banner-ink.jpg`（176KB）
+- 记录 banner 生成提示词到 `banner-prompt.md`
+
+#### 3. Banner 改为本地 SVG
+
+**文件**：`docs/assets/banner-ink.svg`、`README.md`、`README_en.md`
+
+**问题**：`banner-ink.jpg` 体积大（176KB），且 JPG 不适合矢量图形。
+
+**改了什么**：
+- 用 SVG（6.7KB）替换 JPG，体积减少 96%
+- README 中引用改为本地路径，无需外网加载
+
+---
+
+## 2026-06-18：UI 大改版 + EXE 打包优化
+
+### 背景
+
+用户对 GUI 外观不满意，要求改为 macOS 风格无边框窗口。同时修复多个 UI 问题和打包问题。
+
+### 改动清单
+
+#### 1. 托盘点击崩溃 + 设置保存修复
+
+**文件**：`memory_sync_app.py`、`sync_engine.py`、`sync_writers.py`、`agent_memory.py`、`build.py`
+
+**问题**：
+- 托盘右键菜单点击崩溃
+- 设置修改后不保存
+- 本地安装检测逻辑有误
+
+**改了什么**：
+- 重构 `memory_sync_app.py`（+1217 行），修复托盘交互逻辑
+- `sync_engine.py` 新增 72 行，增强同步引擎
+- `sync_writers.py` 新增 200 行，改进写回适配器
+- `build.py` 重构打包脚本（+140 行）
+
+#### 2. 高清图标重绘
+
+**文件**：`assets/app_icon.ico`、`assets/app_icon.png`、`assets/tray_icon.png`、`assets/tray_icon_64.png`
+
+**改了什么**：
+- 使用 Heroicons 风格重绘高清高对比度图标
+- 简化通知标题与消息
+- 图标从模糊的低分辨率升级为清晰的高清版本
+
+#### 3. Mac 风格无边框主窗口
+
+**文件**：`memory_sync_app.py`
+
+**改了什么**：
+- 实现 macOS 风格无边框窗口（`overrideredirect(True)`）
+- 白底黑灰图标配色
+- 圆角胶囊按钮样式
+- 自定义标题栏（可拖拽、交通灯按钮）
+
+#### 4. 交通灯按钮 + UI 细节修复
+
+**文件**：`memory_sync_app.py`、`build.py`
+
+**问题**：
+- 交通灯按钮显示为圆形而非方形
+- 按钮文字被截断
+- 按钮配色不协调
+
+**改了什么**：
+- 交通灯改为方形显示（红黄绿）
+- 按钮宽度自适应，避免截断
+- 柔和 Mac 配色方案
+- 立体交通灯效果
+
+#### 5. build.py 输出到 Temp 目录
+
+**文件**：`build.py`
+
+**问题**：OneDrive 同步锁定导致 PyInstaller 打包失败。
+
+**改了什么**：
+- 打包输出改为系统 Temp 目录（`%TEMP%`）
+- 避免 OneDrive 文件锁定问题
+- 打包完成后再复制到项目目录
+
+---
+
+## 2026-06-23：系统运行状态确认
+
+### 背景
+
+用户确认系统目前可以正常运行，系统托盘图标功能正常。存在一些非阻塞性 BUG 待后续修复。
+
+### 当前状态
+
+- GUI 正常启动
+- 系统托盘图标显示正常
+- 核心同步功能可用
+- 存在已知 BUG（待记录和修复）
+
+### 文件变更汇总（6/15 - 6/23）
+
+| 日期 | 文件 | 变更说明 |
+|------|------|----------|
+| 06-15 | `README.md`、`README_en.md` | 静谧文人风格重构 |
+| 06-15 | `docs/assets/banner-ink.jpg` | 水墨风格横幅（后被 SVG 替代） |
+| 06-15 | `docs/assets/banner-ink.svg` | 本地 SVG 横幅（6.7KB） |
+| 06-15 | `.gitignore` | 新增忽略项 |
+| 06-18 | `memory_sync_app.py` | UI 大改版：无边框窗口、交通灯、胶囊按钮 |
+| 06-18 | `build.py` | 输出到 Temp 目录，避免 OneDrive 锁定 |
+| 06-18 | `sync_engine.py` | 同步引擎增强 |
+| 06-18 | `sync_writers.py` | 写回适配器改进 |
+| 06-18 | `agent_memory.py` | 小幅修改 |
+| 06-18 | `assets/*` | 高清图标重绘（Heroicons 风格） |
+
+---
+
+## 2026-06-23：系统托盘图标丢失排查与修复（未完成，转交其他 Agent）
+
+### 背景
+
+用户反馈系统托盘图标消失，要求排查并修复。以下是完整的排查过程和经验教训。
+
+### 已完成的修复
+
+#### 1. `_WILL_RELOCATE` 标志逻辑修复
+
+**文件**：`memory_sync_app.py`（约 2270-2284 行）
+
+**根因分析**：
+当 EXE 位于 OneDrive 目录时，`_WILL_RELOCATE = True` 被设置。随后调用 `_ensure_local_install()` 尝试迁移到本地目录。如果迁移成功，进程会退出并在新位置重启。但如果迁移失败（返回而不是 `sys.exit()`），`_WILL_RELOCATE` 仍为 `True`，导致后续托盘图标创建逻辑被跳过（因为代码认为"即将迁移，不需要创建托盘"）。
+
+**修复代码**：
+```python
+# memory_sync_app.py 约第 2279-2284 行
+# 如果迁移失败（_ensure_local_install 返回而不是退出），
+# _WILL_RELOCATE 仍为 True，会导致托盘图标无法创建。
+# 这里重置为 False，允许后续创建托盘图标。
+if _WILL_RELOCATE:
+    _reloc_log("relocate returned (not exited), resetting _WILL_RELOCATE to False")
+    _WILL_RELOCATE = False
+```
+
+#### 2. `agent_memory.py` 8.3 短路径 Bug 修复
+
+**文件**：`agent_memory.py`（约第 4768 行）
+
+**根因**：`pattern.replace("~", str(home))` 会将 Windows 8.3 短路径中的 `~` 也替换掉（如 `MR7FF0~1.DON` 变成 `MR7FF0C:\Users\MR.Dong.DON`），导致路径损坏。
+
+**修复**：改用 `os.path.expanduser(pattern)`，只替换开头的 `~`。
+
+#### 3. `test_full.py` Mock 修补目标修正
+
+**文件**：`test_full.py`（约第 786 行）
+
+**根因**：`patch.object(am, "detect_agents")` 修补的是 `am.detect_agents`，但 `sync_engine` 模块有自己的 `from agent_memory import detect_agents` 导入，修补 `am` 不影响 `sync_engine` 的引用。
+
+**修复**：改为 `patch("sync_engine.detect_agents")`，修补模块级别的引用。
+
+#### 4. `build.py` 构建流程优化
+
+**文件**：`build.py`
+
+**改动**：
+- 移除 `--clean` 标志（PyInstaller 的 COLLECT 步骤总是尝试清理输出目录，与 `--clean` 无关）
+- 使用临时输出目录 `build_output` 避免 OneDrive 锁定冲突
+- `_safe_clean()` 改为重命名而非删除（Windows 可重命名含锁定文件的目录）
+- 新增 `_copy_overwrite()` 作为重命名失败时的后备方案（逐个复制文件，跳过锁定的）
+
+### 当前状态：托盘图标仍然不显示
+
+**用户确认**：上述修复后重新构建 EXE 并替换，但托盘图标仍然不显示。
+
+### 未排查的方向（供后续 Agent 参考）
+
+#### 关键疑点 1：`_ensure_local_install()` 是否真的返回？
+
+- 如果 `_ensure_local_install()` 成功迁移并 `sys.exit()`，则整个进程终止，在新位置重启
+- 此时新进程中 `_WILL_RELOCATE` 应为 `False`（新路径不在 OneDrive）
+- 但如果迁移路径计算有误（8.3 短路径等），可能导致迁移反复失败或死循环
+
+**排查建议**：检查迁移日志文件 `_RELOC_LOG`（通常在 `~/.agent_memory/relocate.log` 或类似位置），确认 `_ensure_local_install()` 的实际行为。
+
+#### 关键疑点 2：托盘图标创建流程是否完整执行？
+
+**排查建议**：在 `_create_tray_icon()` 函数中添加详细日志，记录：
+1. 是否进入该函数
+2. `_WILL_RELOCATE` 的值
+3. 图标文件路径是否存在
+4. `Shell_NotifyIconW` 调用的返回值
+5. pystray.Icon 创建是否成功
+6. 任何异常信息
+
+#### 关键疑点 3：Windows Shell_NotifyIconW API 调用是否成功？
+
+**排查建议**：
+- `Shell_NotifyIconW` 需要 `NIM_ADD`（0x0）操作添加图标
+- 检查 `NOTIFYICONDATAW` 结构体的各字段是否正确设置
+- 特别注意 `uFlags` 字段：必须包含 `NIF_ICON`（0x2）、`NIF_MESSAGE`（0x1）、`NIF_TIP`（0x4）
+- `hWnd` 必须是有效的窗口句柄
+- `uCallbackMessage` 必须是有效的消息 ID
+- **Windows 11** 可能需要 `SetCurrentProcessExplicitAppUserModelID` 才能让托盘图标显示
+
+#### 关键疑点 4：EXE 在 OneDrive 中的权限问题
+
+**排查建议**：
+- OneDrive 同步可能给文件添加特殊属性或权限
+- 尝试将 EXE 复制到非 OneDrive 目录（如 `C:\AgentMemorySync\`）运行
+- 检查 EXE 是否有数字签名或被 Windows SmartScreen 拦截
+
+#### 关键疑点 5：pystray 与 Windows 兼容性
+
+**排查建议**：
+- pystray 在 Windows 上使用 `Shell_NotifyIconW` API
+- 检查 pystray 版本是否与当前 Python 版本兼容
+- 检查是否有其他进程占用托盘图标位置
+- 尝试使用 `ctypes` 直接调用 `Shell_NotifyIconW` 而不通过 pystray
+
+### 构建与部署的经验教训
+
+#### OneDrive 文件锁定问题
+
+- **现象**：PyInstaller 的 `COLLECT` 步骤在 `_make_clean_directory()` 中调用 `_rmtree()` 删除旧输出目录，如果 OneDrive 锁定了目录中的 `.log` 文件，会报 `PermissionError: [WinError 32]`
+- **根本原因**：不是 `--clean` 标志的问题（COLLECT 总是会清理），而是旧 EXE 运行时产生的日志文件被 OneDrive 同步锁定
+- **解决方法**：先构建到临时目录 `build_output`，再手动移动到最终位置
+- **移动失败时的后备**：逐个复制文件，跳过被锁定的文件（`_copy_overwrite()`）
+- **注意**：如果旧 EXE 正在运行，必须先终止进程（`taskkill /F /IM AgentMemorySync.exe`）
+
+#### PyInstaller onedir vs onefile
+
+- **onefile 模式**：EXE 启动时会解压到临时目录，Windows 8.3 短路径会导致路径中包含 `~1`，与 Python 的 `str.replace("~", ...)` 冲突
+- **onedir 模式**：EXE 和依赖在同一个目录，不涉及临时解压路径问题
+- **当前使用 onedir 模式**：输出为 `AgentMemorySync/` 目录（含 `AgentMemorySync.exe` + `_internal/`）
+
+#### Windows 8.3 短路径
+
+- **现象**：`C:\Users\MR.DONG\OneDrive\...` 在某些 API 中可能显示为 `C:\Users\MR7FF0~1.DON\OneDrive\...`
+- **风险**：任何 `str.replace("~", ...)` 操作都会把短路径中的 `~` 也替换掉
+- **正确做法**：使用 `os.path.expanduser()` 只替换开头的 `~`
+
+### 文件变更汇总
+
+| 文件 | 变更说明 |
+|------|----------|
+| `memory_sync_app.py` | 新增 `_WILL_RELOCATE` 重置逻辑（约2279-2284行） |
+| `agent_memory.py` | 修复 8.3 短路径 bug：`replace("~")` → `os.path.expanduser()` |
+| `test_full.py` | 修复 mock patch 目标：`am.detect_agents` → `sync_engine.detect_agents` |
+| `build.py` | 临时输出目录 + `_safe_clean()` 重命名 + `_copy_overwrite()` 后备 |
+
+### 待后续 Agent 完成的任务
+
+1. **排查托盘图标不显示的真正原因** — 上述修复不足以解决问题，需要深入排查
+2. **添加详细的托盘图标调试日志** — 在关键位置添加日志输出
+3. **测试非 OneDrive 目录运行** — 将 EXE 复制到本地目录测试
+4. **清理 AppData 中旧 EXE 残留** — `C:\Users\MR.Dong\AppData\Local\AgentMemorySystem\App\` 下可能有旧版本
+5. **运行 test_full.py** — 确认 108 个测试全部通过
