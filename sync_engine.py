@@ -24,6 +24,7 @@ from agent_memory import (
     detect_agents, extract_local_to_fused, get_config, get_logger,
     get_loaded_context, load_private_memories, startup,
 )
+from safe_io import get_data_root
 from sync_writers import (
     SyncState, WriteBackResult, backup_file, get_writer,
     rollback_last_sync,
@@ -170,18 +171,25 @@ class SyncEngine:
         self.config = config or get_config()
         self.logger = get_logger()
         self.on_progress = on_progress or (lambda msg: None)
-        self.sync_state = SyncState()
 
         # 确定 OneDrive 融合层根目录
         memory_root = self.config.get("paths.memory_root", None)
         if memory_root and memory_root != "auto":
             self.root = Path(memory_root)
         else:
-            self.root = Path(__file__).parent / "data"
+            # 统一使用 get_data_root()，兼容开发模式和打包模式
+            self.root = get_data_root()
         self.root.mkdir(parents=True, exist_ok=True)
 
-        # 备份目录
-        self.backup_dir = self.root / ".sync_backups" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        # 去重状态：与数据目录同级
+        self.sync_state = SyncState(state_path=self.root / ".sync_state.json")
+
+        # 备份目录（使用本地 TEMP，避免 OneDrive 锁定）
+        import tempfile
+        self.backup_dir = Path(tempfile.gettempdir()) / "AgentMemorySync_backups" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+        # 保存最近一次同步报告（供 rollback 使用）
+        self._last_report: Optional[SyncReport] = None
 
     def _emit(self, msg: str):
         """发送进度消息"""
@@ -325,12 +333,12 @@ class SyncEngine:
                 self._emit("写回 {}: {} 条共享记忆".format(agent_id, len(shared_memories)))
 
                 writer = get_writer(agent_id, self.sync_state)
-                # 临时禁用备份，避免备份到受监控目录触发 Permission denied
+                # 启用备份（使用本地 TEMP 目录，不受 OneDrive 锁定影响）
                 wb_result = writer.write(
                     agent_id=extract_id,
                     target_path=target_path,
                     memories=shared_memories,
-                    backup_dir=None,
+                    backup_dir=self.backup_dir,
                 )
                 report.writeback_results[agent_id] = wb_result
                 report.total_written += wb_result.written
@@ -370,6 +378,13 @@ class SyncEngine:
             report.duration_seconds = end_ts - start_ts
 
         self._emit("同步完成, 耗时 {:.1f} 秒".format(report.duration_seconds))
+
+        # 保存报告供 rollback 使用
+        self._last_report = report
+
+        # 写入备份日志（供 rollback 查找目标路径）
+        self._write_backup_log()
+
         return report
 
     def _load_shared_memories(self, agent_id: str) -> list:
@@ -394,6 +409,25 @@ class SyncEngine:
 
         return memories
 
+    def _write_backup_log(self):
+        """写入备份日志（供 rollback 查找原始文件路径）"""
+        if not self.backup_dir.exists():
+            return
+        import json
+        log_data = []
+        for bak_file in self.backup_dir.glob("*.bak"):
+            log_data.append({
+                "backup_name": bak_file.name,
+                "backup_path": str(bak_file),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        log_file = self.backup_dir / "backup_log.json"
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                json.dump(log_data, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            self.logger.warning("写入备份日志失败: {}".format(e))
+
     def rollback(self) -> int:
         """
         回滚上次同步
@@ -403,53 +437,77 @@ class SyncEngine:
         int
             成功回滚的文件数
         """
-        if not self.backup_dir.exists():
-            # 找最近的备份目录
-            backups_root = self.root / ".sync_backups"
-            if not backups_root.exists():
-                self._emit("没有找到任何备份")
-                return 0
+        import shutil
 
-            backup_dirs = sorted(backups_root.iterdir(), reverse=True)
-            if not backup_dirs:
-                self._emit("备份目录为空")
-                return 0
+        # 查找最近的备份目录
+        backups_root = Path(shutil.__dict__.get("_backups_root", ""))
+        # 备份在 TEMP 目录
+        import tempfile
+        backups_root = Path(tempfile.gettempdir()) / "AgentMemorySync_backups"
 
-            self.backup_dir = backup_dirs[0]
+        if not backups_root.exists():
+            self._emit("没有找到任何备份目录")
+            return 0
 
+        backup_dirs = sorted(backups_root.iterdir(), reverse=True)
+        if not backup_dirs:
+            self._emit("备份目录为空")
+            return 0
+
+        self.backup_dir = backup_dirs[0]
         self._emit("回滚备份: {}".format(self.backup_dir))
 
-        # 构建 {备份文件名: 目标路径} 映射
-        target_files = {}
-        for bak_file in self.backup_dir.glob("*.bak"):
-            # 文件名格式: agent_id__filename.bak
-            name = bak_file.stem  # 去掉 .bak
-            # 尝试从写回结果中找到原始路径
-            for agent_id, wb in self.report.writeback_results.items() if hasattr(self, 'report') else []:
-                if name.replace("__", "_").startswith(agent_id):
-                    target_files[bak_file.name] = Path(wb.target_path) / name.split("__", 1)[-1]
+        # 读取备份日志获取目标路径映射
+        import json
+        log_file = self.backup_dir / "backup_log.json"
 
-        # 简单回滚：直接复制所有 .bak 文件回去
-        import shutil
+        # 构建目标路径映射：优先从 _last_report 获取
+        target_map = {}
+        if self._last_report:
+            for agent_id, wb in self._last_report.writeback_results.items():
+                # 备份文件名格式: <filename>.bak
+                # 目标路径: wb.target_path 下的对应文件
+                target_path = Path(wb.target_path)
+                # 遍历备份目录中的 .bak 文件，尝试匹配
+                for bak_file in self.backup_dir.glob("*.bak"):
+                    original_name = bak_file.stem  # 去掉 .bak
+                    candidate = target_path / original_name
+                    if candidate.exists() or True:  # 记录所有可能的映射
+                        target_map[bak_file.name] = str(candidate)
+
+        # 从备份日志补充映射
+        if log_file.exists():
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    log_data = json.load(f)
+                for entry in log_data:
+                    bak_name = entry.get("backup_name", "")
+                    if bak_name and bak_name not in target_map:
+                        # 尝试从文件名推断目标路径
+                        original_name = bak_name.replace(".bak", "")
+                        # 从 _last_report 查找匹配的 target_path
+                        if self._last_report:
+                            for agent_id, wb in self._last_report.writeback_results.items():
+                                target_path = Path(wb.target_path)
+                                candidate = target_path / original_name
+                                target_map[bak_name] = str(candidate)
+                                break
+            except (json.JSONDecodeError, OSError) as e:
+                self._emit("读取备份日志失败: {}".format(e))
+
         restored = 0
         for bak_file in self.backup_dir.glob("*.bak"):
-            # 从文件名推断目标
-            # 这里简化处理：用户可以手动指定
+            target_str = target_map.get(bak_file.name)
+            if not target_str:
+                self._emit("跳过 {} (无法确定目标路径)".format(bak_file.name))
+                continue
+            target = Path(target_str)
             try:
-                # 读取备份日志
-                log_file = self.backup_dir / "backup_log.json"
-                if log_file.exists():
-                    import json
-                    with open(log_file, "r", encoding="utf-8") as f:
-                        log_data = json.load(f)
-                    for entry in log_data:
-                        if entry.get("backup_name") == bak_file.name:
-                            target = Path(entry["target_path"])
-                            shutil.copy2(str(bak_file), str(target))
-                            self._emit("回滚: {} → {}".format(bak_file.name, target))
-                            restored += 1
-                            break
-            except Exception as e:
+                if target.exists() or target.parent.exists():
+                    shutil.copy2(str(bak_file), str(target))
+                    self._emit("回滚: {} → {}".format(bak_file.name, target))
+                    restored += 1
+            except OSError as e:
                 self._emit("回滚 {} 失败: {}".format(bak_file.name, e))
 
         self._emit("回滚完成, 恢复 {} 个文件".format(restored))

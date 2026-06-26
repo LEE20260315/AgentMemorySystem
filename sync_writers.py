@@ -52,7 +52,9 @@ class SyncState:
 
     def __init__(self, state_path: Path = None):
         if state_path is None:
-            state_path = Path.home() / ".agent_memory" / ".sync_state.json"
+            # 默认存放在数据根目录（兼容开发和打包模式）
+            from safe_io import get_data_root
+            state_path = get_data_root() / ".sync_state.json"
         self.state_path = Path(state_path)
         self.state = self._load()
 
@@ -740,6 +742,7 @@ WRITER_REGISTRY = {
     "trae-appdata": TraeMemoryWriter,
     "hermes": HermesMemoryWriter,
     "hermes-appdata": HermesMemoryWriter,
+    "codebuddy": GenericMarkdownWriter,
 }
 
 

@@ -4765,7 +4765,7 @@ def detect_agents(
 
         # 遍历候选路径
         for pattern in profile.get("candidate_paths", []):
-            path = Path(pattern.replace("~", str(home))).expanduser()
+            path = Path(os.path.expanduser(pattern))
             if _verify_agent_signature(path, profile):
                 memory_files = []
 
@@ -4827,20 +4827,37 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
         "cline", "continue", "aider", "roo", "codex", "devin", "replit",
         "tabby", "supermaven", "codeium", "mentat", "openhands",
         "sweep", "factory", "magic", "augment", "poolside", "codepilot",
+        "codebuddy", "ima",
     ]
 
-    # 排除的目录名（非 Agent 工具）
+    # 排除的目录名（非 Agent 工具，或已知浏览器壳应用）
     exclude_names = {
         "microsoft", "google", "mozilla", "discord", "slack", "spotify",
         "obsidian", "notion", "figma", "docker", "node", "npm", "pip",
         "python", "java", "rust", "go", "dotnet", "nuget", "pipx",
         "windows", "temp", "cache", "crashdumps", "logs",
+        # Chromium 壳应用（含 AI 关键词但实为浏览器，无 .md 记忆文件）
+        "ima.copilot", "codepilot-updater", "codebuddyextension",
+        # Chromium 内部目录
+        "user data", "application", "extensions_crx_cache",
+        "component_crx_cache", "shadercache", "graphitedawncache",
+        "grshadercache", "crashpad", "bugly", "imsdk", "reshub",
+        "imainfo", "recording", "widevinecdm", "safe browsing",
+        "firstpartysetspreloaded", "optimizationhints", "orig trials",
+        "pkimetadata", "trusttokenkeycommitments", "wasmttsengine",
+        "zxcvbndata", "meipreload", "ondeviceheadsuggestmodel",
+        "privacyboxattestationspreloaded", "subresource filter",
+        "filetypepolicies", "captcha providers", "actorsafetylists",
+        "amountextractionheuristicregexes", "certificaterevocation",
+        "crowd deny", "hyphen-data", "rdelivery", "segmentation platform",
+        "safetytips", "sslassistant", "tdosconfig", "trust token",
+        "updateextensions", "key info",
     }
 
     detected_paths = {info["path"] for info in found.values()}
 
     for pattern, source in generic_candidates:
-        base = Path(pattern.replace("~", str(home))).expanduser()
+        base = Path(pattern).expanduser()
         if not base.exists():
             continue
         try:
@@ -4885,16 +4902,29 @@ def _scan_generic_memory_files(path: Path) -> list:
     memory_files = []
     candidates = ["MEMORY.md", "memory.md", "memories.md", "user_profile.md",
                    "USER.md", "user.md", ".aider.memory.md"]
+    max_file_size = 10 * 1024 * 1024  # 10MB 上限，避免误读超大文件
     for c in candidates:
         p = path / c
         if p.exists():
-            memory_files.append(str(p))
+            try:
+                if p.stat().st_size <= max_file_size:
+                    memory_files.append(str(p))
+                else:
+                    logger = get_logger()
+                    logger.debug("跳过超大记忆文件 ({}MB): {}".format(
+                        p.stat().st_size / 1024 / 1024, p))
+            except OSError:
+                pass
 
     # 也检查 memory/ 子目录
     mem_dir = path / "memory"
     if mem_dir.exists():
         for md in mem_dir.glob("*.md"):
-            memory_files.append(str(md))
+            try:
+                if md.stat().st_size <= max_file_size:
+                    memory_files.append(str(md))
+            except OSError:
+                pass
 
     return memory_files
 
@@ -4958,6 +4988,13 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
                 memory_files.append(str(topics_file))
             for proj_mem in mem_dir.glob("projects/*/project_memory.md"):
                 memory_files.append(str(proj_mem))
+    elif "codebuddy" in agent_id or "memery" in path_str:
+        # CodeBuddy 记忆文件：~/.codebuddy/memery/*_memery.md
+        for md_file in install_path.glob("*_memery.md"):
+            memory_files.append(str(md_file))
+        for md_file in install_path.glob("*.md"):
+            if str(md_file) not in memory_files:
+                memory_files.append(str(md_file))
     else:
         candidates = ["MEMORY.md", "memory.md", "memories.md", "USER.md", "user.md"]
         for c in candidates:
@@ -4990,12 +5027,15 @@ def export_codepilot_memory(db_path: Path, output_path: Path = None) -> Path:
     """
     从 CodePilot SQLite 数据库导出对话历史为 Markdown 文件
 
+    使用只读模式连接，避免与 CodePilot 进程争抢数据库锁。
+    同时读取同目录下的 MEMORY.md（限制最大 1MB，避免超大文件耗尽内存）。
+
     Parameters
     ----------
     db_path : Path
         codepilot.db 路径
     output_path : Path, optional
-        输出文件路径，默认为 ~/.agent_memory/codepilot_export.md
+        输出文件路径，默认为数据根目录下的 codepilot_export.md
 
     Returns
     -------
@@ -5003,15 +5043,21 @@ def export_codepilot_memory(db_path: Path, output_path: Path = None) -> Path:
         导出的 Markdown 文件路径
     """
     import sqlite3
+    from safe_io import get_data_root
+
+    logger = get_logger()
 
     if output_path is None:
-        output_path = Path.home() / ".agent_memory" / "codepilot_export.md"
+        output_path = get_data_root() / "codepilot_export.md"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        # 只读 URI 连接：mode=ro + immutable=1，不争抢 WAL 锁
+        db_uri = "file:{}?mode=ro&immutable=1".format(db_path)
+        conn = sqlite3.connect(db_uri, uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=1")
 
         # 获取有实际消息的会话
         sessions = conn.execute("""
@@ -5067,13 +5113,44 @@ def export_codepilot_memory(db_path: Path, output_path: Path = None) -> Path:
 
         conn.close()
 
+        # 同时读取同目录下的 MEMORY.md（限制 1MB，避免超大文件）
+        memory_md = db_path.parent / "MEMORY.md"
+        if memory_md.exists():
+            try:
+                file_size = memory_md.stat().st_size
+                if file_size > 1 * 1024 * 1024:
+                    # 超过 1MB 只读取最后 512KB（最近写入的内容）
+                    lines.append("\n## MEMORY.md (truncated, last 512KB of {:.1f}MB)\n".format(
+                        file_size / 1024 / 1024))
+                    with open(memory_md, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(max(0, file_size - 512 * 1024))
+                        content = f.read()
+                        content = _sanitize_sensitive(content)
+                        lines.append(content)
+                else:
+                    content = memory_md.read_text(encoding="utf-8", errors="replace")
+                    content = _sanitize_sensitive(content)
+                    lines.append("\n## MEMORY.md\n")
+                    lines.append(content)
+            except OSError as e:
+                logger.warning("读取 CodePilot MEMORY.md 失败: {}".format(e))
+
         if not _safe_write_text(output_path, "\n".join(lines), encoding="utf-8"):
-            logger = get_logger()
             logger.warning("CodePilot 导出文件写入失败（可能被锁定）: {}".format(output_path))
+        else:
+            logger.info("CodePilot 导出完成: {} 条对话, 输出到 {}".format(total_entries, output_path))
         return output_path
 
+    except sqlite3.OperationalError as e:
+        logger.error("CodePilot 数据库读取失败 (可能被锁定): {}".format(e))
+        _safe_write_text(
+            output_path,
+            "# CodePilot Memory\n\nExport failed (database locked): {}\n".format(e),
+            encoding="utf-8"
+        )
+        return output_path
     except Exception as e:
-        # 如果导出失败，尝试创建一个最小的标记文件
+        logger.error("CodePilot 导出异常: {}".format(e), exc_info=True)
         _safe_write_text(
             output_path,
             "# CodePilot Memory\n\nExport failed: {}\n".format(e),
@@ -5321,7 +5398,7 @@ class AgentRegistry:
     Agent 注册表
 
     扫描各 Agent 的本地安装目录, 登记其本地记忆文件位置。
-    OneDrive\AgentMemory 是融合层, 不是源头。
+    OneDrive/AgentMemory 是融合层, 不是源头。
     """
 
     # 本地安装路径模板: (agent_id, 子目录名, 记忆文件名)
@@ -5564,7 +5641,7 @@ class AgentRegistry:
 
     def update_memory_counts(self) -> dict:
         """
-        v1.3 重写: 统计融合层 (OneDrive\AgentMemory\agent_<id>) 记忆数
+        v1.3 重写: 统计融合层 (OneDrive/AgentMemory/agent_<id>) 记忆数
         """
         results = {}
         for agent_id, info in self.agents.items():

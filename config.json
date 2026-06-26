@@ -128,6 +128,12 @@
       ],
       "signature_file": "codepilot.db",
       "storage_type": "sqlite"
+    },
+    "codebuddy": {
+      "candidate_paths": [
+        "~/.codebuddy/memery"
+      ],
+      "signature_glob": "*_memery.md"
     }
   },
   "agent_overrides": {},

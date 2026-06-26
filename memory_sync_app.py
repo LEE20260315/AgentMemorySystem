@@ -1,5 +1,5 @@
-"""
-多Agent记忆融合器 v2.0
+﻿"""
+多Agent记忆融合器
 ================
 双击即跑的 GUI 工具，自动完成：
   读取本地 Agent 记忆 → 融合 → 写回各 Agent
@@ -219,7 +219,7 @@ if sys.platform == "win32":
             from PIL import Image, ImageDraw
             img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
-            draw.ellipse([2, 2, 30, 30], fill="#252525")
+            draw.ellipse([2, 2, 30, 30], fill="#4A90D9")
             draw.text((9, 7), "M", fill="white")
             ico_buf = str(_data_dir() / "_tray_default.ico")
             Path(ico_buf).parent.mkdir(parents=True, exist_ok=True)
@@ -269,23 +269,37 @@ def _safe_home() -> Path:
 def _data_dir() -> Path:
     r"""获取应用数据目录
 
-    Windows 优先使用 EXE 所在目录下的 data 子目录（避免 OneDrive/Defender
-    对 AppData/Local 的权限拦截），非 Windows 或无法写入时回退到标准位置。
+    解析优先级：
+    1. 环境变量 AGENT_MEMORY_DATA_DIR（由启动器设入，指向 OneDrive 的 data/）
+    2. EXE 同级目录下的 data/（开发模式或 EXE 内置调试版）
+    3. LEFTAPP/LOCALAPPDATA 标准位置（仅用于兜底）
     """
-    if sys.platform == "win32":
-        # 优先：EXE 同级目录下的 data/，便于读写且不触发 AppData 保护
-        exe_dir = Path(sys.executable).parent
-        candidate = exe_dir / "data"
+    # 1. 环境变量优先（跨设备场景：OneDrive 项目下的 data/）
+    env_data = os.environ.get("AGENT_MEMORY_DATA_DIR")
+    if env_data:
+        candidate = Path(env_data).expanduser()
         try:
             candidate.mkdir(parents=True, exist_ok=True)
-            # 验证可写
             test_file = candidate / ".write_test"
             test_file.write_text("ok", encoding="utf-8")
             test_file.unlink()
             return candidate
         except Exception:
             pass
-        # 回退：标准 LOCALAPPDATA
+
+    if sys.platform == "win32":
+        # 2. EXE 同级 data/（开发模式 / 内置调试版）
+        exe_dir = Path(sys.executable).parent
+        candidate = exe_dir / "data"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            test_file = candidate / ".write_test"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink()
+            return candidate
+        except Exception:
+            pass
+        # 3. LOCALAPPDATA 标准位置
         base = Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local"))
         return base / "AgentMemorySystem"
     else:
@@ -327,10 +341,9 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings() -> dict:
-    settings_path = _data_dir() / "sync_settings.json"
-    if settings_path.exists():
+    if SETTINGS_PATH.exists():
         try:
-            with open(settings_path, "r", encoding="utf-8") as f:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
                 return {**DEFAULT_SETTINGS, **json.load(f)}
         except (json.JSONDecodeError, OSError):
             pass
@@ -338,36 +351,20 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict):
-    settings_path = _data_dir() / "sync_settings.json"
     _data_dir().mkdir(parents=True, exist_ok=True)
-    tmp = settings_path.with_suffix(".tmp")
-    for attempt in range(3):
+    tmp = SETTINGS_PATH.with_suffix(".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(SETTINGS_PATH)
+    except OSError:
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            try:
-                tmp.replace(settings_path)
-            except OSError:
-                # OneDrive 锁定目标文件时直接写入
-                with open(settings_path, "w", encoding="utf-8") as f:
-                    json.dump(settings, f, ensure_ascii=False, indent=2)
-            # 验证写入成功
-            try:
-                with open(settings_path, "r", encoding="utf-8") as f:
-                    saved = json.load(f)
-                if saved.get("auto_interval_hours") == settings.get("auto_interval_hours"):
-                    return  # 写入成功
-            except Exception:
-                pass
-            break  # 验证失败但不再重试
         except OSError:
-            if attempt < 2:
-                import time
-                time.sleep(0.5)
-            else:
-                pass  # 设置写入失败不应崩溃
+            pass  # 设置写入失败不应崩溃
 
 
 # ---------------------------------------------------------------------------
@@ -376,26 +373,25 @@ def save_settings(settings: dict):
 
 # macOS 风格配色
 COLORS = {
-    "bg": "#f7f7f8",
+    "bg": "#ececf0",
     "card_bg": "#ffffff",
-    "accent": "#252525",            # CodePilot 主色：炭灰
-    "accent_hover": "#1a1a1a",
-    "btn_primary_bg": "#252525",    # 主按钮：CodePilot 炭灰
-    "btn_primary_hover": "#1a1a1a",
-    "btn_primary_active": "#111111",
-    "btn_secondary_bg": "#f2f2f2",  # 次要按钮：CodePilot 浅灰
-    "btn_secondary_hover": "#e5e5e5",
-    "btn_secondary_active": "#d9d9d9",
+    "accent": "#007aff",          # 仅用于数字高亮
+    "accent_hover": "#0066d6",
+    "btn_primary_bg": "#3a3a3c",   # 主按钮：macOS graphite 深灰
+    "btn_primary_hover": "#2c2c2e",
+    "btn_primary_active": "#1c1c1e",
+    "btn_secondary_bg": "#e8e8ed",  # 次要按钮：macOS 浅灰
+    "btn_secondary_hover": "#d8d8de",
+    "btn_secondary_active": "#c8c8ce",
     "text": "#1d1d1f",
-    "text_secondary": "#78787a",
-    "border": "#e5e5e5",
-    "success": "#16a34a",
-    "warning": "#f59e0b",
-    "error": "#dc2626",
-    "info": "#3b82f6",
+    "text_secondary": "#86868b",
+    "border": "#d2d2d7",
+    "success": "#34c759",
+    "warning": "#ff9500",
+    "error": "#ff3b30",
     "log_bg": "#fafafa",
     "log_text": "#3d3d3d",
-    "sidebar_bg": "#fafafa",
+    "sidebar_bg": "#2d2d2d",
 }
 
 
@@ -436,7 +432,7 @@ class RoundedButton(tk.Canvas):
             self._hover_bg = COLORS["btn_primary_hover"]
             self._active_bg = COLORS["btn_primary_active"]
             self._fg = "#ffffff"
-            self._shadow_color = (37, 37, 37, 40)
+            self._shadow_color = (0, 122, 255, 50)
         else:
             self._normal_bg = COLORS["btn_secondary_bg"]
             self._hover_bg = COLORS["btn_secondary_hover"]
@@ -453,10 +449,10 @@ class RoundedButton(tk.Canvas):
         self._active_img = self._render_btn(self._active_bg, pressed=True)
 
         self._img_ref = self.create_image(width // 2, height // 2, image=self._normal_img)
-        # 文字层（精确居中）
+        # 文字层
         self._txt_id = self.create_text(
-            width // 2, height // 2 - 1,
-            text=text, fill=self._fg, font=self._font, anchor="center",
+            width // 2, height // 2,
+            text=text, fill=self._fg, font=self._font,
         )
 
         self.bind("<Enter>", self._on_enter)
@@ -469,7 +465,7 @@ class RoundedButton(tk.Canvas):
         return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
     def _render_btn(self, fill_hex, pressed=False):
-        """用 PIL 渲染圆角矩形按钮"""
+        """用 PIL 渲染带微渐变的圆角按钮"""
         w, h = self._width, self._height
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
@@ -477,13 +473,13 @@ class RoundedButton(tk.Canvas):
         if not pressed and self.style != "primary":
             shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
             sd = ImageDraw.Draw(shadow)
-            r = 8
-            pts = self._rounded_pts(3, 4, w - 3, h - 1, r)
+            r = h // 2
+            pts = self._rounded_pts(3, 4, w - 3, h - 1, r - 1)
             sd.polygon(pts, fill=(0, 0, 0, 18))
             img = Image.alpha_composite(img, shadow)
 
         draw = ImageDraw.Draw(img)
-        r = 8
+        r = h // 2
         base = self._hex_to_rgb(fill_hex)
 
         # 主体：轻微垂直渐变（顶部略亮）
@@ -584,7 +580,7 @@ def apply_modern_style(root: tk.Tk):
     # 全局背景
     style.configure(".", background=COLORS["bg"], foreground=COLORS["text"])
 
-    # 按钮样式 - CodePilot 炭灰胶囊风格
+    # 按钮样式 - macOS 胶囊风格
     style.configure(
         "Accent.TButton",
         background=COLORS["accent"],
@@ -597,7 +593,7 @@ def apply_modern_style(root: tk.Tk):
     )
     style.map(
         "Accent.TButton",
-        background=[("active", COLORS["accent_hover"]), ("disabled", "#d9d9d9")],
+        background=[("active", COLORS["accent_hover"]), ("disabled", "#d2d2d7")],
         foreground=[("disabled", "#ffffff")],
     )
     # 让 Accent 按钮尽可能圆角（clam 主题下 borderadius 有限，用大 padding 模拟胶囊）
@@ -627,7 +623,7 @@ def apply_modern_style(root: tk.Tk):
     )
     style.map(
         "TButton",
-        background=[("active", COLORS["btn_secondary_hover"])],
+        background=[("active", "#e8e8ed")],
         foreground=[("disabled", COLORS["text_secondary"])],
     )
 
@@ -807,7 +803,7 @@ class SyncMainWindow:
             relief="flat",
             padx=12,
             pady=8,
-            selectbackground="#252525",
+            selectbackground="#404040",
             insertbackground="white",
         )
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
@@ -884,42 +880,42 @@ class SyncMainWindow:
         self.minimize_btn.pack()
 
     def _build_title_bar(self):
-        """构建 Windows 风格自定义标题栏（按钮在右侧）"""
+        """构建 macOS 风格自定义标题栏"""
         self.title_bar = tk.Frame(self.root, bg=COLORS["bg"], height=40)
         self.title_bar.pack(fill=tk.X, side=tk.TOP)
         self.title_bar.pack_propagate(False)
+        self.title_bar.grid_columnconfigure(1, weight=1)
 
-        # 左侧：标题
+        # 左侧：三个 macOS 风格圆点按钮
+        btn_frame = tk.Frame(self.title_bar, bg=COLORS["bg"])
+        btn_frame.grid(row=0, column=0, sticky="w", padx=(16, 0))
+
+        self._title_close_btn = self._create_traffic_light_button(
+            btn_frame, "#ff5f57", "#e0443e", "×", self._on_close
+        )
+        self._title_min_btn = self._create_traffic_light_button(
+            btn_frame, "#febc2e", "#d89e24", "−", self._minimize_window
+        )
+        self._title_max_btn = self._create_traffic_light_button(
+            btn_frame, "#28c840", "#24aa34", "+", self._toggle_maximize
+        )
+        self._title_close_btn.pack(side=tk.LEFT, padx=(0, 9))
+        self._title_min_btn.pack(side=tk.LEFT, padx=(0, 9))
+        self._title_max_btn.pack(side=tk.LEFT)
+
+        # 中间：标题
         self.title_label = tk.Label(
             self.title_bar,
-            text="  AgentMemorySync v2.0",
+            text="AgentMemorySync",
             bg=COLORS["bg"],
-            fg=COLORS["text"],
+            fg=COLORS["text_secondary"],
             font=(_FONT, 10),
         )
-        self.title_label.pack(side=tk.LEFT, padx=(12, 0))
+        self.title_label.grid(row=0, column=1, sticky="nsew")
 
-        # 右侧：状态 + 窗口按钮
-        right_frame = tk.Frame(self.title_bar, bg=COLORS["bg"])
-        right_frame.pack(side=tk.RIGHT)
-
-        # 窗口控制按钮（Windows 风格：最小化 / 最大化 / 关闭）
-        self._title_close_btn = self._create_win_button(
-            right_frame, "×", self._on_close, is_close=True
-        )
-        self._title_max_btn = self._create_win_button(
-            right_frame, "☐", self._toggle_maximize, is_close=False
-        )
-        self._title_min_btn = self._create_win_button(
-            right_frame, "─", self._minimize_window, is_close=False
-        )
-        self._title_close_btn.pack(side=tk.RIGHT)
-        self._title_max_btn.pack(side=tk.RIGHT)
-        self._title_min_btn.pack(side=tk.RIGHT)
-
-        # 状态指示器（在窗口按钮左侧）
-        status_frame = tk.Frame(right_frame, bg=COLORS["bg"])
-        status_frame.pack(side=tk.RIGHT, padx=(0, 8))
+        # 右侧：状态指示器
+        status_frame = tk.Frame(self.title_bar, bg=COLORS["bg"])
+        status_frame.grid(row=0, column=2, sticky="e", padx=(0, 16))
 
         self.status_var = tk.StringVar(value="就绪")
         status_label = tk.Label(
@@ -937,28 +933,155 @@ class SyncMainWindow:
         self.status_dot.pack(side=tk.RIGHT, padx=(0, 6))
         self._draw_status_dot(COLORS["success"])
 
-    def _create_win_button(self, parent, symbol, command, is_close=False):
-        """创建 Windows 风格标题栏按钮（扁平矩形）"""
-        btn_w, btn_h = 46, 32
-        canvas = tk.Canvas(parent, width=btn_w, height=btn_h,
-                           bg=COLORS["bg"], highlightthickness=0, cursor="hand2")
+    def _create_traffic_light_image(self, size: int, base_hex: str, hover_hex: str, symbol: str, hover: bool = False):
+        """用 PIL 绘制 macOS 风格立体交通灯球体，返回 PIL.Image 对象"""
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
 
-        normal_bg = COLORS["bg"]
-        hover_bg = "#e81123" if is_close else COLORS["btn_secondary_hover"]
-        hover_fg = "#ffffff" if is_close else COLORS["text"]
+        def _hex_rgb(hex_color):
+            h = hex_color.lstrip("#")
+            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
-        # 正常状态
-        canvas.create_rectangle(0, 0, btn_w, btn_h, fill=normal_bg, outline="", tags="bg")
-        canvas.create_text(btn_w // 2, btn_h // 2, text=symbol,
-                           fill=COLORS["text_secondary"], font=(_FONT, 12), tags="txt")
+        base = _hex_rgb(hover_hex if hover else base_hex)
+        cx, cy = size // 2, size // 2
+        r = size // 2 - 1
+
+        # ---- 1. 外发光（微弱）----
+        for glow_r in range(int(r * 1.15), int(r), -1):
+            alpha = int(20 * (r * 1.15 - glow_r) / (r * 0.15))
+            draw.ellipse([cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r],
+                         outline=base + (alpha,), width=1)
+
+        # ---- 2. 主体：径向渐变模拟 3D 球体 ----
+        # 光源来自左上方（-0.35, -0.4）
+        light_x_off, light_y_off = -0.35, -0.45
+        lx, ly = cx + r * light_x_off, cy + r * light_y_off
+        light_dist = math.sqrt((lx - cx) ** 2 + (ly - cy) ** 2)
+        # 高光色和暗部色
+        spec = tuple(min(255, int(b * 1.45)) for b in base)   # 高光（接近白色但带底色）
+        dark = tuple(max(0, int(b * 0.55)) for b in base)       # 暗部
+        mid = base                                                # 中间
+
+        for y in range(size):
+            for x in range(size):
+                dx, dy = x - cx, y - cy
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist > r:
+                    continue
+
+                # 归一化到 [-1, 1]
+                nx_raw = dx / r if r else 0
+                ny_raw = dy / r if r else 0
+
+                # 到光源方向的角度
+                dot = nx_raw * light_x_off + ny_raw * light_y_off  # 范围 [-~1.5, ~1.5]
+                t = (dot + 1.5) / 3.0  # 归一化到 [0, 1]
+
+                # Phong-like 插值：暗 → 中 → 高光
+                if t < 0.5:
+                    s = t / 0.5
+                    c = tuple(int(dark[i] + (mid[i] - dark[i]) * s) for i in range(3))
+                else:
+                    s = (t - 0.5) / 0.5
+                    c = tuple(int(mid[i] + (spec[i] - mid[i]) * s) for i in range(3))
+
+                # 边缘衰减（antialiasing）
+                edge_alpha = 255
+                if dist > r - 1:
+                    edge_alpha = max(0, int(255 * (r - dist)))
+
+                img.putpixel((x, y), tuple(max(0, min(255, v)) for v in c) + (edge_alpha,))
+
+        # ---- 3. 主高光：左上角斜向椭圆（镜面反射）----
+        hl_w = int(size * 0.38)
+        hl_h = int(size * 0.24)
+        hl_cx = cx - int(size * 0.14)
+        hl_cy = cy - int(size * 0.22)
+        # 绘制径向衰减的高光椭圆
+        for y in range(max(0, hl_cy - hl_h // 2), min(size, hl_cy + hl_h // 2 + 1)):
+            for x in range(max(0, hl_cx - hl_w // 2), min(size, hl_cx + hl_w // 2 + 1)):
+                # 椭圆内判断
+                ex = (x - hl_cx) / (hl_w / 2) if hl_w else 999
+                ey = (y - hl_cy) / (hl_h / 2) if hl_h else 999
+                edist = math.sqrt(ex * ex + ey * ey)
+                if edist > 1:
+                    continue
+                alpha = int(180 * (1 - edist) ** 1.5)
+                old = img.getpixel((x, y))
+                if old[3] > 0:
+                    blended = tuple(min(255, old[i] + int((255 - old[i]) * alpha / 255)) for i in range(3))
+                    img.putpixel((x, y), blended + (old[3],))
+
+        # ---- 4. 次高光：更小的亮点（靠近顶部中心偏左）----
+        hl2_r = int(size * 0.08)
+        hl2_cx = cx - int(size * 0.06)
+        hl2_cy = cy - int(size * 0.28)
+        draw.ellipse(
+            [hl2_cx - hl2_r, hl2_cy - hl2_r, hl2_cx + hl2_r, hl2_cy + hl2_r],
+            fill=(255, 255, 255, 140),
+        )
+
+        # ---- 5. 底部边缘暗影（新月形）----
+        sh_offset = int(r * 0.25)
+        sh_r = int(r * 0.85)
+        for angle_deg in range(-30, 210):
+            angle = math.radians(angle_deg)
+            sx = cx + sh_offset + int(sh_r * math.cos(angle))
+            sy = cy + int(sh_r * 0.9 * math.sin(angle))
+            if 0 <= sx < size and 0 <= sy < size:
+                old = img.getpixel((sx, sy))
+                if old[3] > 0:
+                    shadow_a = 40
+                    new_c = tuple(max(0, old[i] - shadow_a) for i in range(3))
+                    img.putpixel((sx, sy), new_c + (old[3],))
+
+        # ---- 6. 极细外圈描边（增加立体感）----
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, 35), width=1)
+
+        # ---- 7. hover 时绘制符号 ----
+        if hover:
+            from PIL import ImageFont
+            try:
+                font = ImageFont.truetype("segoeui.ttf", size=int(size * 0.52))
+            except Exception:
+                font = ImageFont.load_default()
+            bbox = draw.textbbox((0, 0), symbol, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            tx, ty = cx - tw / 2, cy - th / 2 - bbox[1] * 0.08
+            # 符号阴影
+            draw.text((tx + 1, ty + 1), symbol, font=font, fill=(0, 0, 0, 80))
+            # 符号本体
+            draw.text((tx, ty), symbol, font=font, fill=(60, 60, 60, 220))
+
+        return img  # 返回 PIL.Image 对象
+
+    def _create_traffic_light_button(self, parent, color, hover_color, symbol, command):
+        """创建一个 macOS 风格交通灯按钮"""
+        size = 14  # 显示尺寸
+        scale = 3  # 超采样倍数（渲染更清晰）
+        img_size = size * scale
+        canvas = tk.Canvas(parent, width=size, height=size, bg=COLORS["bg"], highlightthickness=0)
+
+        # 高分辨率渲染后缩放到显示尺寸（抗锯齿）
+        normal_pil = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=False)
+        hover_pil = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=True)
+        normal_pil = normal_pil.resize((size, size), Image.LANCZOS)
+        hover_pil = hover_pil.resize((size, size), Image.LANCZOS)
+
+        normal_img = ImageTk.PhotoImage(normal_pil)
+        hover_img = ImageTk.PhotoImage(hover_pil)
+
+        # 保持引用避免被回收
+        canvas.normal_img = normal_img
+        canvas.hover_img = hover_img
+
+        cid = canvas.create_image(size // 2, size // 2, image=normal_img, anchor="center")
 
         def on_enter(_):
-            canvas.itemconfig("bg", fill=hover_bg)
-            canvas.itemconfig("txt", fill=hover_fg)
+            canvas.itemconfig(cid, image=hover_img)
 
         def on_leave(_):
-            canvas.itemconfig("bg", fill=normal_bg)
-            canvas.itemconfig("txt", fill=COLORS["text_secondary"])
+            canvas.itemconfig(cid, image=normal_img)
 
         canvas.bind("<Enter>", on_enter)
         canvas.bind("<Leave>", on_leave)
@@ -1192,12 +1315,6 @@ class SyncMainWindow:
 
     def _minimize_to_tray(self):
         """最小化到系统托盘（Windows 原生 API）"""
-        # 如果即将迁移（OneDrive → 本地），不创建托盘图标，避免迁移后图标消失
-        if _WILL_RELOCATE:
-            self._log("即将迁移，跳过托盘图标创建")
-            self.root.withdraw()
-            return
-
         _tray_log = _data_dir() / "tray_error.log"
         _tray_log.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1649,16 +1766,12 @@ class SyncMainWindow:
                 nid.szInfo = body[:255]
                 nid.dwInfoFlags = _NIIF_INFO
                 ok = _shell32.Shell_NotifyIconW(_NIM_MODIFY, ctypes.byref(nid))
-                # 重置 uFlags，避免影响后续操作（无论成功失败都重置）
+                # 重置 uFlags，避免影响后续操作
                 nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP | _NIF_SHOWTIP
                 if ok:
                     return
             except Exception:
-                # 异常时也要重置 flags
-                try:
-                    self._tray_nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP | _NIF_SHOWTIP
-                except Exception:
-                    pass
+                pass
 
         # 方案2: PowerShell Toast 通知（无托盘图标时使用）
         try:
@@ -1944,22 +2057,14 @@ def _check_single_instance():
     try:
         import ctypes
         mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\AgentMemorySyncMutex")
-        err = ctypes.windll.kernel32.GetLastError()
-        if err == 183:  # ERROR_ALREADY_EXISTS
-            # 给迁移进程的旧实例多一点时间退出并释放互斥锁
-            import time
-            time.sleep(1.0)
-            # 再次检查：旧进程可能已经退出
-            mutex2 = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\AgentMemorySyncMutex_v2")
-            err2 = ctypes.windll.kernel32.GetLastError()
-            if err2 == 183:
-                ctypes.windll.user32.MessageBoxW(
-                    0,
-                    "多Agent记忆融合器已在运行中。\n请检查系统托盘（右下角）。",
-                    "多Agent记忆融合器",
-                    0x40 | 0x10000  # MB_ICONINFO | MB_TOPMOST
-                )
-                return False
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "多Agent记忆融合器已在运行中。\n请检查系统托盘（右下角）。",
+                "多Agent记忆融合器",
+                0x40 | 0x10000  # MB_ICONINFO | MB_TOPMOST
+            )
+            return False
         return True
     except Exception:
         return True
@@ -2088,16 +2193,7 @@ def _ensure_local_install():
     # 从本地副本重启，带上相同参数（去掉 --no-relocate 无关）
     args = [str(local_exe)] + [a for a in sys.argv[1:] if a != "--no-relocate"]
     _reloc_log(f"relaunching with args={args}")
-    global _WILL_RELOCATE
-    _WILL_RELOCATE = True
     try:
-        # 释放互斥锁，避免新进程被误判为"已在运行"
-        try:
-            _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\AgentMemorySyncMutex")
-            if _mutex_handle:
-                ctypes.windll.kernel32.CloseHandle(_mutex_handle)
-        except Exception:
-            pass
         subprocess.Popen(args, cwd=str(local_dir))
         _reloc_log("relaunch Popen ok, exiting")
         sys.exit(0)
@@ -2140,13 +2236,6 @@ def _try_powershell_relocate(exe_path: Path):
     args = [str(local_exe)] + [a for a in sys.argv[1:] if a != "--no-relocate"]
     _reloc_log(f"relaunching from temp with args={args}")
     try:
-        # 释放互斥锁，避免新进程被误判为"已在运行"
-        try:
-            _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\AgentMemorySyncMutex")
-            if _mutex_handle:
-                ctypes.windll.kernel32.CloseHandle(_mutex_handle)
-        except Exception:
-            pass
         subprocess.Popen(args, cwd=str(temp_dir))
         _reloc_log("relaunch from temp ok, exiting")
         sys.exit(0)
@@ -2154,17 +2243,7 @@ def _try_powershell_relocate(exe_path: Path):
         _reloc_log(f"relaunch from temp failed: {e}")
 
 
-_WILL_RELOCATE = False  # 如果即将迁移，不创建托盘图标
-
-
 def main():
-    # 如果 exe 在 OneDrive 目录内，标记即将迁移（在 GUI 启动前）
-    if sys.platform == "win32" and getattr(sys, "frozen", False):
-        exe_path = Path(sys.executable)
-        if _is_onedrive_path(exe_path):
-            global _WILL_RELOCATE
-            _WILL_RELOCATE = True
-
     # OneDrive 内运行会导致 Shell_NotifyIconW 拒绝访问，优先迁移到本地
     _ensure_local_install()
 
