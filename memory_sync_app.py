@@ -269,41 +269,17 @@ def _safe_home() -> Path:
 def _data_dir() -> Path:
     r"""获取应用数据目录
 
-    解析优先级：
-    1. 环境变量 AGENT_MEMORY_DATA_DIR（由启动器设入，指向 OneDrive 的 data/）
-    2. EXE 同级目录下的 data/（开发模式或 EXE 内置调试版）
-    3. LEFTAPP/LOCALAPPDATA 标准位置（仅用于兜底）
-    """
-    # 1. 环境变量优先（跨设备场景：OneDrive 项目下的 data/）
-    env_data = os.environ.get("AGENT_MEMORY_DATA_DIR")
-    if env_data:
-        candidate = Path(env_data).expanduser()
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            test_file = candidate / ".write_test"
-            test_file.write_text("ok", encoding="utf-8")
-            test_file.unlink()
-            return candidate
-        except Exception:
-            pass
+    解析优先级（v1.3.2 调整，默认指向 OneDrive/AgentMemory/）：
+    1. 环境变量 AGENT_MEMORY_DATA_DIR（启动器注入）
+    2. 跨设备默认：OneDrive 下的 AgentMemory/
+    3. EXE 同级目录下的 data/
+    4. LOCALAPPDATA 标准位置
 
-    if sys.platform == "win32":
-        # 2. EXE 同级 data/（开发模式 / 内置调试版）
-        exe_dir = Path(sys.executable).parent
-        candidate = exe_dir / "data"
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            test_file = candidate / ".write_test"
-            test_file.write_text("ok", encoding="utf-8")
-            test_file.unlink()
-            return candidate
-        except Exception:
-            pass
-        # 3. LOCALAPPDATA 标准位置
-        base = Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local"))
-        return base / "AgentMemorySystem"
-    else:
-        return _safe_home() / ".local" / "share" / "AgentMemorySystem"
+    与 safe_io.get_data_root() 保持一致的解析顺序，保证数据和设置在同一目录。
+    """
+    # 委托给 safe_io.get_data_root()，避免逻辑双轨
+    from safe_io import get_data_root
+    return get_data_root()
 
 
 def _migrate_old_data():
@@ -1832,7 +1808,13 @@ class SyncMainWindow:
 # ---------------------------------------------------------------------------
 
 class SettingsDialog:
-    """设置对话框 - macOS 风格"""
+    """设置对话框 - macOS 风格，支持滚动 (v1.3.2)
+
+    设计：
+    - 外层 Canvas + Scrollbar：容纳 12+ 个 Agent 路径不裁切
+    - Agent 路径覆盖默认折叠到 LabelFrame，避免干扰常用配置
+    - 窗口高度自适应内容，最大 80% 屏高
+    """
 
     def __init__(self, parent, settings: dict, on_save):
         self.settings = settings.copy()
@@ -1842,8 +1824,9 @@ class SettingsDialog:
 
         self.win = tk.Toplevel(parent)
         self.win.title("设置")
-        self.win.geometry("420x400")
-        self.win.resizable(False, False)
+        # 自适应高度：先小一点，内容定后 update
+        self.win.geometry("460x560")
+        self.win.minsize(420, 420)
         self.win.transient(parent)
         self.win.grab_set()
         self.win.configure(bg=COLORS["bg"])
@@ -1857,19 +1840,56 @@ class SettingsDialog:
         self.win.update_idletasks()
         w = self.win.winfo_width()
         h = self.win.winfo_height()
+        screen_h = self.win.winfo_screenheight()
+        max_h = int(screen_h * 0.85)
+        if h > max_h:
+            h = max_h
+            self.win.geometry("{}x{}".format(w, h))
+            self.win.update_idletasks()
         x = parent.winfo_x() + (parent.winfo_width() - w) // 2
         y = parent.winfo_y() + (parent.winfo_height() - h) // 2
         self.win.geometry("+{}+{}".format(x, y))
 
     def _build(self):
-        # 卡片容器
-        card = tk.Frame(self.win, bg=COLORS["card_bg"], highlightthickness=1,
-                        highlightbackground=COLORS["border"])
-        card.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        # 顶部内容区域：Canvas + Scrollbar
+        outer = tk.Frame(self.win, bg=COLORS["bg"])
+        outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
+        canvas = tk.Canvas(outer, bg=COLORS["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Canvas 内卡片
+        card = tk.Frame(canvas, bg=COLORS["card_bg"], highlightthickness=1,
+                        highlightbackground=COLORS["border"])
         inner = tk.Frame(card, bg=COLORS["card_bg"])
         inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
+        # 让 Canvas 控制内部 Frame 的可滚动区域
+        canvas_window = canvas.create_window(0, 0, window=card, anchor="nw")
+
+        def _on_card_resize(_evt):
+            # 让 inner 占据 canvas 宽度
+            canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
+        card.bind("<Configure>", _on_card_resize)
+
+        def _on_canvas_resize(_evt):
+            canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
+            canvas.config(scrollregion=canvas.bbox("all"))
+        canvas.bind("<Configure>", _on_canvas_resize)
+        card.bind("<Configure>", lambda e: canvas.config(scrollregion=canvas.bbox("all")))
+
+        # 鼠标滚轮支持（Windows + macOS）
+        def _on_wheel(event):
+            delta = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(delta, "units")
+        canvas.bind_all("<MouseWheel>", _on_wheel)
+        self._canvas = canvas  # 防止被 GC
+        self._wheel_handler = _on_wheel
+
+        # === 常用配置区 ===
         # 自动同步间隔
         row = tk.Frame(inner, bg=COLORS["card_bg"])
         row.pack(fill=tk.X, pady=6)
@@ -1903,15 +1923,22 @@ class SettingsDialog:
         self.auto_start_var = tk.BooleanVar(value=self.settings.get("auto_start", False))
         ttk.Checkbutton(inner, text="启动时自动执行同步", variable=self.auto_start_var).pack(anchor=tk.W, pady=4)
 
+        # === 高级区域（折叠） ===
         ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
+        advanced_label = ttk.Label(
+            inner,
+            text="高级 ▾  Agent 路径覆盖（展开可手动填，留空=自动检测）",
+            style="CardTitle.TLabel",
+        )
+        advanced_label.pack(anchor=tk.W, pady=(4, 6))
+        advanced_label.bind("<Button-1>", self._toggle_advanced)
 
-        # Agent 路径覆盖
-        ttk.Label(inner, text="Agent 路径覆盖 (留空则自动检测)", style="Card.TLabel").pack(anchor=tk.W, pady=(0, 8))
+        self._advanced_frame = tk.Frame(inner, bg=COLORS["card_bg"])
+        self.sw_advanced = False  # 默认折叠
 
         overrides = self.settings.get("agent_overrides", {})
         self.override_vars = {}
 
-        # 从 config.json 动态读取 agent 列表
         try:
             _config_file = Path(__file__).parent / "config.json"
             with open(_config_file, "r", encoding="utf-8") as f:
@@ -1921,7 +1948,7 @@ class SettingsDialog:
             agent_list = list(overrides.keys())
 
         for agent in agent_list:
-            row = tk.Frame(inner, bg=COLORS["card_bg"])
+            row = tk.Frame(self._advanced_frame, bg=COLORS["card_bg"])
             row.pack(fill=tk.X, pady=3)
             ttk.Label(row, text="{}:".format(agent), style="Card.TLabel", width=12).pack(side=tk.LEFT)
             var = tk.StringVar(value=overrides.get(agent, ""))
@@ -1929,12 +1956,23 @@ class SettingsDialog:
             entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
             self.override_vars[agent] = var
 
-        # 按钮
+        # === 底部按钮 ===
         btn_frame = tk.Frame(self.win, bg=COLORS["bg"])
         btn_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
 
         ttk.Button(btn_frame, text="取消", command=self._close).pack(side=tk.RIGHT)
         ttk.Button(btn_frame, text="保存", style="Accent.TButton", command=self._save).pack(side=tk.RIGHT, padx=(0, 10))
+
+    def _toggle_advanced(self, _evt=None):
+        """展开/折叠高级区域（v1.3.2 折叠设计）"""
+        self.sw_advanced = not self.sw_advanced
+        if self.sw_advanced:
+            self._advanced_frame.pack(fill=tk.X, pady=(0, 8))
+        else:
+            self._advanced_frame.pack_forget()
+        # 重新计算滚动区域
+        self.win.update_idletasks()
+        self._canvas.config(scrollregion=self._canvas.bbox("all"))
 
     def _current_settings(self) -> dict:
         """根据当前控件值生成设置字典"""

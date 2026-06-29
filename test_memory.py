@@ -1184,18 +1184,19 @@ def test_v14_local_parser_hermes_section():
         mem_file.write_text(
             "第一段：用户偏好中文交流。\n"
             "§\n"
-            "第二段：API 提供商配置。\n"
+            "[sync:mem_test_001] 这是同步写回段，应被过滤。\n"
             "§\n"
             "第三段：飞书凭证备份位置。\n",
             encoding="utf-8",
         )
         parser = am.LocalMemoryParser()
         entries = parser.parse_hermes_memory(mem_file)
-        assert len(entries) == 3, "应解析出 3 段, 实际 {}".format(len(entries))
+        assert len(entries) == 2, "应解析出 2 段, 实际 {}".format(len(entries))
         assert entries[0]["source_format"] == "hermes_section"
         assert "第1条" in entries[0]["tags"]
         assert "中文" in entries[0]["content"]
-        results.ok("parse_hermes_memory 切出 3 段")
+        assert all("[sync:mem_" not in e["content"] for e in entries)
+        results.ok("parse_hermes_memory 过滤同步段")
     except Exception as e:
         results.fail("v14_local_parser_hermes_section", str(e))
         import traceback
@@ -1214,6 +1215,7 @@ def test_v14_local_parser_markdown():
         md = tmp_dir / "notes.md"
         md.write_text(
             "id: mem_001\nagent_id: claude\n---\n内容一：MCP 协议。\n\n---\n"
+            "- [来自其他 Agent 的共享记忆](shared_from_agents.md) — 自动同步\n\n---\n"
             "id: mem_002\nagent_id: claude\n---\n内容二：REST API。\n",
             encoding="utf-8",
         )
@@ -1221,7 +1223,8 @@ def test_v14_local_parser_markdown():
         entries = parser.parse_markdown(md)
         assert len(entries) >= 2, "应至少 2 块, 实际 {}".format(len(entries))
         assert any("MCP" in e["content"] for e in entries)
-        results.ok("parse_markdown 切出 ≥2 块")
+        assert all("shared_from_agents.md" not in e["content"] for e in entries)
+        results.ok("parse_markdown 过滤同步索引块")
     except Exception as e:
         results.fail("v14_local_parser_markdown", str(e))
         import traceback
@@ -1306,7 +1309,8 @@ def test_v14_extract_local_to_fused():
         # 本地: 模拟 Hermes
         local_dir = tmp_dir / ".hermes" / "memories"
         local_dir.mkdir(parents=True)
-        (local_dir / "MEMORY.md").write_text("这是第一段测试内容，用于验证提取功能。\n§\n这是第二段测试内容，包含更多细节信息。\n", encoding="utf-8")
+        source_file = local_dir / "MEMORY.md"
+        source_file.write_text("这是第一段测试内容，用于验证提取功能。\n§\n这是第二段测试内容，包含更多细节信息。\n", encoding="utf-8")
 
         # 融合层: OneDrive 模拟
         fused_root = tmp_dir / "OneDrive" / "AgentMemory"
@@ -1320,7 +1324,7 @@ def test_v14_extract_local_to_fused():
         result = am.extract_local_to_fused(
             agent_id="hermes",
             root=fused_root,
-            local_files=[str(local_dir / "MEMORY.md")],
+            local_files=[str(source_file)],
             registry=registry,
         )
 
@@ -1330,7 +1334,17 @@ def test_v14_extract_local_to_fused():
         text = fused_md.read_text(encoding="utf-8")
         assert "这是第一段测试内容" in text
         assert "这是第二段测试内容" in text
-        results.ok("extract_local_to_fused 写入 2 条到融合层")
+
+        # 再跑一轮同源提取，应该被跨运行去重
+        result2 = am.extract_local_to_fused(
+            agent_id="hermes",
+            root=fused_root,
+            local_files=[str(source_file)],
+            registry=registry,
+        )
+        assert result2["extracted"] == 0, "第二轮不应再次提取, 实际 {}".format(result2["extracted"])
+        assert result2["skipped"] >= 2, "第二轮应至少跳过 2 条, 实际 {}".format(result2["skipped"])
+        results.ok("extract_local_to_fused 首轮提取，次轮去重")
     except Exception as e:
         results.fail("v14_extract_local_to_fused", str(e))
         import traceback

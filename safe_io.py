@@ -11,38 +11,75 @@ from typing import Optional
 def get_data_root() -> Path:
     """获取数据根目录（用于同步数据、设置、备份等）。
 
-    解析优先级：
-    1. 环境变量 AGENT_MEMORY_DATA_DIR（OneDrive 迁移时由 _ensure_local_install 传递）
-    2. 打包模式（frozen）：EXE 所在目录下的 data/
-    3. 开发模式：脚本所在目录下的 data/
+    解析优先级（v1.3.2 调整）：
+    1. 环境变量 AGENT_MEMORY_DATA_DIR（启动器注入，含 BAT 启动器或 OneDrive 迁移）
+    2. 跨设备默认：OneDrive 下的 AgentMemory/（同步数据真相源）
+       先按 OneDrive / OneDriveConsumer / OneDriveCommercial 环境变量找，
+       再兜底探测用户主目录下常见的 OneDrive/AgentMemory/
+    3. 打包模式 fallback（frozen）：EXE 所在目录下的 data/
+    4. 开发模式 fallback：脚本所在目录下的 data/
+    5. LOCALAPPDATA 标准位置（仅作为最后兜底）
 
     Returns
     -------
     Path
         数据根目录路径（已确保存在）
     """
-    # 1. 环境变量（OneDrive → 本地迁移时传递原始数据目录）
+    # 1. 环境变量（最优先 - 启动器或 OneDrive 迁移时由 BAT 传递）
     env_data = os.environ.get("AGENT_MEMORY_DATA_DIR")
     if env_data:
-        p = Path(env_data)
+        p = Path(env_data).expanduser()
         try:
             p.mkdir(parents=True, exist_ok=True)
+            # 写探针确保可写
+            test = p / ".writable_test"
+            test.write_text("ok", encoding="utf-8")
+            test.unlink()
             return p
         except OSError:
+            # env 指向的目录不可写，回退到 OneDrive 候选
             pass
 
-    # 2. 打包模式：EXE 同级目录
+    # 2. 跨设备默认（OneDrive/AgentMemory/）—— v1.3.2 改为优先项
+    onedrive_candidates = []
+    for env_var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        root = os.environ.get(env_var)
+        if root:
+            onedrive_candidates.append(Path(root) / "AgentMemory")
+    # 兜底：拼用户目录下常见位置（开发机）
+    home_onedrive = Path.home() / "OneDrive" / "AgentMemory"
+    if home_onedrive not in onedrive_candidates:
+        onedrive_candidates.append(home_onedrive)
+
+    for cand in onedrive_candidates:
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            test = cand / ".writable_test"
+            test.write_text("ok", encoding="utf-8")
+            test.unlink()
+            return cand
+        except OSError:
+            continue
+
+    # 3. 打包模式 fallback：EXE 同级目录
     if getattr(sys, "frozen", False):
         root = Path(sys.executable).parent / "data"
     else:
-        # 3. 开发模式：脚本所在目录
+        # 4. 开发模式 fallback：脚本所在目录
         root = Path(__file__).resolve().parent / "data"
 
+    # 5. 最后兜底 LOCALAPPDATA
     try:
         root.mkdir(parents=True, exist_ok=True)
+        test = root / ".writable_test"
+        test.write_text("ok", encoding="utf-8")
+        test.unlink()
+        return root
     except OSError:
-        pass
-    return root
+        local_appdata = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        fallback = local_appdata / "AgentMemorySystem"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def _pending_path(target: Path) -> Path:

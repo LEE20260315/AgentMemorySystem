@@ -5,22 +5,54 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.2] - 2026-06-25
+
+### Fixed
+
+- **消除 `disk I/O error`（OneDrive 路径上同步崩溃）**：`MemoryDatabase._init_db()` 增加 `timeout=60` 连接、`PRAGMA busy_timeout=60000` 内部重试、`PRAGMA journal_mode=DELETE`（取代 WAL）、`PRAGMA synchronous=NORMAL`、`PRAGMA cache_size=-20000` 20MB 缓存
+- **消除"卡死数百秒"的错觉**：新增 `MemoryDatabase.insert_memories_batch()`，一次事务插 50 条；`extract_local_to_fused` 改为 50 条批量 + 每批 emit 进度回调；UI 不再看得见空白
+- **消除启动器 SQLite 锁导致的根因**：FTS5 + WAL 在 OneDrive 上间歇性 `disk I/O error` 是主因；改 DELETE 模式后 OneDrive 不再等 SHM/WAL 文件句柄
+- **修复同步产物被再次提取导致递归膨胀**：在文件扫描、Markdown / Hermes / JSONL 解析、提取入库三层同时过滤 `shared_from_agents.md`、`## Shared Knowledge`、`[sync:mem_*]` 等写回产物，阻断自我回灌
+- **修复跨运行重复提取**：`extract_local_to_fused()` 在入库前按标准化内容做跨运行去重，同一条本地记忆再次扫描时只记为 skipped，不再重复写入 `agent_*.db` / `shared.db`
+
+### Changed
+
+- **数据目录调整**：根目录默认从"项目内 `data/`"改为 **OneDrive 下的 `AgentMemory/`**（v1.2 时代的融合层）。`safe_io.get_data_root()` 重写解析顺序：`AGENT_MEMORY_DATA_DIR` → OneDrive/AgentMemory/ → EXE 同级 `data/` → LOCALAPPDATA；`memory_sync_app._data_dir()` 委托给同一个函数避免双轨
+- **BAT 启动器 (`AgentMemorySync.bat`) 默认指向 `OneDrive/AgentMemory/`**：`<REPO_DIR>\AgentMemory` 存在则用之，否则回退到 `<REPO_DIR>\data`（兼容 v1.3.x 部署）
+- 设置面板 (`SettingsDialog`) 全面可滚动 + **Agent 路径覆盖折叠到高级**：12+ 个 agent 不再裁切；窗口高度自适应，最大屏高 85%
+- `Pyproject` / `BAT` / `memory_sync_app.py` / `safe_io.py` / `agent_memory.py` 等多处升级到 OneDrive 友好版本
+
+### Added
+
+- 新增 `tools/migrate_v13_to_v14.py`：一次性迁移脚本，把项目内 `data/` 合并到 OneDrive `AgentMemory/`，按 SQLite PRIMARY KEY 与 md 块 hash 去重；写入前自动备份
+- 新增 `MemoryDatabase.insert_memories_batch()`：批量插入接口（自动事务 / fsync 一次 / tag 缓存）
+
+### Security / Privacy
+
+- 迁移后产生的 `data/` 仍在 `.gitignore` 内（`data/`、`*.db`）；不会进入仓库
+- 迁移脚本写入前自动备份 `OneDrive/AgentMemory/` 到 `OneDrive/AgentMemory._backup_<时间戳>`，可手动还原
+- 本轮清理前额外备份污染库到 `%TEMP%/AgentMemorySystem_cleanup_backup_<时间戳>/`，用于回看递归样本与紧急回滚
+
 ## [v1.3.1] - 2026-06-25
 
 ### Fixed
+
 - 恢复并稳态化系统托盘常驻：跨设备启动器在每台机器上把 OneDrive 里的 `AgentMemorySync/` 分发包同步到 `%TEMP%\AgentMemorySync_Run\`，本地副本启动，从此避免直接从 OneDrive 目录运行 EXE 触发 `Shell_NotifyIconW` 失败
 - `_data_dir()` 升级支持 `AGENT_MEMORY_DATA_DIR` 环境变量优先：跨设备启动器把数据目录显式绑定回 OneDrive 项目的 `data/` 子目录，保证本地副本与 OneDrive 数据真正共用
 - `build.py` 同步 OneDrive 分发包时遇到 OneDrive 句柄锁导致 `WinError 183`：增加 `_safe_remove_dir()` 重命名兜底，让旧分发包稳定被替换，不再出现"打包失败"
 - 跨设备启动器原计划包含中文提示，遇到编码问题；改为纯 ASCII + 显式变量回显，兼容 Windows 老版本 cmd.exe 与 ISE
 
 ### Changed
+
 - `build.py` 流程改造：先构建到本地 Temp，再拷贝一份干净的 `AgentMemorySync/` 同步到项目根目录供 OneDrive 分发，最后安装一份到 `%TEMP%\AgentMemorySync_Run\` 作为本地运行副本
 - 编写并提交跨设备启动器 `AgentMemorySync.bat`，仅作为项目唯一用户入口（双击即可在任意设备运行；不直接运行 OneDrive 包内 EXE）
 
 ### Removed
+
 - 移除本轮排查遗留的本地日志（`bootstrap.log` / `early_boot.log` / `build_v3.txt` / `test_output.txt` / `$null` 等）和多个临时构建目录（`build_output/`、`AgentMemorySync.old_*/`）
 
 ### Security / Privacy
+
 - 项目内不再附带任何用户路径、个人数据、real log：所有运行时数据写入 `.gitignore` 之外的 `data/`，不会进入 Git 仓库
 
 ## [Unreleased]

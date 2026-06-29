@@ -177,7 +177,7 @@ class SyncEngine:
         if memory_root and memory_root != "auto":
             self.root = Path(memory_root)
         else:
-            # 统一使用 get_data_root()，兼容开发模式和打包模式
+            # 统一使用 get_data_root() - v1.3.2 起默认指向 OneDrive/AgentMemory/
             self.root = get_data_root()
         self.root.mkdir(parents=True, exist_ok=True)
 
@@ -277,6 +277,7 @@ class SyncEngine:
                     root=self.root,
                     local_files=local_files,
                     registry=registry,
+                    on_progress=lambda msg: self._emit(msg),
                 )
                 report.extract_results[agent_id] = ext_result
                 report.total_extracted += ext_result.get("extracted", 0)
