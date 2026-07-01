@@ -44,6 +44,44 @@ class WriteBackResult:
 
 
 # ---------------------------------------------------------------------------
+# 同步标记格式（方案 2 升级版：显式 hash marker）
+# ---------------------------------------------------------------------------
+# 设计要点：
+#   写入时统一输出 [sync:<id>|h:<content_hash>|src:<agent_id>]
+#   这样 target 文件里的"自愈指纹"和 SyncState 里记的"原始内容 hash"
+#   口径 1:1 一致，根本解决"hash 口径错位"。
+#   老格式 [sync:<id>] (无 h:) 视为 legacy，reconcile 时保守处理。
+
+def format_sync_marker(mem) -> str:
+    """生成统一的同步标记字符串。
+    mem: MemoryEntry
+    """
+    from agent_memory import content_hash
+    h = content_hash(mem.content)
+    return "[sync:{}|h:{}|src:{}]".format(mem.id, h, mem.agent_id)
+
+
+def parse_sync_marker(text: str) -> dict:
+    """从文本片段里捕捉 [sync:...] 系列标记。
+    返回 None 或 dict{id,h,src}。
+    支持老格式 [sync:<id>] (无 h: 无 src:)。
+    """
+    import re
+    m = re.search(r"\[sync:([^\]]+)\]", text)
+    if not m:
+        return None
+    raw = m.group(1)
+    parts = {} if "|" not in raw else dict(
+        (k.strip(), v.strip())
+        for k, v in (seg.split(":", 1) for seg in raw.split("|") if ":" in seg)
+    )
+    # 兼容老格式：[sync:<id>]
+    if "id" not in parts:
+        parts["id"] = raw.strip()
+    return parts
+
+
+# ---------------------------------------------------------------------------
 # 去重状态管理
 # ---------------------------------------------------------------------------
 
@@ -86,6 +124,66 @@ class SyncState:
         if agent_id not in self.state:
             self.state[agent_id] = {}
         self.state[agent_id][h] = datetime.now(timezone.utc).isoformat()
+
+    # ------------------------------------------------------------------
+    # 自愈机制（方案 2 升级版）：显式 hash marker + legacy 保守模式
+    # ------------------------------------------------------------------
+    def reconcile_with_target_hashes(
+        self,
+        agent_id: str,
+        actual_hashes: set,
+        legacy_count: int = 0,
+        target_file_present: bool = True,
+    ) -> dict:
+        """把 SyncState[agent_id] 与目标文件中实际存在的 hash 对齐。
+
+        关键设计：以“显式 hash marker (新格式)”为唯一真相源。
+        老格式(无 h: 字段)的 marker 不参与比对,只记数。
+
+        保守模式：
+          - 目标文件不存在 → 不删 state。
+          - 只有 legacy 没有新 marker → 不删 state。
+          这避免“hermes 永远写入 0”现象的成因。
+
+        返回: {removed, kept, actual_only, conservative}
+        """
+        tracked = set(self.state.get(agent_id, {}).keys())
+        result = {
+            "removed": 0,
+            "kept": len(tracked),
+            "actual_only": 0,
+            "conservative": False,
+        }
+
+        # 保守模式 1：目标文件不存在
+        if not target_file_present:
+            result["conservative"] = True
+            return result
+
+        # 保守模式 2：只有 legacy marker 没有新 marker
+        if legacy_count > 0 and not actual_hashes:
+            result["conservative"] = True
+            return result
+
+        # 正常模式：删除 tracked 中孤儿，保留交集
+        to_remove = tracked - actual_hashes
+        result["actual_only"] = len(actual_hashes - tracked)
+        if agent_id in self.state and to_remove:
+            for h in to_remove:
+                self.state[agent_id].pop(h, None)
+        result["removed"] = len(to_remove)
+        result["kept"] = len(tracked & actual_hashes)
+
+        if (
+            self.state.get(agent_id) is not None
+            and not self.state[agent_id]
+        ):
+            self.state.pop(agent_id, None)
+        return result
+
+    def bulk_known_hashes(self, agent_id: str) -> set:
+        """返回 SyncState[agent_id] 跟踪的全部 hash 集合（用于比对 / 调试）。"""
+        return set(self.state.get(agent_id, {}).keys())
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +258,173 @@ class BaseMemoryWriter(ABC):
             写回结果
         """
         pass
+
+    # ------------------------------------------------------------------
+    # 自愈钩子（方案 2）：每个 writer 负责告诉 SyncState
+    # "目标文件里实际存在哪些我曾经写入过的内容指纹"
+    # ------------------------------------------------------------------
+    def extract_target_info(
+        self,
+        agent_id: str,
+        target_path: Path,
+    ) -> dict:
+        """扫描目标文件，返回自愈 reconcile 所需的全部信息。
+
+        新方法（v2），提供比 extract_hashes_in_target 更丰富的信号：
+          - hashes: set[str]  解析得到的 content_hash 集合
+          - legacy: int       仅有 legacy [sync:<id>] 格式的条目数
+          - file_present: bool 目标文件（或子文件）是否存在
+
+        子类只需覆盖此方法；老方法 extract_hashes_in_target 仍存在以兼容
+        早期调用方，等价于本方法的 hashes 字段。
+        """
+        try:
+            text, candidates = self._read_target_text_safe(target_path)
+        except Exception as e:
+            self.logger.warning(
+                "extract_target_info 读目标失败({}): {}".format(type(self).__name__, e)
+            )
+            return {"hashes": set(), "legacy": 0, "file_present": False}
+
+        if not text or not candidates:
+            return {"hashes": set(), "legacy": 0, "file_present": False}
+
+        # 默认实现走与 extract_hashes_via_sync_marker 同样的"h: 字段"策略
+        hashes = self._parse_marker_hashes(text)
+        legacy = self._count_legacy_markers(text) - len(hashes)
+        return {"hashes": hashes, "legacy": legacy, "file_present": True}
+
+    def extract_hashes_in_target(
+        self,
+        agent_id: str,
+        target_path: Path,
+    ) -> set:
+        """旧接口，保持向后兼容。直接转调 extract_target_info。
+
+        Returns
+        -------
+        set[str]: 目标文件里仍可识别出的"同步产物"hash 集合。
+        """
+        try:
+            return self.extract_target_info(agent_id, target_path).get("hashes", set())
+        except Exception as e:
+            self.logger.warning(
+                "extract_hashes_in_target 失败({}): {}".format(type(self).__name__, e)
+            )
+            return set()
+
+    # ----------------------- helpers -----------------------
+    def _read_target_text_safe(self, target_path: Path) -> tuple:
+        """读取目标路径下的候记忆文件。
+
+        返回 (combined_text, candidates)：
+          - candidates 为找到的文件列表，子类可作精细处理。
+          - combined_text 是所有候选内容的拼接。
+        """
+        candidates = []
+        if target_path.is_file():
+            candidates.append(target_path)
+        elif target_path.is_dir():
+            for name in self._candidate_filenames():
+                p = target_path / name
+                if p.exists() and p.is_file():
+                    candidates.append(p)
+        if not candidates:
+            return ("", [])
+        chunks = []
+        for fp in candidates:
+            try:
+                t = _safe_read_text(fp, default="")
+            except Exception:
+                continue
+            if t:
+                chunks.append(t)
+        return ("\n".join(chunks), candidates)
+
+    def _candidate_filenames(self) -> tuple:
+        return (
+            "MEMORY.md", "memory.md", "memories.md",
+            "user_profile.md", "shared.md", "memory_shared.md",
+            "shared_from_agents.md",
+        )
+
+    def _parse_marker_hashes(self, text: str) -> set:
+        import re
+        hashes = set()
+        if not text:
+            return hashes
+        for m in re.finditer(r"\[sync:([^\]]+)\]", text):
+            raw = m.group(1)
+            if "h:" in raw:
+                for s in raw.split("|"):
+                    s = s.strip()
+                    if s.startswith("h:"):
+                        hv = s[2:].strip()
+                        if hv:
+                            hashes.add(hv)
+        return hashes
+
+    def _count_legacy_markers(self, text: str) -> int:
+        """统计所有 [sync:...] marker 总数（含已迁移为含 h: 的）。"""
+        import re
+        return len(re.findall(r"\[sync:[^\]]+\]", text or ""))
+
+
+    def _extract_hashes_via_sync_marker(
+        self,
+        agent_id: str,
+        target_path: Path,
+    ) -> set:
+        """通用启发式（方案 2 升级版）：直接解析文件中所有
+        ``[sync:...|h:...]`` marker，提取 ``h:`` 字段。
+
+        作为"未知 agent"最后的兜底：子类未覆盖
+        ``extract_hashes_in_target`` 时使用。为保证写入 marker 与 state
+        hash 口径一致，这里只解析正经 marker。
+
+        老格式（无 h: 字段）将被忽略并记警告，等待下次完整同步重写。
+        """
+        import re
+        candidates = []
+        if target_path.is_file():
+            candidates.append(target_path)
+        elif target_path.is_dir():
+            for name in (
+                "MEMORY.md", "memory.md", "memories.md",
+                "user_profile.md", "shared.md", "memory_shared.md",
+                "shared_from_agents.md",
+            ):
+                p = target_path / name
+                if p.exists() and p.is_file():
+                    candidates.append(p)
+        hashes = set()
+        legacy_count = 0
+        for fp in candidates:
+            try:
+                text = _safe_read_text(fp, default="")
+            except Exception:
+                continue
+            if not text:
+                continue
+            for m in re.finditer(r"\[sync:([^\]]+)\]", text):
+                raw = m.group(1)
+                if "h:" in raw:
+                    parts = [s.strip() for s in raw.split("|") if ":" in s]
+                    hv = next(
+                        (s.split(":", 1)[1].strip() for s in parts if s.startswith("h:")),
+                        None,
+                    )
+                    if hv:
+                        hashes.add(hv)
+                else:
+                    legacy_count += 1
+        if legacy_count:
+            self.logger.info(
+                "通用钩子({}): 检测到 {} 条 legacy 同步条目（无 h: 字段），保守保留 state".format(
+                    agent_id, legacy_count
+                )
+            )
+        return hashes
 
     def _do_backup(self, file_path: Path, backup_dir: Path) -> Optional[str]:
         if backup_dir and file_path.exists():
@@ -296,8 +561,52 @@ class ClaudeMemoryWriter(BaseMemoryWriter):
 
         return dirs
 
+    # Claude 自愈钩子 v2：返回 dict（含 legacy + file_present）
+    def extract_target_info(self, agent_id: str, target_path: Path) -> dict:
+        memory_dirs = self._find_memory_dirs(target_path)
+        hashes = set()
+        legacy_count = 0
+        file_present = False
+        for d in memory_dirs:
+            f = d / "shared_from_agents.md"
+            if not f.exists():
+                continue
+            file_present = True
+            try:
+                text = _safe_read_text(f, default="")
+            except Exception:
+                continue
+            if not text:
+                continue
+            import re
+            for m in re.finditer(r"\[sync:([^\]]+)\]", text):
+                raw = m.group(1)
+                if "h:" in raw:
+                    seg = raw.split("|")
+                    part = dict(
+                        (k.strip(), v.strip())
+                        for k, v in (s.split(":", 1) for s in seg if ":" in s)
+                    )
+                    if "h" in part:
+                        hashes.add(part["h"])
+                else:
+                    legacy_count += 1
+        if legacy_count:
+            self.logger.info(
+                "Claude: 检测到 {} 条 legacy，保守保留 state".format(legacy_count))
+        return {"hashes": hashes, "legacy": legacy_count, "file_present": file_present}
+
+    def extract_hashes_in_target(self, agent_id: str, target_path: Path) -> set:
+        return self.extract_target_info(agent_id, target_path)["hashes"]
+
     def _format_memories(self, memories: list[MemoryEntry]) -> str:
-        """格式化记忆为 Claude 子文件格式"""
+        """格式化记忆为 Claude 子文件格式
+
+        每条记忆都嵌入显式同步 marker：
+            [sync:<id>|h:<content_hash>|src:<agent_id>]
+        这样 Claude 的目标子文件 (shared_from_agents.md) 即使被人类
+        改了格式，reconciler 仍能从文本中精确解析 hash set。
+        """
         lines = [
             "---",
             "name: 来自其他 Agent 的共享记忆",
@@ -313,8 +622,10 @@ class ClaudeMemoryWriter(BaseMemoryWriter):
         ]
 
         for mem in memories:
+            marker = format_sync_marker(mem)
             lines.append("## [{}] {}".format(mem.agent_id, mem.id))
             lines.append("")
+            lines.append("- sync_marker: {}".format(marker))
             lines.append("- 来源: {}".format(mem.agent_id))
             lines.append("- 时间: {}".format(mem.timestamp))
             if mem.tags:
@@ -397,7 +708,7 @@ class TraeMemoryWriter(BaseMemoryWriter):
 
             # 追加记忆
             for mem in new_memories:
-                marker = "[sync:{}]".format(mem.id)
+                marker = format_sync_marker(mem)
                 entry = "\n- {} {} — 来自 {} ({})\n".format(
                     marker, mem.content, mem.agent_id, mem.timestamp[:10]
                 )
@@ -434,6 +745,42 @@ class TraeMemoryWriter(BaseMemoryWriter):
             self.sync_state.mark_written(agent_id, mem.content)
 
         return result
+
+    # ------------------------------------------------------------------
+    # Trae 自愈钩子 v2：返回 dict（含 legacy + file_present）
+    def extract_target_info(self, agent_id: str, target_path: Path) -> dict:
+        if target_path.name == "memory":
+            mem_dir = target_path
+        else:
+            mem_dir = target_path / "memory"
+        profile_path = mem_dir / "user_profile.md"
+        if not profile_path.exists():
+            return {"hashes": set(), "legacy": 0, "file_present": False}
+        try:
+            text = _safe_read_text(profile_path, default="")
+        except Exception:
+            return {"hashes": set(), "legacy": 0, "file_present": True}
+        hashes = set()
+        legacy_count = 0
+        if not text or self.SECTION_HEADER not in text:
+            return {"hashes": hashes, "legacy": 0, "file_present": True}
+        tail = text.split(self.SECTION_HEADER, 1)[1]
+        for line in tail.splitlines():
+            meta = parse_sync_marker(line)
+            if not meta:
+                continue
+            h = meta.get("h")
+            if h:
+                hashes.add(h)
+            elif "id" in meta:
+                legacy_count += 1
+        if legacy_count:
+            self.logger.info(
+                "Trae: 检测到 {} 条 legacy 同步条目，保守保留 state".format(legacy_count))
+        return {"hashes": hashes, "legacy": legacy_count, "file_present": True}
+
+    def extract_hashes_in_target(self, agent_id: str, target_path: Path) -> set:
+        return self.extract_target_info(agent_id, target_path)["hashes"]
 
 
 # ---------------------------------------------------------------------------
@@ -533,8 +880,8 @@ class HermesMemoryWriter(BaseMemoryWriter):
 
             # 追加记忆（用 § 分隔）
             for mem in new_memories:
-                marker = "[sync:{}]".format(mem.id)
-                entry = "\n§\n{} {} — 来自 {} ({})\n".format(
+                marker = format_sync_marker(mem)
+                entry = "\n§\n{} — 来自 {} ({})\n".format(
                     marker, mem.content, mem.agent_id, mem.timestamp[:10]
                 )
                 content = content.rstrip() + entry
@@ -578,6 +925,36 @@ class HermesMemoryWriter(BaseMemoryWriter):
             self.sync_state.mark_written(agent_id, mem.content)
 
         return result
+
+    # Hermes 自愈钩子 v2：直接返回 dict（含 legacy + file_present 信号）
+    def extract_target_info(self, agent_id: str, target_path: Path) -> dict:
+        md_path = target_path / "MEMORY.md"
+        if not md_path.exists():
+            return {"hashes": set(), "legacy": 0, "file_present": False}
+        try:
+            text = _safe_read_text(md_path, default="")
+        except Exception:
+            return {"hashes": set(), "legacy": 0, "file_present": True}
+        if not text:
+            return {"hashes": set(), "legacy": 0, "file_present": True}
+        hashes = set()
+        legacy_count = 0
+        for seg in text.split("§"):
+            meta = parse_sync_marker(seg)
+            if not meta:
+                continue
+            h = meta.get("h")
+            if h:
+                hashes.add(h)
+            elif "id" in meta:
+                legacy_count += 1
+        if legacy_count:
+            self.logger.info(
+                "Hermes: 检测到 {} 条 legacy 同步条目，保守保留 state".format(legacy_count))
+        return {"hashes": hashes, "legacy": legacy_count, "file_present": True}
+
+    def extract_hashes_in_target(self, agent_id: str, target_path: Path) -> set:
+        return self.extract_target_info(agent_id, target_path)["hashes"]
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +1045,7 @@ class GenericMarkdownWriter(BaseMemoryWriter):
             content = _safe_read_text(md_path, default="")
 
             for mem in new_memories:
-                marker = "[sync:{}]".format(mem.id)
+                marker = format_sync_marker(mem)
                 # 用内容第一行作为标题摘要，避免重复写入完整内容
                 first_line = mem.content.split("\n", 1)[0][:80]
                 entry = "\n---\n{} {} — 来自 {} ({})\n\n{}\n".format(
@@ -721,6 +1098,48 @@ class GenericMarkdownWriter(BaseMemoryWriter):
             self.sync_state.mark_written(agent_id, mem.content)
 
         return result
+
+    # Generic 自愈钩子 v2：返回 dict（含 legacy + file_present）
+    def extract_target_info(self, agent_id: str, target_path: Path) -> dict:
+        candidates = []
+        if target_path.is_file():
+            candidates.append(target_path)
+        elif target_path.is_dir():
+            names = list(self.MEMORY_FILENAMES) + [
+                "shared.md", "memory_shared.md", "shared_from_agents.md",
+            ]
+            for name in names:
+                p = target_path / name
+                if p.exists() and p.is_file():
+                    candidates.append(p)
+
+        hashes = set()
+        legacy_count = 0
+        file_present = bool(candidates)
+        for fp in candidates:
+            try:
+                text = _safe_read_text(fp, default="")
+            except Exception:
+                continue
+            if not text:
+                continue
+            for seg in text.split("\n---\n"):
+                meta = parse_sync_marker(seg)
+                if not meta:
+                    continue
+                h = meta.get("h")
+                if h:
+                    hashes.add(h)
+                elif "id" in meta:
+                    legacy_count += 1
+        if legacy_count:
+            self.logger.info(
+                "Generic({}): 检测到 {} 条 legacy，保守保留 state".format(
+                    agent_id, legacy_count))
+        return {"hashes": hashes, "legacy": legacy_count, "file_present": file_present}
+
+    def extract_hashes_in_target(self, agent_id: str, target_path: Path) -> set:
+        return self.extract_target_info(agent_id, target_path)["hashes"]
 
     def _find_memory_file(self, target_path: Path) -> Optional[Path]:
         """查找现有的记忆文件"""

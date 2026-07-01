@@ -1,5 +1,129 @@
 # 开发日志
 
+## 2026-07-01：方案 2 v2 显式 hash marker 自愈（未端到端验证）
+
+### 背景
+
+用户实测跑了 `python memory_sync_app.py --cli`，观察到异常：
+
+```text
+取: 3 条
+融合: 9 条新增共享
+写回: 9 条
+跳过(去重): 51 条
+...
+hermes: 写入 0 条, 跳过 6 条, 待合并 0 个
+```
+
+直接看 `.sync_state.json`：hermes 的 6 个 hash **全部存在于 shared.db 实际存储内容里**。但 `hermes` `MEMORY.md` 实际只有 2 段记忆，**根本没有那 6 条**。结论：state 被错算成"写过"，导致同步永远 0 条写入（hermes 长期孤立的根因）。
+
+经过 audit 发现两套 hash 口径混着用：
+
+- SyncState 记录的是 `content_hash(mem.content)`（原始记忆 hash）
+- reconciler 比较时拿到的是整文件 / 整段的 `content_hash()`（包装后 hash）
+- 两口径完全不是一个东西 → 谁也不挨谁
+
+为此设计**方案 2 v2**：写入端显式 hash marker + reconciler 走 legacy 保守模式。
+
+### 改动清单
+
+1. **`sync_writers.py`：统一 sync marker 格式**
+   - 新增 `format_sync_marker(mem)` / `parse_sync_marker(text)` 工具
+   - 写入端格式：`[sync:<id>|h:<content_hash(mem.content)>|src:<agent_id>]`
+     与 SyncState 口径 1:1 强一致
+   - 老格式 `[sync:<id>]`（无 `h:`）被检测为 legacy，**不删 orphan**
+
+2. **`sync_writers.py`：4 个 writer 同步使用新 marker**
+   - Hermes：`§` 分段，每段入口嵌入新 marker
+   - Trae：user_profile.md `## Shared Knowledge` 段，列表项嵌入新 marker
+   - Claude：`shared_from_agents.md` 每条记忆独立成段，并在 front matter 下增加 `sync_marker:` 行兜底
+   - Generic：`---\n` 分块，每块开头嵌入新 marker
+
+3. **`sync_writers.py`：自愈钩子升级**
+   - `BaseMemoryWriter.extract_target_info` 返回 `{hashes:set, legacy:int, file_present:bool}`
+   - 4 个具体 writer 都提供 v2 override（Hermes 按 § 分段，Trae 找 `## Shared Knowledge`，Claude 扫 `shared_from_agents.md`，Generic 走 `---\n` 分块）
+   - 老接口 `extract_hashes_in_target(agent_id, path) -> set` 保留兼容
+   - 通用 fallback `_read_target_text_safe` / `_parse_marker_hashes` / `_count_legacy_markers` 复用
+
+4. **`sync_writers.py`：reconciler 升级**
+   - 升级 `SyncState.reconcile_with_target_hashes` 参数：
+     `legacy_count: int = 0, target_file_present: bool = True`
+   - 保守模式 1：目标文件不存在 → 保留全部 state（hermes 长期 0 条重演的根因）
+   - 保守模式 2：仅有 legacy marker、零新 marker → 保留全部 state
+   - 返回值新增 `conservative: bool` 字段
+
+5. **`sync_engine.py`：调用点升级**
+   - `writer.extract_hashes_in_target(...)` → `writer.extract_target_info(...)`
+   - reconciler 传 `legacy_count` 与 `file_present`
+   - `conservative=True` 时输出 `⚠ 自愈保守保留`
+
+### 关键设计决策
+
+- **为什么用显式 marker 而不是 sidecar manifest？**
+  sidecar 需要每个新 agent 启动时能找到对应文件，对市面大多数 agent 不友好。inline marker 在正文里，机器/人都能读，更适合"覆盖尽可能多 agent"的目标。
+
+- **保守模式是核心兜底**
+  老逻辑（reconciler 无脑删 orphan）一旦匹配口径错误就崩——会清空所有 state，下次又把 state 写脏。保守模式确保：**永不在目标文件不存在 / 口径未知时清空 state**。
+
+- **不重写 smem/hashing 协议**
+  `content_hash(mem.content)` 仍是单一真理源；我们只把它"显式化"到 marker 里。
+
+### 验证
+
+- **静态校验**（用户/AI 端人工）：
+  - `grep -n "format_sync_marker\|parse_sync_marker"` 在 sync_writers.py 中能复用
+  - 4 个具体 writer 的 `write()` 内 marker 拼接位置
+  - reconciler 签名与 sync_engine 调用点
+- **动态验证（未跑成功）**
+  - Bash 跑 `python -c "..."` 验证 round-trip 一直被 classifier 拦
+
+### 接手建议
+
+接手的人第一次跑 `python memory_sync_app.py --cli` 时关注：
+
+1. `日志里出现 "⚠ 自愈保守保留: <agent> (file_present=False, legacy=N)"` 是正常的——说明目标文件这次没读到；**不要立即改 sync_state，把它当 hint**
+2. 真正的"补漏"工作应该看：reconcile 返回 `conservative=False` + `removed>0` 才意味着 orphan 被清空
+3. 跑过一次成功后，老格式（无 `h:`）的同步条目会自动被新 marker 替换；legacy_count 会随时间收敛到 0
+4. 如果某 agent 持续 `写入 0 条`，问题大概率在 writer 自身，不是 state；用 `grep "通用 Writer"` 看是否走 Generic fallback
+
+### 遗留 TODO
+
+- [ ] 第一次端到端跑 `python memory_sync_app.py --cli` 看 hermes 是否补到那 6 条
+- [ ] 如 autonomous mode 介入，先跑 `--cli` 再考虑 GUI 自动同步
+- [ ] v1.4 把 `format_sync_marker` 抽到 `agent_memory.py` 顶层，让 CLI/memory 也复用
+
+---
+
+## 2026-06-29：单实例互斥锁收口 + 托盘最小化复核
+
+### 背景
+
+前一轮已经把跨设备启动链路和托盘常驻跑通，但 `_check_single_instance()` 里的 mutex 句柄只保存在局部变量中，理论上存在句柄过早释放的风险，可能让后续重复启动误判为首实例。
+
+### 改动清单
+
+1. **memory_sync_app.py：单实例互斥锁常驻化**
+   - 新增进程级 `_SINGLE_INSTANCE_MUTEX`
+   - `_check_single_instance()` 在创建 mutex 后将句柄保留到进程结束
+   - 避免局部变量生命周期结束后锁失效导致重复启动误判
+2. **test_full.py：补回归测试**
+   - 增加 mutex 常驻持有测试
+   - 增加冲突检测测试，确保已有实例时仍返回 False 并弹窗提示
+3. **清理**
+   - 删除本地无用目录：`.codepilot/`、`.codepilot-uploads/`、`docs/superpowers/`
+   - 删除一次性诊断脚本：`tools/_diag_old_structure.py`
+   - 删除旧的本地构建残留：`AgentMemorySync.old_*`
+
+### 验证
+
+- `python test_full.py`：`121/121` 通过
+- 真实启动验证：
+  - `Shell_NotifyIconW add=1 last_error=0`
+  - 关闭窗口后进程仍常驻，不会直接退出
+  - 托盘最小化与设置保存均正常
+
+---
+
 ## 2026-06-25：v1.3.1 跨设备启动器 + 本地副本 + OneDrive data 绑定（收官）
 
 ### 背景

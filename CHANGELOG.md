@@ -14,6 +14,7 @@
 - **消除启动器 SQLite 锁导致的根因**：FTS5 + WAL 在 OneDrive 上间歇性 `disk I/O error` 是主因；改 DELETE 模式后 OneDrive 不再等 SHM/WAL 文件句柄
 - **修复同步产物被再次提取导致递归膨胀**：在文件扫描、Markdown / Hermes / JSONL 解析、提取入库三层同时过滤 `shared_from_agents.md`、`## Shared Knowledge`、`[sync:mem_*]` 等写回产物，阻断自我回灌
 - **修复跨运行重复提取**：`extract_local_to_fused()` 在入库前按标准化内容做跨运行去重，同一条本地记忆再次扫描时只记为 skipped，不再重复写入 `agent_*.db` / `shared.db`
+- **修复单实例 mutex 句柄过早释放的隐患**：`_check_single_instance()` 改为把 `Global\\AgentMemorySyncMutex` 保存在进程级 `_SINGLE_INSTANCE_MUTEX`，避免局部变量生命周期结束后锁失效导致重复启动误判
 
 ### Changed
 
@@ -56,6 +57,17 @@
 - 项目内不再附带任何用户路径、个人数据、real log：所有运行时数据写入 `.gitignore` 之外的 `data/`，不会进入 Git 仓库
 
 ## [Unreleased]
+
+### Fixed
+
+- **修复 hermes 等 agent 长期"写回 0 条"问题（方案 2 v2 显式 hash 自愈）**：
+  - 老逻辑用 `content_hash(mem.content)` 记入 `sync_state`，但 reconciler 比较时拿到的是整文件/整段 `content_hash()`，两种口径不一致 → 目标文件里根本没有产生新内容、state 却被错算成"已写过"，导致下次同步永远 0 条写入
+  - 新逻辑：所有 writer（H 文件追加 § 段 / Trae 追加列表 / Claude 独立子文件 / Generic `---\n` 分块）写入时统一内嵌显式 marker `[sync:<id>|h:<content_hash(mem.content)>|src:<agent_id>]`，让 marker 中的 `h:` 与 SyncState 记录的 `content_hash` 口径 1:1，强一致
+  - reconciler 升级：
+    - 文件不存在 / 仅有 legacy 老格式 marker → **保守保留 state**，不删 orphan，避免"hermes 写回 0"现象复发
+    - 目标文件存在且确实含新 marker → `tracked - actual_hashes` 即孤儿，删除
+  - 各 writer 升级 `extract_target_info` 返回 `{hashes, legacy, file_present}` 三信号，对 Hermes 按 § 分段、Trae 找 `## Shared Knowledge`、Claude 扫 `shared_from_agents.md`、Generic 走 `---\n`——不靠"整文件指纹"这种户森迷雾法
+  - sync_engine.py reconciler 调用同步升级为新 API，并对 `conservative=True` 的情况输出"⚠ 自愈保守保留"提示方便排错
 
 ### Added
 

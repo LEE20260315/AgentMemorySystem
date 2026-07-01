@@ -346,6 +346,40 @@ class SyncEngine:
                 report.total_skipped += wb_result.skipped
                 report.total_pending += wb_result.pending
 
+                # ------------------------------------------------------------------
+                # 方案 2 v2：写回完成后调用 reconciler，使用显式 hash 口径。
+                #   target_info["hashes"]     解析得到的 content_hash 集合
+                #   target_info["legacy"]     legacy marker 数（口径未知，保守保留）
+                #   target_info["file_present"] 文件是否存在
+                # 兼容任意 Agent：每个 BaseMemoryWriter 子类各自实现；
+                # 通用 Markdown Agent 也有兜底。
+                # ------------------------------------------------------------------
+                try:
+                    target_info = writer.extract_target_info(extract_id, target_path)
+                    actual_hashes = target_info.get("hashes", set())
+                    legacy_count = int(target_info.get("legacy", 0))
+                    file_present = bool(target_info.get("file_present", False))
+                    reconcile = self.sync_state.reconcile_with_target_hashes(
+                        extract_id,
+                        actual_hashes,
+                        legacy_count=legacy_count,
+                        target_file_present=file_present,
+                    )
+                    if reconcile["removed"] > 0:
+                        self._emit(
+                            "  ✓ 自愈: {} 删除 {} 条孤儿 hash，保留 {} 条".format(
+                                agent_id, reconcile["removed"], reconcile["kept"]
+                            )
+                        )
+                    if reconcile.get("conservative"):
+                        self._emit(
+                            "  ⚠ 自愈保守保留: {} (file_present={}, legacy={})".format(
+                                agent_id, file_present, legacy_count
+                            )
+                        )
+                except Exception as e:
+                    self._emit("  ⚠ 自愈 reconcile 失败({}): {}".format(agent_id, e))
+
                 if wb_result.errors:
                     for err in wb_result.errors:
                         err_str = str(err)
