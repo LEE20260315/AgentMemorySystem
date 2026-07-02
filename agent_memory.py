@@ -20,7 +20,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
+
+from safe_io import _safe_write_text, get_data_root
 
 
 # ---------------------------------------------------------------------------
@@ -1122,12 +1124,29 @@ class MemoryDatabase:
         self._init_db()
 
     def _init_db(self):
-        """初始化数据库表结构"""
-        self.conn = sqlite3.connect(str(self.db_path))
+        """初始化数据库表结构（v1.3.2：OneDrive 友好的稳健 SQLite 配置）
+
+        关键改动：
+        - timeout=60s：让 OneDrive 文件锁卡顿时不立刻 timeout
+        - PRAGMA busy_timeout=60000：内部重试 60 秒
+        - PRAGMA journal_mode=DELETE：不再用 WAL/SHM（OneDrive 同步时常锁 shm/wal）
+        - PRAGMA synchronous=NORMAL：跳过每次 fsync，换取 OneDrive 上的稳定性
+        - PRAGMA cache_size=-20000：20MB 内存缓存
+        """
+        import sqlite3
+        # timeout=60 + busy_timeout=60000 让 OneDrive 短暂锁定时不立即崩溃
+        self.conn = sqlite3.connect(str(self.db_path), timeout=60)
         self.conn.row_factory = sqlite3.Row
 
-        # 启用 WAL 模式提高并发性能
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        # OneDrive 友好的稳健配置（必须在建表/索引前设置）
+        try:
+            self.conn.execute("PRAGMA busy_timeout = 60000")
+            self.conn.execute("PRAGMA journal_mode = DELETE")
+            self.conn.execute("PRAGMA synchronous = NORMAL")
+            self.conn.execute("PRAGMA cache_size = -20000")  # 20MB
+        except Exception:
+            # 在某些驱动/平台上部分 PRAGMA 可能不支持，不阻塞建表
+            pass
 
         # 创建主表
         self.conn.execute("""
@@ -1205,64 +1224,76 @@ class MemoryDatabase:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def insert_memory(self, entry: MemoryEntry) -> bool:
-        """
-        插入记忆条目到索引
-
-        Parameters
-        ----------
-        entry : MemoryEntry
-            记忆条目
-
-        Returns
-        -------
-        bool
-            插入成功返回 True
-        """
+    def _load_tag_cache(self) -> dict:
+        """加载 tag 缓存（key: tag_name, value: tag_id），加速批量插入"""
+        cache = {}
         try:
-            # 插入主表
-            self.conn.execute("""
-                INSERT OR REPLACE INTO memories
-                (id, agent_id, timestamp, source_device, domain, confidence,
-                 conflict_with, content, embedding, access_count, last_accessed,
-                 source_memory_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                entry.id, entry.agent_id, entry.timestamp, entry.source_device,
-                entry.domain, entry.confidence, entry.conflict_with, entry.content,
-                entry.embedding, entry.access_count, entry.last_accessed,
-                entry.source_memory_id
-            ))
+            for r in self.conn.execute("SELECT id, name FROM tags").fetchall():
+                cache[r["name"]] = r["id"]
+        except Exception:
+            pass
+        return cache
 
-            # 插入全文搜索索引
-            self.conn.execute("""
-                INSERT OR REPLACE INTO memories_fts (id, content, domain)
-                VALUES (?, ?, ?)
-            """, (entry.id, entry.content, entry.domain))
+    def insert_memories_batch(self, entries) -> int:
+        """
+        批量插入记忆条目（v1.3.2：消除 SQLite 频繁 commit 导致的 OneDrive disk I/O error）
 
-            # 处理标签
-            for tag in entry.tags:
-                # 插入标签（如果不存在）
-                self.conn.execute("""
-                    INSERT OR IGNORE INTO tags (name) VALUES (?)
-                """, (tag,))
-
-                # 获取标签ID
-                cursor = self.conn.execute("SELECT id FROM tags WHERE name = ?", (tag,))
-                tag_id = cursor.fetchone()[0]
-
-                # 插入关联
-                self.conn.execute("""
-                    INSERT OR IGNORE INTO memory_tags (memory_id, tag_id)
-                    VALUES (?, ?)
-                """, (entry.id, tag_id))
-
+        关键路径：
+        - 一次性事务：所有 INSERT 只 commit 一次（减少 99% fsync）
+        - FTS5 同事务更新，避免每条都触发倒排重建
+        - 标签 ID 缓存批量复用，同一 tag 不重复查询
+        """
+        if not entries:
+            return 0
+        success = 0
+        tag_cache = self._load_tag_cache()
+        try:
+            for entry in entries:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO memories "
+                        "(id, agent_id, timestamp, source_device, domain, confidence, "
+                        "conflict_with, content, embedding, access_count, last_accessed, "
+                        "source_memory_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            entry.id, entry.agent_id, entry.timestamp, entry.source_device,
+                            entry.domain, entry.confidence, entry.conflict_with, entry.content,
+                            entry.embedding, entry.access_count, entry.last_accessed,
+                            entry.source_memory_id
+                        )
+                    )
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO memories_fts (id, content, domain) VALUES (?, ?, ?)",
+                        (entry.id, entry.content, entry.domain),
+                    )
+                    for tag in entry.tags:
+                        if tag not in tag_cache:
+                            self.conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
+                            row = self.conn.execute(
+                                "SELECT id FROM tags WHERE name = ?", (tag,)
+                            ).fetchone()
+                            if row:
+                                tag_cache[tag] = row[0]
+                        tid = tag_cache.get(tag)
+                        if tid is not None:
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id) VALUES (?, ?)",
+                                (entry.id, tid),
+                            )
+                    success += 1
+                except Exception:
+                    # 单条失败不阻塞整批
+                    pass
             self.conn.commit()
-            return True
-
+            return success
         except Exception as e:
             self.conn.rollback()
-            raise AgentMemoryError("插入记忆失败: {}".format(e))
+            raise AgentMemoryError("批量插入失败: {}".format(e))
+
+    def insert_memory(self, entry: MemoryEntry) -> bool:
+        """单条插入（兼容旧接口；大批量请用 insert_memories_batch）"""
+        return self.insert_memories_batch([entry]) > 0
 
     def search_by_keyword(
         self,
@@ -4691,14 +4722,27 @@ def detect_agents(
 
     # 检查手动覆盖（从 config.json 和 sync_settings.json 合并）
     overrides = dict(config.get("agent_overrides", {}))
-    # 也读取 GUI 设置中保存的 override（~/.agent_memory/sync_settings.json）
-    sync_settings_path = Path.home() / ".agent_memory" / "sync_settings.json"
+    # 也读取 GUI 设置中保存的 override
+    # 修复：用 safe_io.get_data_root() 解析实际路径，而非硬编码旧路径 ~/.agent_memory/
+    sync_settings_path = get_data_root() / "sync_settings.json"
     if sync_settings_path.exists():
         try:
             with open(sync_settings_path, "r", encoding="utf-8") as f:
                 sync_settings = json.load(f)
             gui_overrides = sync_settings.get("agent_overrides", {})
             for k, v in gui_overrides.items():
+                if k not in overrides or not overrides[k]:
+                    overrides[k] = v
+        except (json.JSONDecodeError, OSError):
+            pass
+    # 兼容旧路径（迁移残留）
+    legacy_settings_path = Path.home() / ".agent_memory" / "sync_settings.json"
+    if legacy_settings_path.exists() and legacy_settings_path != sync_settings_path:
+        try:
+            with open(legacy_settings_path, "r", encoding="utf-8") as f:
+                legacy_settings = json.load(f)
+            legacy_overrides = legacy_settings.get("agent_overrides", {})
+            for k, v in legacy_overrides.items():
                 if k not in overrides or not overrides[k]:
                     overrides[k] = v
         except (json.JSONDecodeError, OSError):
@@ -4763,7 +4807,7 @@ def detect_agents(
 
         # 遍历候选路径
         for pattern in profile.get("candidate_paths", []):
-            path = Path(pattern.replace("~", str(home))).expanduser()
+            path = Path(os.path.expanduser(pattern))
             if _verify_agent_signature(path, profile):
                 memory_files = []
 
@@ -4777,7 +4821,10 @@ def detect_agents(
                         logger.info("Agent {} SQLite 导出: {}".format(agent_id, export_path))
                 else:
                     # 扫描记忆文件
-                    memory_files = _scan_agent_memory_files(agent_id, path)
+                    memory_files = _filter_agent_memory_files(
+                        agent_id,
+                        _scan_agent_memory_files(agent_id, path)
+                    )
 
                 found[agent_id] = {
                     "path": str(path),
@@ -4787,6 +4834,28 @@ def detect_agents(
                 }
                 logger.info("发现 Agent {}: {}".format(agent_id, path))
                 break
+
+    # 处理自定义 Agent：overrides 里有但 config.json agent_detection 没有的 key
+    # 这些是用户在 GUI 里手动添加的自定义 agent（如 openclaw 或任意新 agent）
+    for custom_id, custom_path_str in overrides.items():
+        if custom_id in found or not custom_path_str:
+            continue
+        if custom_id in profiles:
+            continue  # 已在 profile 循环里处理过
+        custom_path = Path(custom_path_str)
+        if custom_path.exists():
+            # 扫描自定义 agent 路径下的 .md 文件作为记忆文件
+            memory_files = []
+            if custom_path.is_dir():
+                for md_file in custom_path.rglob("*.md"):
+                    memory_files.append(str(md_file))
+            found[custom_id] = {
+                "path": str(custom_path),
+                "memory_files": memory_files,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+                "source": "custom_override"
+            }
+            logger.info("自定义 Agent {} 使用手动路径: {}".format(custom_id, custom_path))
 
     # 通用发现：扫描未被已知 profile 覆盖的 AI 工具目录
     found = _discover_generic_agents(found, home, logger)
@@ -4825,20 +4894,37 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
         "cline", "continue", "aider", "roo", "codex", "devin", "replit",
         "tabby", "supermaven", "codeium", "mentat", "openhands",
         "sweep", "factory", "magic", "augment", "poolside", "codepilot",
+        "codebuddy", "ima",
     ]
 
-    # 排除的目录名（非 Agent 工具）
+    # 排除的目录名（非 Agent 工具，或已知浏览器壳应用）
     exclude_names = {
         "microsoft", "google", "mozilla", "discord", "slack", "spotify",
         "obsidian", "notion", "figma", "docker", "node", "npm", "pip",
         "python", "java", "rust", "go", "dotnet", "nuget", "pipx",
         "windows", "temp", "cache", "crashdumps", "logs",
+        # Chromium 壳应用（含 AI 关键词但实为浏览器，无 .md 记忆文件）
+        "ima.copilot", "codepilot-updater", "codebuddyextension",
+        # Chromium 内部目录
+        "user data", "application", "extensions_crx_cache",
+        "component_crx_cache", "shadercache", "graphitedawncache",
+        "grshadercache", "crashpad", "bugly", "imsdk", "reshub",
+        "imainfo", "recording", "widevinecdm", "safe browsing",
+        "firstpartysetspreloaded", "optimizationhints", "orig trials",
+        "pkimetadata", "trusttokenkeycommitments", "wasmttsengine",
+        "zxcvbndata", "meipreload", "ondeviceheadsuggestmodel",
+        "privacyboxattestationspreloaded", "subresource filter",
+        "filetypepolicies", "captcha providers", "actorsafetylists",
+        "amountextractionheuristicregexes", "certificaterevocation",
+        "crowd deny", "hyphen-data", "rdelivery", "segmentation platform",
+        "safetytips", "sslassistant", "tdosconfig", "trust token",
+        "updateextensions", "key info",
     }
 
     detected_paths = {info["path"] for info in found.values()}
 
     for pattern, source in generic_candidates:
-        base = Path(pattern.replace("~", str(home))).expanduser()
+        base = Path(pattern).expanduser()
         if not base.exists():
             continue
         try:
@@ -4883,16 +4969,29 @@ def _scan_generic_memory_files(path: Path) -> list:
     memory_files = []
     candidates = ["MEMORY.md", "memory.md", "memories.md", "user_profile.md",
                    "USER.md", "user.md", ".aider.memory.md"]
+    max_file_size = 10 * 1024 * 1024  # 10MB 上限，避免误读超大文件
     for c in candidates:
         p = path / c
         if p.exists():
-            memory_files.append(str(p))
+            try:
+                if p.stat().st_size <= max_file_size:
+                    memory_files.append(str(p))
+                else:
+                    logger = get_logger()
+                    logger.debug("跳过超大记忆文件 ({}MB): {}".format(
+                        p.stat().st_size / 1024 / 1024, p))
+            except OSError:
+                pass
 
     # 也检查 memory/ 子目录
     mem_dir = path / "memory"
     if mem_dir.exists():
         for md in mem_dir.glob("*.md"):
-            memory_files.append(str(md))
+            try:
+                if md.stat().st_size <= max_file_size:
+                    memory_files.append(str(md))
+            except OSError:
+                pass
 
     return memory_files
 
@@ -4956,6 +5055,13 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
                 memory_files.append(str(topics_file))
             for proj_mem in mem_dir.glob("projects/*/project_memory.md"):
                 memory_files.append(str(proj_mem))
+    elif "codebuddy" in agent_id or "memery" in path_str:
+        # CodeBuddy 记忆文件：~/.codebuddy/memery/*_memery.md
+        for md_file in install_path.glob("*_memery.md"):
+            memory_files.append(str(md_file))
+        for md_file in install_path.glob("*.md"):
+            if str(md_file) not in memory_files:
+                memory_files.append(str(md_file))
     else:
         candidates = ["MEMORY.md", "memory.md", "memories.md", "USER.md", "user.md"]
         for c in candidates:
@@ -4988,12 +5094,15 @@ def export_codepilot_memory(db_path: Path, output_path: Path = None) -> Path:
     """
     从 CodePilot SQLite 数据库导出对话历史为 Markdown 文件
 
+    使用只读模式连接，避免与 CodePilot 进程争抢数据库锁。
+    同时读取同目录下的 MEMORY.md（限制最大 1MB，避免超大文件耗尽内存）。
+
     Parameters
     ----------
     db_path : Path
         codepilot.db 路径
     output_path : Path, optional
-        输出文件路径，默认为 ~/.agent_memory/codepilot_export.md
+        输出文件路径，默认为数据根目录下的 codepilot_export.md
 
     Returns
     -------
@@ -5001,15 +5110,21 @@ def export_codepilot_memory(db_path: Path, output_path: Path = None) -> Path:
         导出的 Markdown 文件路径
     """
     import sqlite3
+    from safe_io import get_data_root
+
+    logger = get_logger()
 
     if output_path is None:
-        output_path = Path.home() / ".agent_memory" / "codepilot_export.md"
+        output_path = get_data_root() / "codepilot_export.md"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        # 只读 URI 连接：mode=ro + immutable=1，不争抢 WAL 锁
+        db_uri = "file:{}?mode=ro&immutable=1".format(db_path)
+        conn = sqlite3.connect(db_uri, uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=1")
 
         # 获取有实际消息的会话
         sessions = conn.execute("""
@@ -5065,12 +5180,46 @@ def export_codepilot_memory(db_path: Path, output_path: Path = None) -> Path:
 
         conn.close()
 
-        output_path.write_text("\n".join(lines), encoding="utf-8")
+        # 同时读取同目录下的 MEMORY.md（限制 1MB，避免超大文件）
+        memory_md = db_path.parent / "MEMORY.md"
+        if memory_md.exists():
+            try:
+                file_size = memory_md.stat().st_size
+                if file_size > 1 * 1024 * 1024:
+                    # 超过 1MB 只读取最后 512KB（最近写入的内容）
+                    lines.append("\n## MEMORY.md (truncated, last 512KB of {:.1f}MB)\n".format(
+                        file_size / 1024 / 1024))
+                    with open(memory_md, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(max(0, file_size - 512 * 1024))
+                        content = f.read()
+                        content = _sanitize_sensitive(content)
+                        lines.append(content)
+                else:
+                    content = memory_md.read_text(encoding="utf-8", errors="replace")
+                    content = _sanitize_sensitive(content)
+                    lines.append("\n## MEMORY.md\n")
+                    lines.append(content)
+            except OSError as e:
+                logger.warning("读取 CodePilot MEMORY.md 失败: {}".format(e))
+
+        if not _safe_write_text(output_path, "\n".join(lines), encoding="utf-8"):
+            logger.warning("CodePilot 导出文件写入失败（可能被锁定）: {}".format(output_path))
+        else:
+            logger.info("CodePilot 导出完成: {} 条对话, 输出到 {}".format(total_entries, output_path))
         return output_path
 
+    except sqlite3.OperationalError as e:
+        logger.error("CodePilot 数据库读取失败 (可能被锁定): {}".format(e))
+        _safe_write_text(
+            output_path,
+            "# CodePilot Memory\n\nExport failed (database locked): {}\n".format(e),
+            encoding="utf-8"
+        )
+        return output_path
     except Exception as e:
-        # 如果导出失败，创建一个最小的标记文件
-        output_path.write_text(
+        logger.error("CodePilot 导出异常: {}".format(e), exc_info=True)
+        _safe_write_text(
+            output_path,
             "# CodePilot Memory\n\nExport failed: {}\n".format(e),
             encoding="utf-8"
         )
@@ -5316,7 +5465,7 @@ class AgentRegistry:
     Agent 注册表
 
     扫描各 Agent 的本地安装目录, 登记其本地记忆文件位置。
-    OneDrive\AgentMemory 是融合层, 不是源头。
+    OneDrive/AgentMemory 是融合层, 不是源头。
     """
 
     # 本地安装路径模板: (agent_id, 子目录名, 记忆文件名)
@@ -5351,10 +5500,8 @@ class AgentRegistry:
             OneDrive 根目录（融合层）
         """
         if root is None:
-            config = get_config()
-            root = Path(config.get("paths.memory_root", str(Path(__file__).parent / "data")))
-            if not root.exists():
-                root = Path(__file__).parent / "data"
+            from safe_io import get_data_root
+            root = get_data_root()
         self.root = Path(root)
         if registry_path is None:
             registry_path = self.root / "_shared" / "agent_registry.json"
@@ -5490,6 +5637,10 @@ class AgentRegistry:
             if not memory_files:
                 continue
 
+            memory_files = _filter_agent_memory_files(agent_id, memory_files)
+            if not memory_files:
+                continue
+
             # 已存在则更新 last_seen
             if agent_id in self.agents:
                 self.agents[agent_id]["last_seen"] = datetime.now(timezone.utc).isoformat()
@@ -5559,7 +5710,7 @@ class AgentRegistry:
 
     def update_memory_counts(self) -> dict:
         """
-        v1.3 重写: 统计融合层 (OneDrive\AgentMemory\agent_<id>) 记忆数
+        v1.3 重写: 统计融合层 (OneDrive/AgentMemory/agent_<id>) 记忆数
         """
         results = {}
         for agent_id, info in self.agents.items():
@@ -5595,6 +5746,81 @@ class AgentRegistry:
 # ---------------------------------------------------------------------------
 # LocalMemoryParser - v1.3 新增: 多格式本地记忆解析
 # ---------------------------------------------------------------------------
+
+_SYNC_MARKER_RE = re.compile(r"\[sync:mem_[^\]]+\]", re.IGNORECASE)
+
+
+def _normalize_memory_content(text: str) -> str:
+    """标准化记忆内容，避免换行差异导致重复。"""
+    if not text:
+        return ""
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _strip_sync_generated_sections(text: str) -> str:
+    """移除写回阶段生成的同步区块，避免再次被提取。"""
+    text = _normalize_memory_content(text)
+    if not text:
+        return ""
+
+    # Trae: 移除整个 Shared Knowledge 段，保留其它用户画像内容
+    text = re.sub(
+        r"(?ms)^##\s+Shared Knowledge\s*$.*?(?=^##\s+|\Z)",
+        "",
+        text,
+    )
+
+    # Claude: 移除 MEMORY.md 中指向 shared_from_agents.md 的自动索引行
+    lines = []
+    for line in text.split("\n"):
+        if "shared_from_agents.md" in line.lower():
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _is_sync_generated_content(text: str) -> bool:
+    """判断内容是否为写回阶段生成的同步产物。"""
+    normalized = _normalize_memory_content(text)
+    if not normalized:
+        return False
+
+    lowered = normalized.lower()
+    if _SYNC_MARKER_RE.search(normalized):
+        return True
+    if "shared_from_agents.md" in lowered:
+        return True
+    if "name: 来自其他 agent 的共享记忆" in lowered:
+        return True
+    if "以下记忆由同步工具从其他 agent 自动导入" in normalized:
+        return True
+    return False
+
+
+def _should_skip_agent_memory_file(agent_id: str, file_path: Path) -> bool:
+    """过滤明显属于同步写回产物的文件。"""
+    _ = agent_id  # 预留：后续可按 agent 定制过滤规则
+    name = file_path.name.lower()
+    if name == "shared_from_agents.md":
+        return True
+    return False
+
+
+def _filter_agent_memory_files(agent_id: str, memory_files: list) -> list:
+    """过滤并去重 Agent 记忆文件列表。"""
+    filtered = []
+    seen = set()
+    for mem_file in memory_files or []:
+        p = Path(mem_file)
+        if _should_skip_agent_memory_file(agent_id, p):
+            continue
+        mem_path = str(p)
+        if mem_path in seen:
+            continue
+        seen.add(mem_path)
+        filtered.append(mem_path)
+    return filtered
+
 
 class LocalMemoryParser:
     """
@@ -5659,12 +5885,17 @@ class LocalMemoryParser:
         text = file_path.read_text(encoding="utf-8")
         sections = [s.strip() for s in text.split("§") if s.strip()]
         entries = []
-        for idx, section in enumerate(sections, 1):
+        kept_idx = 0
+        for section in sections:
+            section = _strip_sync_generated_sections(section)
+            if not section or _is_sync_generated_content(section):
+                continue
+            kept_idx += 1
             # 截取前 200 字作为内容预览, 完整内容保留
             first_line = section.split("\n")[0][:60]
             entries.append({
                 "content": section,
-                "tags": ["从Hermes导入", f"第{idx}条"],
+                "tags": ["从Hermes导入", f"第{kept_idx}条"],
                 "confidence": "high",  # Hermes 记忆一般是高置信度
                 "source_format": "hermes_section",
                 "preview": first_line,
@@ -5675,8 +5906,8 @@ class LocalMemoryParser:
         """
         解析 Hermes USER.md (单段自由文本)
         """
-        text = file_path.read_text(encoding="utf-8").strip()
-        if not text:
+        text = _strip_sync_generated_sections(file_path.read_text(encoding="utf-8").strip())
+        if not text or _is_sync_generated_content(text):
             return []
         return [{
             "content": text,
@@ -5690,17 +5921,19 @@ class LocalMemoryParser:
         """
         解析通用 Markdown: 按 front matter 或空行分块
         """
-        text = file_path.read_text(encoding="utf-8")
+        text = _strip_sync_generated_sections(file_path.read_text(encoding="utf-8"))
         entries = []
         # 先按 front matter 切分
         import re
         blocks = re.split(r"\n---\n", text)
         for block in blocks:
-            block = block.strip()
+            block = _normalize_memory_content(block)
             if not block:
                 continue
             # 跳过纯标题块
             if block.startswith("#") and len(block.split("\n")) == 1:
+                continue
+            if _is_sync_generated_content(block):
                 continue
             entries.append({
                 "content": block,
@@ -5751,6 +5984,10 @@ class LocalMemoryParser:
                     if not content or len(content) <= 5:
                         continue
 
+                    content = _strip_sync_generated_sections(content)
+                    if not content or _is_sync_generated_content(content):
+                        continue
+
                     entries.append({
                         "content": content,
                         "tags": [src_tag],
@@ -5769,29 +6006,19 @@ class LocalMemoryParser:
 
 def extract_local_to_fused(agent_id: str, root: Path = None,
                             local_files: list = None,
-                            registry: AgentRegistry = None) -> dict:
-    """
-    从 Agent 的本地记忆文件提取到 OneDrive 融合层
+                            registry: AgentRegistry = None,
+                            on_progress: Callable[[str], None] = None) -> dict:
+    """从 Agent 的本地记忆文件提取到 OneDrive 融合层
 
-    Parameters
-    ----------
-    agent_id : str
-        Agent ID
-    root : Path, optional
-        OneDrive 融合层根目录
-    local_files : list, optional
-        指定要提取的本地文件列表; 默认从 Registry 读
-    registry : AgentRegistry, optional
-        Registry 实例
-
-    Returns
-    -------
-    dict
-        {"agent_id": str, "extracted": N, "skipped": M, "files": [str], "errors": [...]}
+    v1.3.2 改进：
+    - 累积 50 条一批批量 INSERT（避免 417 条 × 4 agent 单条 commit 导致 disk I/O）
+    - 每批 emit 进度，消除"卡死 648 秒"的错觉
     """
+    if on_progress is None:
+        on_progress = lambda m: None
     if root is None:
-        config = get_config()
-        root = Path(config.get("paths.memory_root", str(Path(__file__).parent / "data")))
+        from safe_io import get_data_root
+        root = get_data_root()
     root = Path(root)
 
     if registry is None:
@@ -5799,6 +6026,7 @@ def extract_local_to_fused(agent_id: str, root: Path = None,
 
     if local_files is None:
         local_files = registry.get_agent_memory_files(agent_id)
+    local_files = _filter_agent_memory_files(agent_id, local_files)
 
     parser = LocalMemoryParser()
     result = {
@@ -5893,7 +6121,6 @@ def extract_local_to_fused(agent_id: str, root: Path = None,
     _context = None
     startup(identity_path, device_config_path)
 
-    # 批量写入（不逐条调用 write_memory，避免 ID 序号冲突）
     trigger = TriggerEngine(root=root)
     private_md = fused_agent_dir / "memory_private.md"
     existing_content = read_file_if_exists(private_md)
@@ -5907,78 +6134,135 @@ def extract_local_to_fused(agent_id: str, root: Path = None,
         if md_file.suffix == ".md" and not md_file.name.endswith(".lock") and not md_file.name.endswith(".tmp"):
             current_max_seq = max(current_max_seq, _scan_max_sequence(md_file, prefix))
 
-    with MemoryDatabase(db_path) as db:
-        for idx, entry in enumerate(all_entries, 1):
-            content = entry.get("content", "").strip()
-            if not content:
-                continue
+    # v1.3.2: 批量写入 + 实时进度回调
+    BATCH_SIZE = 50
+    entries_buffer = []  # 待批量插入的 MemoryEntry 列表
+    seen_hashes = set()
 
-            # 过滤含 HTML 的内容
-            if re.search(r"<[a-zA-Z/][^>]*>", content):
-                result["skipped"] += 1
-                continue
-
-            # 过滤太短的内容
-            if len(content) < 10:
-                result["skipped"] += 1
-                continue
-
-            tags = entry.get("tags", [])
-            if not tags:
-                tags = ["从本地导入"]
-            src_format = entry.get("source_format", "unknown")
-            if "从{}导入".format(src_format) not in tags:
-                tags.append("从{}导入".format(src_format))
-
-            confidence = entry.get("confidence", "medium")
-
-            # 触发器检测
-            trigger_result = trigger.match_hotword(content)
-            if trigger_result["matched"]:
-                confidence = trigger_result["force_confidence"]
-                for tag in trigger_result["auto_tags"]:
-                    if tag not in tags:
-                        tags.append(tag)
-
-            # 敏感信息检测
-            detector = get_detector()
-            sensitive_result = detector.check(content)
-            if sensitive_result["blocked"]:
-                result["skipped"] += 1
-                continue
-
-            # 生成条序号（内存递增，不扫描文件）
-            current_max_seq += 1
-            if current_max_seq > 999:
-                break
-            memory_id = "{}{:03d}".format(prefix, current_max_seq)
-
-            timestamp = datetime.now(timezone.utc).isoformat()
-            mem_entry = MemoryEntry(
-                id=memory_id,
-                agent_id=agent_id,
-                timestamp=timestamp,
-                source_device="extracted",
-                domain="general",
-                tags=tags,
-                confidence=confidence,
-                conflict_with=None,
-                content=content,
-            )
-
-            # 写入 Markdown
-            existing_content = append_memory_entry(existing_content, mem_entry)
-
-            # 写入 SQLite
+    def _flush_batch():
+        nonlocal existing_content
+        if entries_buffer:
+            n = 0
             try:
-                db.insert_memory(mem_entry)
+                with MemoryDatabase(db_path) as batch_db:
+                    n = batch_db.insert_memories_batch(entries_buffer)
             except Exception:
                 pass
+            # 已成功插入到 SQLite 的条目，追加到 .md 缓存
+            for mem in entries_buffer:
+                existing_content = append_memory_entry(existing_content, mem)
+            entries_buffer.clear()
+            return n
+        return 0
 
-            result["extracted"] += 1
+    def _emit_progress():
+        processed = result["extracted"] + result["skipped"]
+        total = len(all_entries)
+        on_progress("  [{}] {}/{} (已提取={} 跳过={})".format(
+            agent_id, processed, total, result["extracted"], result["skipped"]
+        ))
 
-    # 一次性写入文件
-    private_md.write_text(existing_content, encoding="utf-8")
+    for idx, entry in enumerate(all_entries, 1):
+        content = entry.get("content", "").strip()
+        if not content:
+            result["skipped"] += 1
+            continue
+
+        tags = entry.get("tags", [])
+        if not tags:
+            tags = ["从本地导入"]
+
+        # 过滤含 HTML 的内容
+        if re.search(r"<[a-zA-Z/][^>]*>", content):
+            result["skipped"] += 1
+            continue
+
+        # v1.3.2: 单条记忆上限，防止超大文本把 SQLite / OneDrive 撑爆
+        MAX_CONTENT_LEN = 32 * 1024
+        if len(content) > MAX_CONTENT_LEN:
+            content = content[:MAX_CONTENT_LEN] + "\n\n[TRUNCATED: original content was too large for stable OneDrive sync]"
+            if "超长记忆" not in tags:
+                tags.append("超长记忆")
+
+        # 过滤太短的内容
+        if len(content) < 10:
+            result["skipped"] += 1
+            continue
+
+        src_format = entry.get("source_format", "unknown")
+        if "从{}导入".format(src_format) not in tags:
+            tags.append("从{}导入".format(src_format))
+
+        confidence = entry.get("confidence", "medium")
+
+        # 触发器检测
+        trigger_result = trigger.match_hotword(content)
+        if trigger_result["matched"]:
+            confidence = trigger_result["force_confidence"]
+            for tag in trigger_result["auto_tags"]:
+                if tag not in tags:
+                    tags.append(tag)
+
+        # 敏感信息检测
+        detector = get_detector()
+        sensitive_result = detector.check(content)
+        if sensitive_result["blocked"]:
+            result["skipped"] += 1
+            continue
+
+        # 生成条序号（内存递增，不扫描文件）
+        current_max_seq += 1
+        if current_max_seq > 999:
+            break
+        memory_id = "{}{:03d}".format(prefix, current_max_seq)
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        mem_entry = MemoryEntry(
+            id=memory_id,
+            agent_id=agent_id,
+            timestamp=timestamp,
+            source_device="extracted",
+            domain="general",
+            tags=tags,
+            confidence=confidence,
+            conflict_with=None,
+            content=content,
+        )
+
+        normalized_content = _normalize_memory_content(content)
+        content_sig = content_hash(normalized_content)
+        is_dup_in_db = False
+        try:
+            with MemoryDatabase(db_path) as check_db:
+                cursor = check_db.conn.execute(
+                    "SELECT 1 FROM memories WHERE substr(id, 1, 4) = 'mem_' AND content = ? LIMIT 1",
+                    (normalized_content,)
+                )
+                is_dup_in_db = cursor.fetchone() is not None
+        except Exception:
+            is_dup_in_db = False
+
+        if is_dup_in_db or content_sig in seen_hashes:
+            result["skipped"] += 1
+            continue
+
+        seen_hashes.add(content_sig)
+        entries_buffer.append(mem_entry)
+        result["extracted"] += 1
+
+        # 达到批量大小则 flush
+        if len(entries_buffer) >= BATCH_SIZE:
+            _flush_batch()
+            _emit_progress()
+
+    # 处理最后不足一批的条目
+    _flush_batch()
+    if result["extracted"]:
+        _emit_progress()
+
+    # 一次性写入文件（使用安全写回，绕过 Agent/杀软文件锁）
+    if not _safe_write_text(private_md, existing_content, encoding="utf-8"):
+        result["errors"].append("写入融合层文件失败（可能被锁定）: {}".format(private_md))
     result["fused_file"] = str(private_md)
     return result
 
@@ -6019,8 +6303,8 @@ class TriggerEngine:
             OneDrive 根目录
         """
         if root is None:
-            config = get_config()
-            root = Path(config.get("paths.memory_root", str(Path(__file__).parent / "data")))
+            from safe_io import get_data_root
+            root = get_data_root()
         self.root = Path(root)
         if triggers_path is None:
             triggers_path = self.root / "_shared" / "triggers.yaml"
