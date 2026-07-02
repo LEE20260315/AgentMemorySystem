@@ -8,22 +8,39 @@ build/
 
 # 打包产物
 AgentMemorySync.exe
+AgentMemorySync/
+AgentMemorySync.old_*/
+*.current.txt
+*.bak_polluted*
 
 # 运行时数据（自动生成，不提交）
 data/
 data.local.bak/
 data.bak*/
+AgentMemory/
 .sync_backups/
 .sync_logs/
 .detected_agents.json
 .sync_state.json
 device_config.json
+sync_settings.json
+sync_report.log
 
 # 日志
 .logs/
+*.log
 
 # 锁文件
 *.lock
+
+# 数据库（SQLite 运行时产物）
+*.db
+*.db-journal
+
+# 备份文件
+*.bak
+*.bak_*
+.backups/
 
 # IDE
 .trae/
