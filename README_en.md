@@ -157,6 +157,8 @@ See `config.json` in the repository for the full configuration reference.
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v1.3.3** | 2026-07 | Echo-pollution self-healing (`strip_sync_markers` + section-header dedup), UI polish (PIL anti-aliased status dots, shorter tray notifications, shortcut targets bat + icon), auto-cleanup of `.old_*` backups, agent path override now hybrid preset + custom mode (supports openclaw etc.) |
+| **v1.3.2** | 2026-06 | Data directory resolution redirected to OneDrive `AgentMemory/`, native Windows tray API (no longer depends on pystray), cross-device launcher stability hardening |
 | **v1.3.1** | 2026-06 | Cross-device launcher: OneDrive bundle + local runtime copy + OneDrive `data/` binding. System tray restored. |
 | **v1.3** | 2026-06 | GUI + system tray, EXE packaging, auto-sync scheduler, generic agent discovery, CodePilot support, lock file expiry fix |
 | **v1.2** | 2026-05 | Sync engine, write-back adapters, SQLite fusion index, OneDrive conflict detection |
@@ -164,6 +166,16 @@ See `config.json` in the repository for the full configuration reference.
 | **v1.0** | 2026-05 | Core library, file locks, device config, Markdown parsing |
 
 See [CHANGELOG.md](CHANGELOG.md) for the detailed changelog.
+
+## Interface Preview
+
+<div align="center">
+
+<img src="docs/assets/screenshots/main_ui.png" alt="AgentMemorySync Main UI" width="720"/>
+
+*Main UI: real-time log panel + smart status indicators + one-click sync*
+
+</div>
 
 ## Project Structure
 
@@ -202,6 +214,9 @@ A: Original files are auto-backed up to `.sync_backups/` before each sync. Rollb
 
 **Q: How is privacy protected?**
 A: Sensitive info (passwords, keys, tokens) is automatically detected on write. Configure to block or warn. All data is local, never uploaded.
+
+**Q: Windows shows a SmartScreen warning ("Windows protected your PC") the first time I run the EXE. What should I do?**
+A: This is Windows' standard prompt for unsigned applications, not a virus. Click **"More info"** → **"Run anyway"**. This is a one-time action per machine — Windows remembers the allow-record for that file afterwards. This project is open-source software without a commercial code-signing certificate, hence the prompt. If this bothers you, run from source instead (see "Quick Start · Option 2").
 
 ## Contributing
 

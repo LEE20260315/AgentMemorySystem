@@ -1,4 +1,4 @@
-﻿"""
+"""
 打包脚本：将 AgentMemorySystem 打包为桌面应用
 
 用法：
@@ -49,6 +49,24 @@ def _create_shortcut(target: Path, shortcut_path: Path, icon: Path = None):
         return False
 
 
+def _next_available_dir(parent: Path, stem: str) -> Path:
+    """生成一个不会与现有目录冲突的候选目录名。"""
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    candidate = parent / f"{stem}_{stamp}"
+    idx = 1
+    while candidate.exists():
+        idx += 1
+        candidate = parent / f"{stem}_{stamp}_{idx}"
+    return candidate
+
+
+def _write_bundle_pointer(project_dir: Path, dist_name: str, bundle_dir: Path) -> Path:
+    """写入当前 launcher 应使用的包目录名。"""
+    pointer = project_dir / f"{dist_name}.current.txt"
+    pointer.write_text(bundle_dir.name, encoding="ascii")
+    return pointer
+
+
 def _write_repo_launcher(project_dir: Path, dist_name: str) -> Path:
     """在项目根目录生成跨设备启动器。
 
@@ -62,19 +80,31 @@ def _write_repo_launcher(project_dir: Path, dist_name: str) -> Path:
     bat_path = project_dir / f"{dist_name}.bat"
     bat_content = (
         '@echo off\r\n'
-        'setlocal\r\n'
+        'setlocal EnableExtensions EnableDelayedExpansion\r\n'
         'cd /d "%~dp0"\r\n'
+        '\r\n'
         'set "REPO_DIR=%~dp0"\r\n'
         'if "%REPO_DIR:~-1%"=="\\" set "REPO_DIR=%REPO_DIR:~0,-1%"\r\n'
-        f'set "SOURCE_DIR=%REPO_DIR%\\{dist_name}"\r\n'
-        f'set "LOCAL_DIR=%TEMP%\\{dist_name}_Run"\r\n'
+        f'set "CURRENT_FILE=%REPO_DIR%\\{dist_name}.current.txt"\r\n'
+        f'set "SOURCE_NAME={dist_name}"\r\n'
+        'if exist "%CURRENT_FILE%" set /p SOURCE_NAME=<"%CURRENT_FILE%"\r\n'
+        'if not defined SOURCE_NAME set "SOURCE_NAME=AgentMemorySync"\r\n'
+        'set "SOURCE_DIR=%REPO_DIR%\\%SOURCE_NAME%"\r\n'
+        f'set "LOCAL_BASE=%TEMP%\\{dist_name}_Run"\r\n'
+        'set "LOCAL_DIR=%LOCAL_BASE"\r\n'
         f'set "LOCAL_EXE=%LOCAL_DIR%\\{dist_name}.exe"\r\n'
-        'set "AGENT_MEMORY_DATA_DIR=%REPO_DIR%\\data"\r\n'
+        '\r\n'
+        'if exist "%REPO_DIR%\\AgentMemory" (\r\n'
+        '  set "AGENT_MEMORY_DATA_DIR=%REPO_DIR%\\AgentMemory"\r\n'
+        ') else if exist "%REPO_DIR%\\data" (\r\n'
+        '  set "AGENT_MEMORY_DATA_DIR=%REPO_DIR%\\data"\r\n'
+        ') else (\r\n'
+        '  set "AGENT_MEMORY_DATA_DIR=%REPO_DIR%\\AgentMemory"\r\n'
+        ')\r\n'
         '\r\n'
         f'if not exist "%SOURCE_DIR%\\{dist_name}.exe" (\r\n'
         '  echo [AgentMemorySync] OneDrive package not found: %SOURCE_DIR%\r\n'
         '  echo Please run "python build.py" once on any device to generate the package.\r\n'
-        '  pause\r\n'
         '  exit /b 1\r\n'
         ')\r\n'
         '\r\n'
@@ -88,25 +118,83 @@ def _write_repo_launcher(project_dir: Path, dist_name: str) -> Path:
         '\r\n'
         'if "%NEED_COPY%"=="1" (\r\n'
         '  echo [AgentMemorySync] Synchronizing local runtime copy...\r\n'
-        '  if exist "%LOCAL_DIR%" rmdir /s /q "%LOCAL_DIR%"\r\n'
-        '  robocopy "%SOURCE_DIR%" "%LOCAL_DIR%" /MIR >nul\r\n'
-        '  if errorlevel 8 (\r\n'
+        '  set "TARGET_DIR=%LOCAL_BASE%"\r\n'
+        '  set "COPY_RC=0"\r\n'
+        '  if exist "!TARGET_DIR!" rmdir /s /q "!TARGET_DIR!" >nul 2>nul\r\n'
+        '  if exist "!TARGET_DIR!" (\r\n'
+        '    set "TARGET_DIR=%TEMP%\\AgentMemorySync_Run_%RANDOM%_%RANDOM%"\r\n'
+        '    echo [AgentMemorySync] Primary runtime dir is busy, using fallback: !TARGET_DIR!\r\n'
+        '  )\r\n'
+        '  robocopy "%SOURCE_DIR%" "!TARGET_DIR!" /MIR >nul\r\n'
+        '  set "COPY_RC=!ERRORLEVEL!"\r\n'
+        '  if not "!COPY_RC!"=="0" if not "!COPY_RC!"=="1" if not "!COPY_RC!"=="2" if not "!COPY_RC!"=="3" if not "!COPY_RC!"=="4" if not "!COPY_RC!"=="5" if not "!COPY_RC!"=="6" if not "!COPY_RC!"=="7" (\r\n'
+        '    set "TARGET_DIR=%TEMP%\\AgentMemorySync_Run_%RANDOM%_%RANDOM%"\r\n'
+        '    echo [AgentMemorySync] Primary copy failed, retrying with fallback: !TARGET_DIR!\r\n'
+        '    robocopy "%SOURCE_DIR%" "!TARGET_DIR!" /MIR >nul\r\n'
+        '    set "COPY_RC=!ERRORLEVEL!"\r\n'
+        '  )\r\n'
+        '  if not "!COPY_RC!"=="0" if not "!COPY_RC!"=="1" if not "!COPY_RC!"=="2" if not "!COPY_RC!"=="3" if not "!COPY_RC!"=="4" if not "!COPY_RC!"=="5" if not "!COPY_RC!"=="6" if not "!COPY_RC!"=="7" (\r\n'
         '    echo [AgentMemorySync] Failed to copy. Please check directory permissions.\r\n'
-        '    pause\r\n'
         '    exit /b 1\r\n'
         '  )\r\n'
+        '  set "LOCAL_DIR=!TARGET_DIR!"\r\n'
+        f'  set "LOCAL_EXE=!LOCAL_DIR!\\{dist_name}.exe"\r\n'
         ')\r\n'
         '\r\n'
         'echo [AgentMemorySync] data=%AGENT_MEMORY_DATA_DIR%\r\n'
+        'echo [AgentMemorySync] source=%SOURCE_DIR%\r\n'
         'echo [AgentMemorySync] exe=%LOCAL_EXE%\r\n'
         'start "" /D "%LOCAL_DIR%" "%LOCAL_EXE%"\r\n'
+        'exit /b 0\r\n'
     )
     bat_path.write_text(bat_content, encoding="ascii")
     return bat_path
 
 
+def _cleanup_old_backups(parent_dir: Path, name_prefix: str, keep: int = 1):
+    """清理同目录下的 .old_<timestamp> 备份，保留最近 keep 个。
+
+    OneDrive 锁定 fallback 会生成 <name>.old_<14位时间戳> 目录，
+    本函数扫描同目录下所有匹配的备份，按时间戳倒序保留最近 keep 个，
+    删除更老的。避免无限累积。
+    """
+    import re
+    pattern = re.compile(r"^{}\.old_(\d{{14}})$".format(re.escape(name_prefix)))
+    backups = []
+    try:
+        for item in parent_dir.iterdir():
+            m = pattern.match(item.name)
+            if m and item.is_dir():
+                backups.append((m.group(1), item))
+    except Exception:
+        return
+    backups.sort(key=lambda x: x[0], reverse=True)  # 新到旧
+    for _, old_path in backups[keep:]:
+        try:
+            shutil.rmtree(old_path, ignore_errors=True)
+            # OneDrive 下 rmtree 可能失败，用 PowerShell 兜底
+            if old_path.exists():
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue".format(old_path)],
+                    capture_output=True,
+                    creationflags=0x08000000,
+                    timeout=30,
+                )
+            if old_path.exists():
+                print(f"[警告] 旧备份无法删除: {old_path.name}")
+            else:
+                print(f"[清理] 删除旧备份: {old_path.name}")
+        except Exception:
+            pass
+
+
 def _safe_remove_dir(path: Path):
-    """尽量删除/重命名一个目录，OneDrive 锁定时退化为重命名到 .old_<时间戳>"""
+    """尽量删除/重命名一个目录，OneDrive 锁定时退化为重命名到 .old_<时间戳>。
+
+    rename 成功后自动调用 _cleanup_old_backups 保留最近 1 个备份，
+    避免无限累积 .old_* 目录。
+    """
     if not path.exists():
         return
     try:
@@ -121,6 +209,8 @@ def _safe_remove_dir(path: Path):
         renamed = path.parent / f"{path.name}.old_{stamp}"
         path.rename(renamed)
         print(f"[警告] {path} 被 OneDrive 锁定，已重命名为 {renamed.name}")
+        # 自动清理旧备份，保留最近 1 个
+        _cleanup_old_backups(path.parent, path.name, keep=1)
     except Exception as e:
         # 真没救：尝试 robocopy + rmdir
         try:
@@ -136,42 +226,72 @@ def _safe_remove_dir(path: Path):
 def _sync_repo_bundle(source_dir: Path, project_dir: Path, dist_name: str) -> Path:
     """把构建结果同步回项目根目录，供 OneDrive 跨设备分发。
 
-    OneDrive 会持有同步目录句柄，必须先重命名旧的，再 copytree 新的。
+    若固定目录被运行中的旧版本占用，则回退到带时间戳的新目录，
+    并写入 current pointer 供 launcher 读取。
     """
-    bundle_dir = project_dir / dist_name
-    print(f"正在同步 OneDrive 包: {bundle_dir}")
-    _safe_remove_dir(bundle_dir)
-    time.sleep(0.5)
-    shutil.copytree(source_dir, bundle_dir)
+    preferred_dir = project_dir / dist_name
+    bundle_dir = preferred_dir
+    print(f"正在同步 OneDrive 包: {preferred_dir}")
+    try:
+        _safe_remove_dir(preferred_dir)
+        time.sleep(0.5)
+        shutil.copytree(source_dir, preferred_dir)
+    except Exception as e:
+        fallback_dir = _next_available_dir(project_dir, dist_name)
+        print(f"[警告] 固定包目录不可用，改用 fallback 包: {fallback_dir.name} ({e})")
+        shutil.copytree(source_dir, fallback_dir)
+        bundle_dir = fallback_dir
+    _write_bundle_pointer(project_dir, dist_name, bundle_dir)
     return bundle_dir
 
 
-def _install_local(source_dir: Path, dist_name: str) -> Path:
+def _install_local(source_dir: Path, dist_name: str, project_dir: Path = None) -> Path:
     """把构建结果复制到可运行位置（优先 Temp，避免 OneDrive 和权限限制）"""
-    # 优先安装到 Temp 下的固定路径（沙箱允许 + 非 OneDrive）
     temp_base = Path(os.environ.get("TEMP", "."))
-    local_dir = temp_base / "AgentMemorySync_Run"
+    preferred_dir = temp_base / "AgentMemorySync_Run"
+    local_dir = preferred_dir
     local_exe = local_dir / f"{dist_name}.exe"
 
-    print(f"正在安装到: {local_dir}")
-    _safe_remove_dir(local_dir)
-    time.sleep(0.5)
-    shutil.copytree(source_dir, local_dir)
+    print(f"正在安装到: {preferred_dir}")
+    try:
+        _safe_remove_dir(preferred_dir)
+        time.sleep(0.5)
+        shutil.copytree(source_dir, preferred_dir)
+    except Exception as e:
+        local_dir = _next_available_dir(temp_base, "AgentMemorySync_Run")
+        local_exe = local_dir / f"{dist_name}.exe"
+        print(f"[警告] 固定本地运行目录不可用，改用 fallback: {local_dir.name} ({e})")
+        shutil.copytree(source_dir, local_dir)
 
-    # 创建快捷方式
+    # 创建快捷方式：优先指向项目根目录的 bat（保留 OneDrive 同步能力 + 带图标）
+    # bat 不存在时回退到本地 exe（兼容旧场景）
     desktop, start_menu = _get_shortcut_paths()
     icon = local_dir / "_internal" / "assets" / "app_icon.ico"
     if not icon.exists():
         icon = source_dir / "_internal" / "assets" / "app_icon.ico"
 
+    # 优先用项目根目录的 bat 作为快捷方式目标
+    bat_target = None
+    if project_dir is not None:
+        bat_candidate = project_dir / f"{dist_name}.bat"
+        if bat_candidate.exists():
+            bat_target = bat_candidate
+        # 项目根的图标优先（更稳定，不依赖 TEMP 副本）
+        project_icon = project_dir / "assets" / "app_icon.ico"
+        if project_icon.exists():
+            icon = project_icon
+
+    # 快捷方式目标：bat 优先（带更新同步），否则回退到本地 exe
+    shortcut_target = bat_target if bat_target is not None else local_exe
+
     shortcuts = []
     if desktop.exists():
         sc = desktop / f"{dist_name}.lnk"
-        if _create_shortcut(local_exe, sc, icon):
+        if _create_shortcut(shortcut_target, sc, icon):
             shortcuts.append(sc)
     if start_menu.exists():
         sc = start_menu / f"{dist_name}.lnk"
-        if _create_shortcut(local_exe, sc, icon):
+        if _create_shortcut(shortcut_target, sc, icon):
             shortcuts.append(sc)
 
     return local_dir, shortcuts
@@ -284,7 +404,7 @@ def build():
                 bundle_dir = None
             # 2) 安装到本地并创建快捷方式（用户实际从这里启动）
             try:
-                local_dir, shortcuts = _install_local(source_dir, dist_name)
+                local_dir, shortcuts = _install_local(source_dir, dist_name, project_dir=here)
                 print(f"[本地运行副本] {local_dir}")
                 for sc in shortcuts:
                     print(f"[快捷方式] {sc}")

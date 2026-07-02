@@ -81,6 +81,26 @@ def parse_sync_marker(text: str) -> dict:
     return parts
 
 
+def strip_sync_markers(text: str) -> str:
+    """剥离文本里的 [sync:...] 同步标记，防止跨 Agent 回声污染。
+
+    记忆内容本身不应携带 sync 标记：如果 content 里含 [sync:...]，
+    说明它是从某个 Agent 同步文件里提取出的"回声"，再次写入会叠加新
+    sync 标记，造成嵌套污染雪崩（observed: trae user_profile.md
+    膨胀到 52MB / 100 个重复段 / 3 万个嵌套 marker）。此函数在写入前
+    统一脱敏。
+    """
+    import re
+    cleaned = re.sub(r"\[sync:[^\]]*\]", "", text)
+    # 清理脱敏后残留的空列表项 "- " (原本是 "- [sync:xxx] 内容")
+    cleaned = re.sub(r"(?m)^[ \t]*-[ \t]*$", "", cleaned)
+    # 压缩连续空格 (非换行)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    # 压缩连续空行
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 # ---------------------------------------------------------------------------
 # 去重状态管理
 # ---------------------------------------------------------------------------
@@ -369,6 +389,124 @@ class BaseMemoryWriter(ABC):
         import re
         return len(re.findall(r"\[sync:[^\]]+\]", text or ""))
 
+    # ------------------------------------------------------------------
+    # 污染检测与自愈（通用）：防止回声污染雪崩
+    #
+    # 背景：跨 Agent 同步时，若记忆内容本身含 [sync:...] 标记，
+    # 原样写回会叠加新 marker，多次同步后文件膨胀到几十 MB、
+    # 含数万个嵌套标记。此模块提供通用检测+自动备份重建能力，
+    # 任意 writer 子类均可调用。
+    # ------------------------------------------------------------------
+    POLLUTION_SIZE_THRESHOLD = 5 * 1024 * 1024  # 5MB
+    POLLUTION_MARKER_THRESHOLD = 1000  # sync marker 数量阈值
+
+    def _detect_pollution(self, text: str) -> dict:
+        """检测目标文本是否已被回声污染。
+
+        Returns
+        -------
+        dict:
+            polluted: bool   — 是否污染
+            reason: str      — 污染原因（用于日志）
+            marker_count: int — sync marker 总数
+            size: int        — 文本字节数
+        """
+        if not text:
+            return {"polluted": False, "reason": "", "marker_count": 0, "size": 0}
+        size = len(text.encode("utf-8", errors="ignore"))
+        marker_count = self._count_legacy_markers(text)
+        polluted = False
+        reason = ""
+        if size > self.POLLUTION_SIZE_THRESHOLD:
+            polluted = True
+            reason = "文件超 5MB ({}KB)".format(size // 1024)
+        elif marker_count > self.POLLUTION_MARKER_THRESHOLD:
+            polluted = True
+            reason = "sync marker 超阈值 ({})".format(marker_count)
+        return {
+            "polluted": polluted,
+            "reason": reason,
+            "marker_count": marker_count,
+            "size": size,
+        }
+
+    def _repair_polluted_file(
+        self,
+        file_path: Path,
+        text: str,
+        clean_prefix: str = "",
+        section_header: str = "",
+    ) -> str:
+        """备份污染文件并重建干净版本。
+
+        策略：
+        1. 备份原文件到 ``<file>.bak_polluted_<timestamp>``
+        2. 保留 section_header 之前的"本体内容"（用户画像等），
+           丢弃所有已被污染的同步段
+        3. 若提供 clean_prefix，用它作为重建文件的开头
+        4. 返回重建后的干净文本
+
+        Parameters
+        ----------
+        file_path : Path
+            被污染的文件路径
+        text : str
+            文件当前内容
+        clean_prefix : str
+            重建文件的干净前缀（如 "# Trae User Profile\\n\\n"）
+        section_header : str
+            段头标记（如 "## Shared Knowledge"）。
+            若提供，保留首个段头之前的本体，丢弃段头之后所有污染内容，
+            再追加一个干净的空段头。
+        """
+        import time
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        bak_path = file_path.parent / "{}.bak_polluted_{}".format(file_path.name, ts)
+        try:
+            import shutil
+            shutil.copy2(str(file_path), str(bak_path))
+            self.logger.warning(
+                "污染自愈: 备份 {} → {} ({}KB)".format(
+                    file_path.name, bak_path.name,
+                    len(text.encode("utf-8", errors="ignore")) // 1024,
+                )
+            )
+        except Exception as e:
+            self.logger.warning("污染自愈: 备份失败 {}: {}".format(bak_path, e))
+
+        # 重建干净内容
+        if section_header and section_header in text:
+            # 保留首个 section_header 之前的本体
+            prefix = text.split(section_header, 1)[0].rstrip()
+            if clean_prefix:
+                rebuilt = clean_prefix.rstrip() + "\n\n" + section_header + "\n"
+            elif prefix:
+                rebuilt = prefix + "\n\n" + section_header + "\n"
+            else:
+                rebuilt = section_header + "\n"
+        elif clean_prefix:
+            rebuilt = clean_prefix.rstrip() + "\n"
+        else:
+            # 无法确定本体，重建最小骨架
+            rebuilt = "# Memory (rebuilt after pollution)\n\n"
+            if section_header:
+                rebuilt += section_header + "\n"
+
+        # 写回
+        try:
+            _safe_write_text(file_path, rebuilt)
+            self.logger.info(
+                "污染自愈: {} 重建完成 ({} → {}KB)".format(
+                    file_path.name,
+                    len(text.encode("utf-8", errors="ignore")) // 1024,
+                    len(rebuilt.encode("utf-8", errors="ignore")) // 1024,
+                )
+            )
+        except Exception as e:
+            self.logger.error("污染自愈: 写回失败 {}: {}".format(file_path, e))
+
+        return rebuilt
+
 
     def _extract_hashes_via_sync_marker(
         self,
@@ -632,7 +770,7 @@ class ClaudeMemoryWriter(BaseMemoryWriter):
                 lines.append("- 标签: {}".format(", ".join(mem.tags)))
             lines.append("- 信心: {}".format(mem.confidence))
             lines.append("")
-            lines.append(mem.content)
+            lines.append(strip_sync_markers(mem.content))
             lines.append("")
 
         return "\n".join(lines)
@@ -702,15 +840,43 @@ class TraeMemoryWriter(BaseMemoryWriter):
                 self.logger.warning("Trae 读取失败: {}".format(profile_path))
                 return result
 
-            # 确保有 Shared Knowledge section
-            if self.SECTION_HEADER not in content:
+            # ---- 通用污染检测+自愈 ----
+            # 防止回声污染雪崩：若文件已膨胀到 5MB+ 或 marker 超千，
+            # 自动备份原文件并重建干净骨架（保留 SECTION_HEADER 之前的本体）。
+            pollution = self._detect_pollution(content)
+            if pollution["polluted"]:
+                self.logger.warning(
+                    "Trae: 检测到文件污染 ({}), 触发自愈重建".format(pollution["reason"])
+                )
+                content = self._repair_polluted_file(
+                    profile_path, content,
+                    clean_prefix="# Trae User Profile\n\nThis file is managed by Trae. "
+                                  "The ## Shared Knowledge section below is used by the "
+                                  "multi-agent memory sync system.",
+                    section_header=self.SECTION_HEADER,
+                )
+
+            # ---- 段头去重：只保留首个 ## Shared Knowledge ----
+            # 防止历史污染遗留的多个段头导致解析混乱
+            section_count = content.count(self.SECTION_HEADER)
+            if section_count > 1:
+                self.logger.warning(
+                    "Trae: 检测到 {} 个重复段头, 截断保留首个".format(section_count)
+                )
+                # 保留首个 SECTION_HEADER 之前的本体 + 首个段头之后到第二个段头之前的内容
+                parts = content.split(self.SECTION_HEADER, 2)
+                prefix = parts[0].rstrip()
+                first_section = parts[1] if len(parts) > 1 else ""
+                content = prefix + "\n\n" + self.SECTION_HEADER + first_section
+            elif self.SECTION_HEADER not in content:
                 content = content.rstrip() + "\n\n" + self.SECTION_HEADER + "\n"
 
             # 追加记忆
             for mem in new_memories:
                 marker = format_sync_marker(mem)
+                clean_content = strip_sync_markers(mem.content)
                 entry = "\n- {} {} — 来自 {} ({})\n".format(
-                    marker, mem.content, mem.agent_id, mem.timestamp[:10]
+                    marker, clean_content, mem.agent_id, mem.timestamp[:10]
                 )
                 content = content.rstrip() + entry
 
@@ -764,7 +930,28 @@ class TraeMemoryWriter(BaseMemoryWriter):
         legacy_count = 0
         if not text or self.SECTION_HEADER not in text:
             return {"hashes": hashes, "legacy": 0, "file_present": True}
-        tail = text.split(self.SECTION_HEADER, 1)[1]
+
+        # ---- 污染检测：若文件已膨胀,触发自愈重建后返回空 ----
+        # 避免在 52MB 污染文件里数出 1.7 万个 legacy marker 导致保守误判
+        pollution = self._detect_pollution(text)
+        if pollution["polluted"]:
+            self.logger.warning(
+                "Trae extract: 检测到文件污染 ({}), 触发自愈重建".format(pollution["reason"])
+            )
+            self._repair_polluted_file(
+                profile_path, text,
+                clean_prefix="# Trae User Profile\n\nThis file is managed by Trae. "
+                              "The ## Shared Knowledge section below is used by the "
+                              "multi-agent memory sync system.",
+                section_header=self.SECTION_HEADER,
+            )
+            # 重建后文件无 sync marker,返回空集合让 reconciler 清理 orphan state
+            return {"hashes": set(), "legacy": 0, "file_present": True}
+
+        # ---- 只扫首个 SECTION_HEADER 段 ----
+        # 防止多个重复段头导致 legacy 数量爆炸
+        parts = text.split(self.SECTION_HEADER, 2)
+        tail = parts[1] if len(parts) > 1 else ""
         for line in tail.splitlines():
             meta = parse_sync_marker(line)
             if not meta:
@@ -878,11 +1065,20 @@ class HermesMemoryWriter(BaseMemoryWriter):
                 self.logger.warning("Hermes 读取失败: {}".format(md_path))
                 return result
 
+            # ---- 通用污染检测+自愈 ----
+            pollution = self._detect_pollution(content)
+            if pollution["polluted"]:
+                self.logger.warning(
+                    "Hermes: 检测到文件污染 ({}), 触发自愈重建".format(pollution["reason"])
+                )
+                content = self._repair_polluted_file(md_path, content)
+
             # 追加记忆（用 § 分隔）
             for mem in new_memories:
                 marker = format_sync_marker(mem)
+                clean_content = strip_sync_markers(mem.content)
                 entry = "\n§\n{} — 来自 {} ({})\n".format(
-                    marker, mem.content, mem.agent_id, mem.timestamp[:10]
+                    marker, clean_content, mem.agent_id, mem.timestamp[:10]
                 )
                 content = content.rstrip() + entry
 
@@ -1044,12 +1240,26 @@ class GenericMarkdownWriter(BaseMemoryWriter):
             # 用 _safe_read_text 读取（绕过文件锁）
             content = _safe_read_text(md_path, default="")
 
+            # ---- 通用污染检测+自愈 ----
+            # 防止回声污染雪崩（codepilot MEMORY.md 曾膨胀到 52MB / 3万 marker）
+            pollution = self._detect_pollution(content)
+            if pollution["polluted"]:
+                self.logger.warning(
+                    "通用 Writer ({}): 检测到文件污染 ({}), 触发自愈重建".format(
+                        agent_id, pollution["reason"])
+                )
+                content = self._repair_polluted_file(
+                    md_path, content,
+                    clean_prefix="# Memory\n",
+                )
+
             for mem in new_memories:
                 marker = format_sync_marker(mem)
+                clean_content = strip_sync_markers(mem.content)
                 # 用内容第一行作为标题摘要，避免重复写入完整内容
-                first_line = mem.content.split("\n", 1)[0][:80]
+                first_line = clean_content.split("\n", 1)[0][:80]
                 entry = "\n---\n{} {} — 来自 {} ({})\n\n{}\n".format(
-                    marker, first_line, mem.agent_id, mem.timestamp[:10], mem.content
+                    marker, first_line, mem.agent_id, mem.timestamp[:10], clean_content
                 )
                 content = content.rstrip() + entry
 

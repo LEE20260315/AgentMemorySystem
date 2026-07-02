@@ -134,6 +134,13 @@
         "~/.codebuddy/memery"
       ],
       "signature_glob": "*_memery.md"
+    },
+    "openclaw": {
+      "candidate_paths": [
+        "~/.openclaw",
+        "~/AppData/Roaming/openclaw"
+      ],
+      "signature_glob": "**/*.md"
     }
   },
   "agent_overrides": {},

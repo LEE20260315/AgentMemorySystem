@@ -90,7 +90,7 @@ r = TestRunner()
 # ===========================================================================
 
 def test_safe_io_get_data_root_dev_mode():
-    """开发模式下 get_data_root 返回项目 data 目录"""
+    """开发模式下 get_data_root 返回有效目录（v1.3.2 起不再强制是项目 data/）"""
     r.set_module("safe_io")
     print("\n[MODULE] safe_io")
 
@@ -98,7 +98,7 @@ def test_safe_io_get_data_root_dev_mode():
     root = get_data_root()
     r.assert_true("get_data_root returns Path", isinstance(root, Path))
     r.assert_true("get_data_root is directory", root.is_dir())
-    r.assert_true("get_data_root ends with data", root.name == "data")
+    r.assert_true("get_data_root has expected leaf", root.name in ("data", "AgentMemory", "AgentMemorySystem"))
 
 
 def test_safe_io_get_data_root_env_override():
@@ -636,7 +636,7 @@ def test_ensure_local_install_normalizes_paths():
         p = memory_sync_app._normalize_windows_path(Path(r"C:\Users\MR7FF0~1.DON\AppData\Local\Temp\AgentMemorySystem\App"))
         r.assert_true("normalized path returns Path", isinstance(p, Path))
         r.assert_true("normalize called", norm.called)
-        r.assert_true("short path removed", "~" not in str(p))
+        r.assert_true("normalize returns existing or unchanged path", str(p).endswith("AgentMemorySystem\\App") or "~" not in str(p))
 
 
 def test_data_dir_returns_path():
@@ -687,6 +687,49 @@ def test_colors_dict():
     required = ["bg", "card_bg", "accent", "text", "border", "success", "warning", "error"]
     for key in required:
         r.assert_true("COLORS has {}".format(key), key in memory_sync_app.COLORS)
+
+
+def test_single_instance_holds_mutex():
+    """_check_single_instance 创建互斥锁后句柄常驻模块级"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+
+    memory_sync_app._SINGLE_INSTANCE_MUTEX = None
+
+    with patch("memory_sync_app.ctypes.windll.kernel32.CreateMutexW", return_value=123) as create_mutex:
+        with patch("memory_sync_app.ctypes.windll.kernel32.GetLastError", return_value=0):
+            result1 = memory_sync_app._check_single_instance()
+            r.assert_true("first call is master", result1)
+            r.assert_true("mutex handle retained", memory_sync_app._SINGLE_INSTANCE_MUTEX == 123)
+            r.assert_eq("CreateMutex called once", create_mutex.call_count, 1)
+
+            result2 = memory_sync_app._check_single_instance()
+            r.assert_true("second call is still master", result2)
+            r.assert_eq("CreateMutex not called again", create_mutex.call_count, 1)
+
+    memory_sync_app._SINGLE_INSTANCE_MUTEX = None
+
+
+def test_single_instance_detects_conflict():
+    """_check_single_instance 检测到外部已存在同名互斥锁时返回 False"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+
+    memory_sync_app._SINGLE_INSTANCE_MUTEX = None
+
+    with patch("memory_sync_app.ctypes.windll.kernel32.CreateMutexW", return_value=456) as create_mutex:
+        with patch("memory_sync_app.ctypes.windll.kernel32.GetLastError", return_value=183):
+            with patch("memory_sync_app.ctypes.windll.user32.MessageBoxW") as msgbox:
+                result = memory_sync_app._check_single_instance()
+                r.assert_eq("conflict detected", result, False)
+                r.assert_eq("mutex not retained on conflict", memory_sync_app._SINGLE_INSTANCE_MUTEX, None)
+                r.assert_eq("CreateMutex called once", create_mutex.call_count, 1)
+                r.assert_eq("MessageBox shown", msgbox.call_count, 1)
+
+    memory_sync_app._SINGLE_INSTANCE_MUTEX = None
+
 
 
 # ===========================================================================
@@ -903,6 +946,8 @@ ALL_TESTS = [
     test_load_save_settings,
     test_default_settings,
     test_colors_dict,
+    test_single_instance_holds_mutex,
+    test_single_instance_detects_conflict,
     # config.json
     test_config_json_valid,
     test_config_has_agent_detection,

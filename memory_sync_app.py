@@ -1,4 +1,4 @@
-﻿"""
+"""
 多Agent记忆融合器
 ================
 双击即跑的 GUI 工具，自动完成：
@@ -58,6 +58,67 @@ def _resource_path(relative: str) -> Path:
 
 _ICON_PATH = _resource_path("assets/app_icon.ico")
 _TRAY_ICON_PATH = _resource_path("assets/tray_icon.png")
+
+# 进程级单实例互斥锁句柄：必须常驻，不能只保存在局部变量里
+# 否则函数返回后句柄可能被释放，后续重复启动会误判为首实例。
+_SINGLE_INSTANCE_MUTEX = None
+
+
+# ---------------------------------------------------------------------------
+# Windows 标题栏配色 —— 把系统默认蓝条改成灰白黑配色
+# ---------------------------------------------------------------------------
+def _hex_to_dwm_color(hex_str: str) -> int:
+    """把 '#ECEFF1' 或 'ECEFF1' 转成 DWM 期望的 0x00BBGGRR（DWORD 反序）。"""
+    h = hex_str.lstrip("#")
+    if len(h) != 6:
+        return 0
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return (b << 16) | (g << 8) | r
+
+
+def apply_dwm_caption_colors(tk_window, caption_hex: str = "#ececf0",
+                             text_hex: str = "#1d1d1f") -> bool:
+    """把 Windows 系统标题栏底色/字色改成指定灰白色。失败时静默返回 False。
+
+    Win10 1903+ / Win11 支持 DWMWA_CAPTION_COLOR(35) / DWMWA_TEXT_COLOR(36)。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        hwnd = tk_window.winfo_id()
+        if not hwnd:
+            return False
+        # 顶层 Toplevel 的 winfo_id 拿到的是 client 窗口句柄，
+        # 需要 GetAncestor(GA_ROOT) 拿到带标题栏的顶层 HWND
+        try:
+            GA_ROOT = 2
+            _user32.GetAncestor.restype = ctypes.c_void_p
+            _user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            root_hwnd = _user32.GetAncestor(hwnd, GA_ROOT)
+            if not root_hwnd:
+                root_hwnd = hwnd
+        except Exception:
+            root_hwnd = hwnd
+
+        try:
+            _dwm = ctypes.windll.dwmapi
+            _dwm.DwmSetWindowAttribute.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint
+            ]
+            _dwm.DwmSetWindowAttribute.restype = ctypes.HRESULT
+        except Exception:
+            return False
+
+        cap_color = ctypes.c_uint(_hex_to_dwm_color(caption_hex))
+        text_color = ctypes.c_uint(_hex_to_dwm_color(text_hex))
+        # DWMWA_CAPTION_COLOR = 35, DWMWA_TEXT_COLOR = 36
+        hr1 = _dwm.DwmSetWindowAttribute(root_hwnd, 35,
+                                         ctypes.byref(cap_color), ctypes.sizeof(cap_color))
+        hr2 = _dwm.DwmSetWindowAttribute(root_hwnd, 36,
+                                         ctypes.byref(text_color), ctypes.sizeof(text_color))
+        return (hr1 == 0 and hr2 == 0)
+    except Exception:
+        return False
 
 # ---------------------------------------------------------------------------
 # Windows 原生系统托盘 API（不依赖 pystray，--windowed 模式也能正常工作）
@@ -266,6 +327,38 @@ def _safe_home() -> Path:
     return Path.home()
 
 
+def _normalize_windows_path(path: Path) -> Path:
+    """尽量把 Windows 短路径（8.3）展开成长路径。"""
+    p = Path(path)
+    if sys.platform != "win32":
+        return p
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        result = ctypes.windll.kernel32.GetLongPathNameW(str(p), buf, len(buf))
+        if result and buf.value:
+            return Path(buf.value)
+    except Exception:
+        pass
+    return p
+
+
+def _reloc_log(msg: str):
+    """记录迁移诊断信息到 tray_error.log。"""
+    try:
+        data_dir = _data_dir()
+    except Exception:
+        try:
+            data_dir = Path(sys.executable).parent / "data"
+        except Exception:
+            return
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        with open(data_dir / "tray_error.log", "a", encoding="utf-8") as f:
+            f.write(f"[RELOC] {msg}\n")
+    except Exception:
+        pass
+
+
 def _data_dir() -> Path:
     r"""获取应用数据目录
 
@@ -312,18 +405,35 @@ DEFAULT_SETTINGS = {
     "conflict_action": "prompt",
     "auto_start": False,
     "minimize_to_tray": True,
-    "window_geometry": "720x520",
+    "window_geometry": "880x620",
 }
 
 
 def load_settings() -> dict:
+    loaded = {}
     if SETTINGS_PATH.exists():
         try:
             with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-                return {**DEFAULT_SETTINGS, **json.load(f)}
+                loaded = json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
-    return DEFAULT_SETTINGS.copy()
+    merged = {**DEFAULT_SETTINGS, **loaded}
+
+    # 历史版本保存的窗口尺寸不足以容纳"操作卡片"四按钮 + 汇总，强制升级到 880x620，
+    # 避免用户首次启动看不到"立即同步 / 回滚 / 设置 / 最小化到托盘"。
+    geo = merged.get("window_geometry", "")
+    if isinstance(geo, str) and geo:
+        try:
+            w_str, h_str = geo.split("x", 1)
+            w_val, h_val = int(w_str), int(h_str.split("+")[0].split("-")[0])
+            if w_val < 860 or h_val < 600:
+                merged["window_geometry"] = DEFAULT_SETTINGS["window_geometry"]
+        except (ValueError, IndexError):
+            merged["window_geometry"] = DEFAULT_SETTINGS["window_geometry"]
+    else:
+        merged["window_geometry"] = DEFAULT_SETTINGS["window_geometry"]
+
+    return merged
 
 
 def save_settings(settings: dict):
@@ -344,202 +454,93 @@ def save_settings(settings: dict):
 
 
 # ---------------------------------------------------------------------------
-# 现代化 UI 样式
+# 现代化 UI 样式 —— Windows 桌面工具风格，纯灰白黑配色
 # ---------------------------------------------------------------------------
 
-# macOS 风格配色
+# COLORS 是配色的唯一来源；所有 widget 必须从这里取色，不允许硬编码 hex
 COLORS = {
-    "bg": "#ececf0",
-    "card_bg": "#ffffff",
-    "accent": "#007aff",          # 仅用于数字高亮
-    "accent_hover": "#0066d6",
-    "btn_primary_bg": "#3a3a3c",   # 主按钮：macOS graphite 深灰
+    # 应用/页面背景
+    "bg": "#ececf0",            # 主窗口与设置窗内容背景：浅灰
+    # 内容头部（沿用 mac 风格假标题栏的配色）
+    "header_bg": "#ececf0",     # 头部背景 = 页面背景（保持浅灰基调）
+    "header_fg": "#5b5b62",     # 头部主文字色（深灰加粗）
+    # 卡片
+    "card_bg": "#ffffff",       # 卡片白底
+    # 文本
+    "text": "#1d1d1f",          # 主文本（标题/正文/按钮文字）
+    "text_secondary": "#86868b",  # 辅助说明、次文本
+    # 边框 / 分隔
+    "border": "#d2d2d7",        # 1px 边框颜色
+    # 主按钮（石墨灰）
+    "btn_primary_bg": "#3a3a3c",
     "btn_primary_hover": "#2c2c2e",
     "btn_primary_active": "#1c1c1e",
-    "btn_secondary_bg": "#e8e8ed",  # 次要按钮：macOS 浅灰
+    # 次按钮（中灰）
+    "btn_secondary_bg": "#e8e8ed",
     "btn_secondary_hover": "#d8d8de",
     "btn_secondary_active": "#c8c8ce",
-    "text": "#1d1d1f",
-    "text_secondary": "#86868b",
-    "border": "#d2d2d7",
-    "success": "#34c759",
-    "warning": "#ff9500",
-    "error": "#ff3b30",
+    # 焦点强调（仍然用最深灰，避免彩色）
+    "focus": "#1d1d1f",
+    # --- 旧 token 名保留以兼容测试 / 外部抛错信息；颜色仍然走灰白黑 ---
+    "accent": "#3a3a3c",        # 旧名 → 等同 btn_primary_bg（避免引入彩色高亮）
+    "accent_hover": "#2c2c2e",
+    "success": "#86868b",       # 旧名 → status_ready
+    "warning": "#3a3a3c",       # 旧名 → status_running
+    "error": "#1c1c1e",         # 旧名 → status_error
+    "sidebar_bg": "#ececf0",
+    # 状态点（就绪=绿、同步中=黄、错误=红 —— 保留项目原有的状态灯语义）
+    "status_ready": "#34c759",
+    "status_running": "#f5a623",
+    "status_error": "#e53935",
+    # 日志
     "log_bg": "#fafafa",
     "log_text": "#3d3d3d",
-    "sidebar_bg": "#2d2d2d",
+    "log_selection_bg": "#d8d8de",
+    "log_insert_bg": "#1d1d1f",
+    # 按钮 disabled 状态（中性化的浅/中灰）
+    "btn_disabled_bg": "#9a9a9e",       # 主按钮 disabled：浅石板灰
+    "btn_disabled_fg": "#ffffff",       # 主按钮 disabled 文字：白
+    "btn_secondary_disabled_bg": "#f1f1f3",  # 次按钮 disabled：极浅灰
 }
 
 
-class RoundedButton(tk.Canvas):
-    """macOS 风格圆角按钮（基于 Canvas + PIL 渐变绘制）"""
+# 旧 token 名保留兼容 —— 新代码请直接用语义命名
+_COLORS_LEGACY_ALIASES = {
+    "accent": "btn_primary_bg",        # 数字高亮改为深灰加粗
+    "accent_hover": "btn_primary_hover",
+    "success": "status_ready",
+    "warning": "status_running",
+    "error": "status_error",
+    "sidebar_bg": "bg",
+}
 
-    def __init__(
-        self,
-        parent,
-        text: str,
-        command=None,
-        style: str = "primary",
-        width: int = 120,
-        height: int = 34,
-        font=(_FONT, 10),
-        **kwargs,
-    ):
-        self.style = style
-        self.command = command
-        self._text = text
-        self._width = width
-        self._height = height
-        self._font = font
 
-        bg = kwargs.pop("bg", COLORS["bg"])
-        super().__init__(
-            parent,
-            width=width,
-            height=height,
-            bg=bg,
-            highlightthickness=0,
-            cursor="hand2",
-            **kwargs,
+def _resolve_color(token: str) -> str:
+    """解析 token；优先新语义，回退到旧 token 名。"""
+    if token in COLORS:
+        return COLORS[token]
+    alias = _COLORS_LEGACY_ALIASES.get(token)
+    if alias and alias in COLORS:
+        return COLORS[alias]
+    return token  # 兜底：当作实际颜色值使用
+
+
+# 移除旧的 RoundedButton —— 由统一的 ttk.Button 风格替代
+# 旧类保留为占位以兼容尚未清理的引用，实例化时统一报错
+class RoundedButton:  # pragma: no cover - 仅占位，不再被使用
+    """已废弃：旧的 macOS Canvas 按钮。统一改用 ttk.Button + Primary/Secondary style。"""
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError(
+            "RoundedButton 已废弃，请改用 ttk.Button(style='Primary.TButton' 或 'Secondary.TButton')"
         )
-
-        if style == "primary":
-            self._normal_bg = COLORS["btn_primary_bg"]
-            self._hover_bg = COLORS["btn_primary_hover"]
-            self._active_bg = COLORS["btn_primary_active"]
-            self._fg = "#ffffff"
-            self._shadow_color = (0, 122, 255, 50)
-        else:
-            self._normal_bg = COLORS["btn_secondary_bg"]
-            self._hover_bg = COLORS["btn_secondary_hover"]
-            self._active_bg = COLORS["btn_secondary_active"]
-            self._fg = COLORS["text"]
-            self._shadow_color = (0, 0, 0, 12)
-
-        self._current_bg = self._normal_bg
-        self._pressed = False
-
-        # 预渲染按钮图像（PIL 绘制圆角矩形 + 微渐变）
-        self._normal_img = self._render_btn(self._normal_bg, pressed=False)
-        self._hover_img = self._render_btn(self._hover_bg, pressed=False)
-        self._active_img = self._render_btn(self._active_bg, pressed=True)
-
-        self._img_ref = self.create_image(width // 2, height // 2, image=self._normal_img)
-        # 文字层
-        self._txt_id = self.create_text(
-            width // 2, height // 2,
-            text=text, fill=self._fg, font=self._font,
-        )
-
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self.bind("<Button-1>", self._on_press)
-        self.bind("<ButtonRelease-1>", self._on_release)
-
-    def _hex_to_rgb(self, hex_color):
-        h = hex_color.lstrip("#")
-        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-
-    def _render_btn(self, fill_hex, pressed=False):
-        """用 PIL 渲染带微渐变的圆角按钮"""
-        w, h = self._width, self._height
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-
-        # 底部阴影
-        if not pressed and self.style != "primary":
-            shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            sd = ImageDraw.Draw(shadow)
-            r = h // 2
-            pts = self._rounded_pts(3, 4, w - 3, h - 1, r - 1)
-            sd.polygon(pts, fill=(0, 0, 0, 18))
-            img = Image.alpha_composite(img, shadow)
-
-        draw = ImageDraw.Draw(img)
-        r = h // 2
-        base = self._hex_to_rgb(fill_hex)
-
-        # 主体：轻微垂直渐变（顶部略亮）
-        pts = self._rounded_pts(1, 1, w - 1, h - 1, r)
-
-        for row in range(h):
-            t = row / h
-            factor = 1.0 - t * 0.06  # 顶部亮6%
-            c = tuple(min(255, max(0, int(b * factor))) for b in base)
-
-            # 计算这一行的左右裁剪边界（圆角区域）
-            y_clip = []
-            for col in range(w):
-                y_clip.append(col)
-
-            # 简化：直接填充整个多边形区域，用渐变条带模拟
-            break
-
-        # 填充主体圆角矩形
-        draw.polygon(pts, fill=tuple(base) + (255,))
-
-        # 顶部高光线（1px，模拟光泽）
-        if r > 2:
-            highlight_r = r - 1
-            hl_pts = self._rounded_pts(2, 2, w - 2, 2 + 1, highlight_r)
-            if len(hl_pts) >= 6:
-                hl_color = tuple(min(255, b + 28) for b in base) + (80,)
-                try:
-                    draw.line([hl_pts[0], hl_pts[1], hl_pts[2], hl_pts[3]], fill=hl_color, width=1)
-                    draw.line([hl_pts[-3], hl_pts[-2], hl_pts[-1], hl_pts[0]], fill=hl_color, width=1)
-                except Exception:
-                    pass
-
-        # 边框（极淡）
-        border_color = tuple(max(0, b - 30) for b in base) + (60,)
-        try:
-            draw.polygon(pts, outline=border_color)
-        except Exception:
-            pass
-
-        return ImageTk.PhotoImage(img)
-
-    def _rounded_pts(self, x1, y1, x2, y2, radius):
-        """生成圆角矩形的顶点列表"""
-        r = min(radius, (x2 - x1) // 2, (y2 - y1) // 2)
-        return [
-            x1 + r, y1,
-            x2 - r, y1,
-            x2, y1,
-            x2, y1 + r,
-            x2, y2 - r,
-            x2, y2,
-            x2 - r, y2,
-            x1 + r, y2,
-            x1, y2,
-            x1, y2 - r,
-            x1, y1 + r,
-            x1, y1,
-        ]
-
-    def _on_enter(self, _):
-        self.itemconfig(self._img_ref, image=self._hover_img)
-
-    def _on_leave(self, _):
-        self.itemconfig(self._img_ref, image=self._normal_img)
-
-    def _on_press(self, _):
-        self._pressed = True
-        self.itemconfig(self._img_ref, image=self._active_img)
-
-    def _on_release(self, _):
-        was_pressed = self._pressed
-        self._pressed = False
-        self.itemconfig(self._img_ref, image=self._hover_img)
-        if was_pressed and self.command:
-            self.command()
-
-    def config_text(self, text: str):
-        self._text = text
-        self.itemconfig(self._txt_id, text=text)
 
 
 def apply_modern_style(root: tk.Tk):
-    """应用 macOS 风格的现代化样式"""
+    """应用 Windows 桌面工具风格的统一样式 —— 灰白黑配色。
+
+    所有按钮统一通过 Primary.TButton / Secondary.TButton style 渲染，
+    不再使用 Canvas 自绘。设置弹窗与主窗口共享同一套按钮样式。
+    """
     # 高 DPI 缩放修正
     if sys.platform == "win32":
         try:
@@ -549,95 +550,53 @@ def apply_modern_style(root: tk.Tk):
             pass
 
     style = ttk.Style(root)
-
-    # 使用 clam 主题作为基础
+    # clam 是 ttk 中最稳定的可定制主题，作为基础
     style.theme_use("clam")
 
-    # 全局背景
+    # ---- 全局基础样式 ----
     style.configure(".", background=COLORS["bg"], foreground=COLORS["text"])
 
-    # 按钮样式 - macOS 胶囊风格
-    style.configure(
-        "Accent.TButton",
-        background=COLORS["accent"],
-        foreground="white",
-        padding=(20, 10),
-        font=(_FONT, 10, "bold"),
-        borderwidth=0,
-        relief="flat",
-        focusthickness=0,
-    )
-    style.map(
-        "Accent.TButton",
-        background=[("active", COLORS["accent_hover"]), ("disabled", "#d2d2d7")],
-        foreground=[("disabled", "#ffffff")],
-    )
-    # 让 Accent 按钮尽可能圆角（clam 主题下 borderadius 有限，用大 padding 模拟胶囊）
-    style.layout(
-        "Accent.TButton",
-        [
-            (
-                "Button.button",
-                {
-                    "children": [
-                        ("Button.focus", {"children": [("Button.padding", {"children": [("Button.label", {"sticky": "nswe"})], "sticky": "nswe"})], "sticky": "nswe"})
-                    ],
-                    "sticky": "nswe",
-                },
-            )
-        ],
-    )
-
-    style.configure(
-        "TButton",
-        background=COLORS["card_bg"],
-        foreground=COLORS["text"],
-        padding=(15, 8),
-        font=(_FONT, 10),
-        borderwidth=1,
-        relief="solid",
-    )
-    style.map(
-        "TButton",
-        background=[("active", "#e8e8ed")],
-        foreground=[("disabled", COLORS["text_secondary"])],
-    )
-
-    # 框架样式
+    # 框架
     style.configure("Card.TFrame", background=COLORS["card_bg"], relief="flat")
     style.configure("TFrame", background=COLORS["bg"])
 
-    # 标签样式
+    # ---- 标签层级 ----
+    # 主窗口内容头部标题：18 bold
     style.configure(
         "Title.TLabel",
         background=COLORS["bg"],
         foreground=COLORS["text"],
-        font=(_FONT, 18, "bold"),
+        font=(_FONT, 14, "bold"),
     )
+    # 内容头部辅助说明 + 设置窗副标题：9 次文本
     style.configure(
         "Subtitle.TLabel",
         background=COLORS["bg"],
         foreground=COLORS["text_secondary"],
         font=(_FONT, 10),
     )
+    # 卡片内正文
     style.configure(
         "Card.TLabel",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
         font=(_FONT, 10),
     )
+    # 卡片标题：12 semibold
     style.configure(
         "CardTitle.TLabel",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
-        font=(_FONT, 11, "bold"),
+        font=(_FONT, 12, "bold"),
     )
+    # 汇总数值：14 bold，颜色=主文本（不再使用蓝色）
     style.configure(
         "Stat.TLabel",
         background=COLORS["card_bg"],
-        foreground=COLORS["accent"],
+        foreground=COLORS["text"],
         font=(_FONT, 14, "bold"),
     )
+    # 汇总标签：9 次文本
     style.configure(
         "StatLabel.TLabel",
         background=COLORS["card_bg"],
@@ -645,7 +604,7 @@ def apply_modern_style(root: tk.Tk):
         font=(_FONT, 9),
     )
 
-    # LabelFrame
+    # ---- LabelFrame ----
     style.configure(
         "Card.TLabelframe",
         background=COLORS["card_bg"],
@@ -659,35 +618,167 @@ def apply_modern_style(root: tk.Tk):
         font=(_FONT, 11, "bold"),
     )
 
-    # 入口框
+    # ---- 按钮统一样式 ----
+    # 基线按钮高度通过 padding 控制；clam 下文字垂直居中由 layout 完成
+    _BUTTON_LAYOUT = [
+        (
+            "Button.button",
+            {
+                "children": [
+                    (
+                        "Button.focus",
+                        {
+                            "children": [
+                                (
+                                    "Button.padding",
+                                    {
+                                        "children": [
+                                            ("Button.label", {"sticky": "nswe"})
+                                        ],
+                                        "sticky": "nswe",
+                                    },
+                                )
+                            ],
+                            "sticky": "nswe",
+                        },
+                    )
+                ],
+                "sticky": "nswe",
+            },
+        )
+    ]
+
+    # 主按钮：石墨灰底、白字（用于"立即同步""保存"等）
+    style.layout("Primary.TButton", _BUTTON_LAYOUT)
     style.configure(
-        "TEntry",
-        padding=6,
+        "Primary.TButton",
+        background=COLORS["btn_primary_bg"],
+        foreground=COLORS["btn_disabled_fg"],
+        padding=(16, 8),
+        font=(_FONT, 10, "bold"),
         borderwidth=1,
-        relief="solid",
+        bordercolor=COLORS["btn_primary_bg"],
+        relief="flat",
+        focusthickness=0,
+        anchor="center",
+    )
+    style.map(
+        "Primary.TButton",
+        background=[
+            ("active", COLORS["btn_primary_hover"]),
+            ("pressed", COLORS["btn_primary_active"]),
+            ("disabled", COLORS["btn_disabled_bg"]),
+        ],
+        foreground=[("disabled", COLORS["btn_disabled_fg"])],
     )
 
-    # Radiobutton
+    # 次按钮：中灰底、深色字、1px 边框（用于"回滚""设置""取消""最小化到托盘"）
+    style.layout("Secondary.TButton", _BUTTON_LAYOUT)
+    style.configure(
+        "Secondary.TButton",
+        background=COLORS["btn_secondary_bg"],
+        foreground=COLORS["text"],
+        padding=(16, 8),
+        font=(_FONT, 10),
+        borderwidth=1,
+        bordercolor=COLORS["border"],
+        relief="flat",
+        focusthickness=0,
+        anchor="center",
+    )
+    style.map(
+        "Secondary.TButton",
+        background=[
+            ("active", COLORS["btn_secondary_hover"]),
+            ("pressed", COLORS["btn_secondary_active"]),
+            ("disabled", COLORS["btn_secondary_disabled_bg"]),
+        ],
+        foreground=[("disabled", COLORS["text_secondary"])],
+    )
+
+    # 默认 TButton 兜底为 Secondary 风格（保持旧风格按钮可用）
+    style.layout("TButton", _BUTTON_LAYOUT)
+    style.configure(
+        "TButton",
+        background=COLORS["btn_secondary_bg"],
+        foreground=COLORS["text"],
+        padding=(16, 8),
+        font=(_FONT, 10),
+        borderwidth=1,
+        bordercolor=COLORS["border"],
+        relief="flat",
+        focusthickness=0,
+        anchor="center",
+    )
+    style.map(
+        "TButton",
+        background=[
+            ("active", COLORS["btn_secondary_hover"]),
+            ("pressed", COLORS["btn_secondary_active"]),
+            ("disabled", COLORS["btn_secondary_disabled_bg"]),
+        ],
+        foreground=[("disabled", COLORS["text_secondary"])],
+    )
+
+    # ---- 输入控件 ----
+    style.configure(
+        "TEntry",
+        padding=(8, 6),
+        borderwidth=1,
+        relief="solid",
+        bordercolor=COLORS["border"],
+        fieldbackground=COLORS["card_bg"],
+        foreground=COLORS["text"],
+        insertcolor=COLORS["log_insert_bg"],
+        selectbackground=COLORS["log_selection_bg"],
+        selectforeground=COLORS["text"],
+    )
+
+    style.configure(
+        "TCombobox",
+        padding=(8, 6),
+        borderwidth=1,
+        relief="solid",
+        bordercolor=COLORS["border"],
+        fieldbackground=COLORS["card_bg"],
+        foreground=COLORS["text"],
+        arrowcolor=COLORS["text_secondary"],
+    )
+
+    # ---- 单选/复选 ----
     style.configure(
         "TRadiobutton",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
         font=(_FONT, 10),
+        focusthickness=0,
     )
-
-    # Checkbutton
     style.configure(
         "TCheckbutton",
         background=COLORS["card_bg"],
         foreground=COLORS["text"],
         font=(_FONT, 10),
+        focusthickness=0,
     )
 
-    # Separator
+    # ---- 分隔线 / Spinbox ----
     style.configure("TSeparator", background=COLORS["border"])
+    style.configure(
+        "TSpinbox",
+        padding=4,
+        fieldbackground=COLORS["card_bg"],
+        bordercolor=COLORS["border"],
+    )
 
-    # Spinbox
-    style.configure("TSpinbox", padding=4)
+    # ---- 垂直滚动条 ----
+    style.configure(
+        "Vertical.TScrollbar",
+        background=COLORS["bg"],
+        troughcolor=COLORS["bg"],
+        bordercolor=COLORS["bg"],
+        arrowcolor=COLORS["text_secondary"],
+        gripcount=0,
+    )
 
     return style
 
@@ -697,12 +788,10 @@ def apply_modern_style(root: tk.Tk):
 # ---------------------------------------------------------------------------
 
 class SyncMainWindow:
-    """多Agent记忆融合器主窗口"""
+    """多Agent记忆融合器主窗口 —— Windows 桌面工具风格。"""
 
     def __init__(self):
         self.root = tk.Tk()
-        # 必须在窗口显示前移除系统标题栏
-        self.root.overrideredirect(True)
         self.root.title("AgentMemorySync")
         # 设置窗口图标
         if _ICON_PATH.exists():
@@ -710,21 +799,33 @@ class SyncMainWindow:
                 self.root.iconbitmap(str(_ICON_PATH))
             except Exception:
                 pass
-        self.root.geometry(load_settings().get("window_geometry", "720x520"))
-        self.root.minsize(560, 420)
+
+        # ---- 自适应窗口尺寸：小屏幕下缩小默认尺寸 ----
+        # 避免 1366x768 笔记本（尤其 125% 缩放）下窗口超出屏幕
+        saved_geo = load_settings().get("window_geometry", "")
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        if saved_geo:
+            self.root.geometry(saved_geo)
+        else:
+            # 默认尺寸根据屏幕自适应
+            if screen_w <= 1366 or screen_h <= 768:
+                default_w, default_h = 760, 540
+            else:
+                default_w, default_h = 880, 620
+            # 确保不超过屏幕工作区（预留任务栏 60px）
+            max_w = screen_w - 40
+            max_h = screen_h - 100
+            default_w = min(default_w, max_w)
+            default_h = min(default_h, max_h)
+            self.root.geometry("{}x{}".format(default_w, default_h))
+
+        # 最小尺寸也根据屏幕自适应：小屏幕降到 640x460
+        if screen_w <= 1366 or screen_h <= 768:
+            self.root.minsize(640, 460)
+        else:
+            self.root.minsize(720, 540)
         self.root.configure(bg=COLORS["bg"])
-
-        # macOS 风格自定义标题栏状态
-        self._normal_geometry = load_settings().get("window_geometry", "720x520")
-        self._is_maximized = False
-        self._drag_offset_x = 0
-        self._drag_offset_y = 0
-
-        # macOS 风格窗口属性
-        try:
-            self.root.tk.call("tk", "scaling", 1.25)
-        except Exception:
-            pass
 
         self.settings = load_settings()
         self.is_syncing = False
@@ -736,41 +837,121 @@ class SyncMainWindow:
         self._tray_class_registered = False  # 窗口类是否已注册
         self._start_minimized = "--minimized" in sys.argv
         self._last_sync_time = 0  # timestamp of last sync
+        self._tray_ignore_until = 0.0
 
         apply_modern_style(self.root)
         self._build_ui()
-        self._bind_window_drag()
-        # 窗口显示后再裁剪圆角，否则 winfo_width/height 为 1
-        self.root.after(100, self._apply_rounded_corners)
+
+        # Windows 系统标题栏改成灰白配色（Win10 1903+ / Win11）
+        self.root.update_idletasks()
+        apply_dwm_caption_colors(self.root)
+
+        # ---- 居中窗口（提前到 __init__ 避免 run() 时闪烁）----
+        self._center_window()
 
         # 关闭按钮 → 最小化到托盘（而非退出）
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _center_window(self):
+        """将主窗口居中显示，并确保不超出屏幕工作区。"""
+        self.root.update_idletasks()
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        # 预留任务栏空间（底部 60px）
+        max_h = screen_h - 60
+        if h > max_h:
+            h = max_h
+            self.root.geometry("{}x{}".format(w, h))
+        x = (screen_w - w) // 2
+        y = max(0, (screen_h - 60 - h) // 2)
+        self.root.geometry("+{}+{}".format(x, y))
+
     def _build_ui(self):
-        """构建 macOS 风格 UI（无边框 + 自定义标题栏）"""
-        # 自定义标题栏
-        self._build_title_bar()
+        """构建 Windows 桌面工具风格 UI —— 两栏内容 + 内容头部。"""
+        # === 内容头部：左侧标题 + 右侧状态 ===
+        self._build_content_header()
 
-        # 主内容区
-        content = ttk.Frame(self.root)
-        content.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+        # === 主内容区 ===
+        content = ttk.Frame(self.root, style="TFrame")
+        content.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
 
-        # 左侧：日志面板
-        left_panel = ttk.Frame(content)
+        # 左列：日志卡片
+        left_panel = ttk.Frame(content, style="TFrame")
         left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        log_card = tk.Frame(left_panel, bg=COLORS["card_bg"], bd=0, highlightthickness=1,
-                            highlightbackground=COLORS["border"])
+        self._build_log_card(left_panel)
+
+        # 右列：汇总 + 操作（固定宽度 260）
+        right_panel = tk.Frame(content, width=260, bg=COLORS["bg"])
+        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(16, 0))
+        right_panel.pack_propagate(False)
+
+        self._build_summary_card(right_panel)
+        self._build_actions_card(right_panel)
+
+    def _build_content_header(self):
+        """内容头部：完整内容区一部分，承载标题与状态。
+
+        视觉上沿用项目原有"浅灰 + 主文本色"配色，等同之前 mac 版本自定义标题栏
+        的色调，避免出现 Windows 原生深色标题栏带来的违和感。
+        """
+        header = tk.Frame(self.root, bg=COLORS["header_bg"], height=44)
+        header.pack(fill=tk.X, side=tk.TOP)
+        header.pack_propagate(False)
+
+        # 左侧：应用标题（主文本色）
+        self.title_label = tk.Label(
+            header,
+            text="AgentMemorySync",
+            bg=COLORS["header_bg"],
+            fg=COLORS["header_fg"],
+            font=(_FONT, 14, "bold"),
+            anchor="w",
+            padx=16,
+        )
+        self.title_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # 右侧：状态点 + 状态文字
+        status_frame = tk.Frame(header, bg=COLORS["header_bg"])
+        status_frame.pack(side=tk.RIGHT, padx=16)
+
+        self.status_var = tk.StringVar(value="就绪")
+        status_label = tk.Label(
+            status_frame,
+            textvariable=self.status_var,
+            bg=COLORS["header_bg"],
+            fg=COLORS["header_fg"],
+            font=(_FONT, 10),
+        )
+        status_label.pack(side=tk.RIGHT)
+
+        self.status_dot = tk.Label(
+            status_frame,
+            bg=COLORS["header_bg"], highlightthickness=0,
+        )
+        self.status_dot.pack(side=tk.RIGHT, padx=(0, 6))
+        self._status_dot_img = None  # 保留 PhotoImage 引用避免 GC
+        self._draw_status_dot(COLORS["status_ready"])
+
+    def _build_log_card(self, parent):
+        """日志卡片：白底 + 1px 边框 + 等宽字体白底日志。"""
+        log_card = tk.Frame(
+            parent, bg=COLORS["card_bg"], bd=0,
+            highlightthickness=1, highlightbackground=COLORS["border"],
+        )
         log_card.pack(fill=tk.BOTH, expand=True)
 
         log_header = tk.Frame(log_card, bg=COLORS["card_bg"])
-        log_header.pack(fill=tk.X, padx=12, pady=(10, 5))
-
-        ttk.Label(log_header, text="同步日志", style="CardTitle.TLabel").pack(side=tk.LEFT)
+        log_header.pack(fill=tk.X, padx=16, pady=(12, 8))
+        ttk.Label(
+            log_header, text="同步日志", style="CardTitle.TLabel"
+        ).pack(side=tk.LEFT)
 
         self.log_text = tk.Text(
             log_card,
-            height=12,
+            height=8,
             state=tk.DISABLED,
             wrap=tk.WORD,
             font=("Consolas", 9),
@@ -778,26 +959,29 @@ class SyncMainWindow:
             fg=COLORS["log_text"],
             relief="flat",
             padx=12,
-            pady=8,
-            selectbackground="#404040",
-            insertbackground="white",
+            pady=10,
+            selectbackground=COLORS["log_selection_bg"],
+            selectforeground=COLORS["text"],
+            insertbackground=COLORS["log_insert_bg"],
+            highlightthickness=0,
+            borderwidth=0,
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=1, pady=(0, 1))
 
-        # 右侧：汇总 + 按钮（用 tk.Frame 确保 width 生效）
-        right_panel = tk.Frame(content, width=210, bg=COLORS["bg"])
-        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(12, 0))
-        right_panel.pack_propagate(False)
+    def _build_summary_card(self, parent):
+        """同步汇总卡片：白底 + 标签/数值两列。"""
+        card = tk.Frame(
+            parent, bg=COLORS["card_bg"], bd=0,
+            highlightthickness=1, highlightbackground=COLORS["border"],
+        )
+        card.pack(fill=tk.X)
 
-        # 汇总卡片
-        summary_card = tk.Frame(right_panel, bg=COLORS["card_bg"], bd=0, highlightthickness=1,
-                                highlightbackground=COLORS["border"])
-        summary_card.pack(fill=tk.X)
+        # 标题
+        header = tk.Frame(card, bg=COLORS["card_bg"])
+        header.pack(fill=tk.X, padx=16, pady=(12, 8))
+        ttk.Label(header, text="同步汇总", style="CardTitle.TLabel").pack(side=tk.LEFT)
 
-        summary_header = tk.Frame(summary_card, bg=COLORS["card_bg"])
-        summary_header.pack(fill=tk.X, padx=12, pady=(10, 5))
-        ttk.Label(summary_header, text="同步汇总", style="CardTitle.TLabel").pack(side=tk.LEFT)
-
+        # 数值列表
         self.summary_widgets = []
         summary_fields = [
             ("agents", "发现 Agent", "0"),
@@ -807,325 +991,83 @@ class SyncMainWindow:
             ("skipped", "跳过", "0"),
             ("duration", "耗时", "--"),
         ]
+        rows = tk.Frame(card, bg=COLORS["card_bg"])
+        rows.pack(fill=tk.X, padx=16, pady=(0, 16))
 
         for key, label, default in summary_fields:
-            row_frame = tk.Frame(summary_card, bg=COLORS["card_bg"])
-            row_frame.pack(fill=tk.X, padx=12, pady=2)
+            row_frame = tk.Frame(rows, bg=COLORS["card_bg"])
+            row_frame.pack(fill=tk.X, pady=4)
 
             ttk.Label(row_frame, text=label, style="StatLabel.TLabel").pack(side=tk.LEFT)
             val_label = ttk.Label(row_frame, text=default, style="Stat.TLabel")
             val_label.pack(side=tk.RIGHT)
             self.summary_widgets.append((key, val_label))
 
-        # 底部留白
-        tk.Frame(summary_card, bg=COLORS["card_bg"], height=8).pack()
-
-        # 按钮区域 - macOS 胶囊按钮
-        btn_frame = tk.Frame(right_panel, bg=COLORS["bg"])
-        btn_frame.pack(fill=tk.X, pady=(15, 0))
-
-        btn_width = 186
-        btn_height = 34
-
-        self.run_btn = RoundedButton(
-            btn_frame, text="立即同步", style="primary",
-            width=btn_width, height=btn_height,
-            command=self._start_sync,
+    def _build_actions_card(self, parent):
+        """操作卡片：4 个统一按钮，纵向排列、宽度一致。"""
+        card = tk.Frame(
+            parent, bg=COLORS["card_bg"], bd=0,
+            highlightthickness=1, highlightbackground=COLORS["border"],
         )
-        self.run_btn.pack(pady=(0, 8))
+        card.pack(fill=tk.X, pady=(16, 0))
 
-        self.rollback_btn = RoundedButton(
-            btn_frame, text="回滚上次", style="secondary",
-            width=btn_width, height=btn_height,
-            command=self._rollback,
+        # 标题
+        header = tk.Frame(card, bg=COLORS["card_bg"])
+        header.pack(fill=tk.X, padx=16, pady=(12, 8))
+        ttk.Label(header, text="操作", style="CardTitle.TLabel").pack(side=tk.LEFT)
+
+        btn_box = tk.Frame(card, bg=COLORS["card_bg"])
+        btn_box.pack(fill=tk.X, padx=16, pady=(0, 16))
+
+        # 4 个按钮：主按钮 + 3 个次按钮，纵向等距
+        self.run_btn = ttk.Button(
+            btn_box, text="立即同步", style="Primary.TButton", command=self._start_sync,
         )
-        self.rollback_btn.pack(pady=(0, 8))
+        self.run_btn.pack(fill=tk.X, pady=(0, 8), ipady=4)
 
-        self.settings_btn = RoundedButton(
-            btn_frame, text="设置", style="secondary",
-            width=btn_width, height=btn_height,
-            command=self._open_settings,
+        self.rollback_btn = ttk.Button(
+            btn_box, text="回滚上次", style="Secondary.TButton", command=self._rollback,
         )
-        self.settings_btn.pack(pady=(0, 8))
+        self.rollback_btn.pack(fill=tk.X, pady=(0, 8), ipady=4)
 
-        self.minimize_btn = RoundedButton(
-            btn_frame, text="最小化到托盘", style="secondary",
-            width=btn_width, height=btn_height,
-            command=self._minimize_to_tray,
+        self.settings_btn = ttk.Button(
+            btn_box, text="设置", style="Secondary.TButton", command=self._open_settings,
         )
-        self.minimize_btn.pack()
+        self.settings_btn.pack(fill=tk.X, pady=(0, 8), ipady=4)
 
-    def _build_title_bar(self):
-        """构建 macOS 风格自定义标题栏"""
-        self.title_bar = tk.Frame(self.root, bg=COLORS["bg"], height=40)
-        self.title_bar.pack(fill=tk.X, side=tk.TOP)
-        self.title_bar.pack_propagate(False)
-        self.title_bar.grid_columnconfigure(1, weight=1)
-
-        # 左侧：三个 macOS 风格圆点按钮
-        btn_frame = tk.Frame(self.title_bar, bg=COLORS["bg"])
-        btn_frame.grid(row=0, column=0, sticky="w", padx=(16, 0))
-
-        self._title_close_btn = self._create_traffic_light_button(
-            btn_frame, "#ff5f57", "#e0443e", "×", self._on_close
+        self.minimize_btn = ttk.Button(
+            btn_box, text="最小化到托盘", style="Secondary.TButton", command=self._minimize_to_tray,
         )
-        self._title_min_btn = self._create_traffic_light_button(
-            btn_frame, "#febc2e", "#d89e24", "−", self._minimize_window
-        )
-        self._title_max_btn = self._create_traffic_light_button(
-            btn_frame, "#28c840", "#24aa34", "+", self._toggle_maximize
-        )
-        self._title_close_btn.pack(side=tk.LEFT, padx=(0, 9))
-        self._title_min_btn.pack(side=tk.LEFT, padx=(0, 9))
-        self._title_max_btn.pack(side=tk.LEFT)
+        self.minimize_btn.pack(fill=tk.X, ipady=4)
 
-        # 中间：标题
-        self.title_label = tk.Label(
-            self.title_bar,
-            text="AgentMemorySync",
-            bg=COLORS["bg"],
-            fg=COLORS["text_secondary"],
-            font=(_FONT, 10),
-        )
-        self.title_label.grid(row=0, column=1, sticky="nsew")
-
-        # 右侧：状态指示器
-        status_frame = tk.Frame(self.title_bar, bg=COLORS["bg"])
-        status_frame.grid(row=0, column=2, sticky="e", padx=(0, 16))
-
-        self.status_var = tk.StringVar(value="就绪")
-        status_label = tk.Label(
-            status_frame,
-            textvariable=self.status_var,
-            bg=COLORS["bg"],
-            fg=COLORS["text_secondary"],
-            font=(_FONT, 9),
-        )
-        status_label.pack(side=tk.RIGHT)
-
-        self.status_dot = tk.Canvas(
-            status_frame, width=12, height=12, bg=COLORS["bg"], highlightthickness=0
-        )
-        self.status_dot.pack(side=tk.RIGHT, padx=(0, 6))
-        self._draw_status_dot(COLORS["success"])
-
-    def _create_traffic_light_image(self, size: int, base_hex: str, hover_hex: str, symbol: str, hover: bool = False):
-        """用 PIL 绘制 macOS 风格立体交通灯球体，返回 PIL.Image 对象"""
-        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
-        def _hex_rgb(hex_color):
-            h = hex_color.lstrip("#")
-            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-
-        base = _hex_rgb(hover_hex if hover else base_hex)
-        cx, cy = size // 2, size // 2
-        r = size // 2 - 1
-
-        # ---- 1. 外发光（微弱）----
-        for glow_r in range(int(r * 1.15), int(r), -1):
-            alpha = int(20 * (r * 1.15 - glow_r) / (r * 0.15))
-            draw.ellipse([cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r],
-                         outline=base + (alpha,), width=1)
-
-        # ---- 2. 主体：径向渐变模拟 3D 球体 ----
-        # 光源来自左上方（-0.35, -0.4）
-        light_x_off, light_y_off = -0.35, -0.45
-        lx, ly = cx + r * light_x_off, cy + r * light_y_off
-        light_dist = math.sqrt((lx - cx) ** 2 + (ly - cy) ** 2)
-        # 高光色和暗部色
-        spec = tuple(min(255, int(b * 1.45)) for b in base)   # 高光（接近白色但带底色）
-        dark = tuple(max(0, int(b * 0.55)) for b in base)       # 暗部
-        mid = base                                                # 中间
-
-        for y in range(size):
-            for x in range(size):
-                dx, dy = x - cx, y - cy
-                dist = math.sqrt(dx * dx + dy * dy)
-                if dist > r:
-                    continue
-
-                # 归一化到 [-1, 1]
-                nx_raw = dx / r if r else 0
-                ny_raw = dy / r if r else 0
-
-                # 到光源方向的角度
-                dot = nx_raw * light_x_off + ny_raw * light_y_off  # 范围 [-~1.5, ~1.5]
-                t = (dot + 1.5) / 3.0  # 归一化到 [0, 1]
-
-                # Phong-like 插值：暗 → 中 → 高光
-                if t < 0.5:
-                    s = t / 0.5
-                    c = tuple(int(dark[i] + (mid[i] - dark[i]) * s) for i in range(3))
-                else:
-                    s = (t - 0.5) / 0.5
-                    c = tuple(int(mid[i] + (spec[i] - mid[i]) * s) for i in range(3))
-
-                # 边缘衰减（antialiasing）
-                edge_alpha = 255
-                if dist > r - 1:
-                    edge_alpha = max(0, int(255 * (r - dist)))
-
-                img.putpixel((x, y), tuple(max(0, min(255, v)) for v in c) + (edge_alpha,))
-
-        # ---- 3. 主高光：左上角斜向椭圆（镜面反射）----
-        hl_w = int(size * 0.38)
-        hl_h = int(size * 0.24)
-        hl_cx = cx - int(size * 0.14)
-        hl_cy = cy - int(size * 0.22)
-        # 绘制径向衰减的高光椭圆
-        for y in range(max(0, hl_cy - hl_h // 2), min(size, hl_cy + hl_h // 2 + 1)):
-            for x in range(max(0, hl_cx - hl_w // 2), min(size, hl_cx + hl_w // 2 + 1)):
-                # 椭圆内判断
-                ex = (x - hl_cx) / (hl_w / 2) if hl_w else 999
-                ey = (y - hl_cy) / (hl_h / 2) if hl_h else 999
-                edist = math.sqrt(ex * ex + ey * ey)
-                if edist > 1:
-                    continue
-                alpha = int(180 * (1 - edist) ** 1.5)
-                old = img.getpixel((x, y))
-                if old[3] > 0:
-                    blended = tuple(min(255, old[i] + int((255 - old[i]) * alpha / 255)) for i in range(3))
-                    img.putpixel((x, y), blended + (old[3],))
-
-        # ---- 4. 次高光：更小的亮点（靠近顶部中心偏左）----
-        hl2_r = int(size * 0.08)
-        hl2_cx = cx - int(size * 0.06)
-        hl2_cy = cy - int(size * 0.28)
-        draw.ellipse(
-            [hl2_cx - hl2_r, hl2_cy - hl2_r, hl2_cx + hl2_r, hl2_cy + hl2_r],
-            fill=(255, 255, 255, 140),
-        )
-
-        # ---- 5. 底部边缘暗影（新月形）----
-        sh_offset = int(r * 0.25)
-        sh_r = int(r * 0.85)
-        for angle_deg in range(-30, 210):
-            angle = math.radians(angle_deg)
-            sx = cx + sh_offset + int(sh_r * math.cos(angle))
-            sy = cy + int(sh_r * 0.9 * math.sin(angle))
-            if 0 <= sx < size and 0 <= sy < size:
-                old = img.getpixel((sx, sy))
-                if old[3] > 0:
-                    shadow_a = 40
-                    new_c = tuple(max(0, old[i] - shadow_a) for i in range(3))
-                    img.putpixel((sx, sy), new_c + (old[3],))
-
-        # ---- 6. 极细外圈描边（增加立体感）----
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, 35), width=1)
-
-        # ---- 7. hover 时绘制符号 ----
-        if hover:
-            from PIL import ImageFont
-            try:
-                font = ImageFont.truetype("segoeui.ttf", size=int(size * 0.52))
-            except Exception:
-                font = ImageFont.load_default()
-            bbox = draw.textbbox((0, 0), symbol, font=font)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            tx, ty = cx - tw / 2, cy - th / 2 - bbox[1] * 0.08
-            # 符号阴影
-            draw.text((tx + 1, ty + 1), symbol, font=font, fill=(0, 0, 0, 80))
-            # 符号本体
-            draw.text((tx, ty), symbol, font=font, fill=(60, 60, 60, 220))
-
-        return img  # 返回 PIL.Image 对象
-
-    def _create_traffic_light_button(self, parent, color, hover_color, symbol, command):
-        """创建一个 macOS 风格交通灯按钮"""
-        size = 14  # 显示尺寸
-        scale = 3  # 超采样倍数（渲染更清晰）
-        img_size = size * scale
-        canvas = tk.Canvas(parent, width=size, height=size, bg=COLORS["bg"], highlightthickness=0)
-
-        # 高分辨率渲染后缩放到显示尺寸（抗锯齿）
-        normal_pil = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=False)
-        hover_pil = self._create_traffic_light_image(img_size, color, hover_color, symbol, hover=True)
-        normal_pil = normal_pil.resize((size, size), Image.LANCZOS)
-        hover_pil = hover_pil.resize((size, size), Image.LANCZOS)
-
-        normal_img = ImageTk.PhotoImage(normal_pil)
-        hover_img = ImageTk.PhotoImage(hover_pil)
-
-        # 保持引用避免被回收
-        canvas.normal_img = normal_img
-        canvas.hover_img = hover_img
-
-        cid = canvas.create_image(size // 2, size // 2, image=normal_img, anchor="center")
-
-        def on_enter(_):
-            canvas.itemconfig(cid, image=hover_img)
-
-        def on_leave(_):
-            canvas.itemconfig(cid, image=normal_img)
-
-        canvas.bind("<Enter>", on_enter)
-        canvas.bind("<Leave>", on_leave)
-        canvas.bind("<Button-1>", lambda _: command())
-        return canvas
-
-    def _bind_window_drag(self):
-        """绑定标题栏拖动事件"""
-        self.title_bar.bind("<Button-1>", self._on_title_bar_press)
-        self.title_bar.bind("<B1-Motion>", self._on_title_bar_drag)
-        self.title_label.bind("<Button-1>", self._on_title_bar_press)
-        self.title_label.bind("<B1-Motion>", self._on_title_bar_drag)
-
-    def _on_title_bar_press(self, event):
-        """记录鼠标按下时的窗口位置偏移"""
-        self._drag_offset_x = event.x_root - self.root.winfo_x()
-        self._drag_offset_y = event.y_root - self.root.winfo_y()
-
-    def _on_title_bar_drag(self, event):
-        """拖动标题栏移动窗口"""
-        if self._is_maximized:
-            return
-        x = event.x_root - self._drag_offset_x
-        y = event.y_root - self._drag_offset_y
-        self.root.geometry(f"+{x}+{y}")
-        self._normal_geometry = self.root.geometry()
-
-    def _minimize_window(self):
-        """最小化窗口（本应用统一最小化到托盘）"""
-        self._minimize_to_tray()
-
-    def _toggle_maximize(self):
-        """最大化/还原窗口"""
-        if self._is_maximized:
-            self.root.overrideredirect(False)
-            self.root.geometry(self._normal_geometry)
-            self.root.overrideredirect(True)
-            self._is_maximized = False
-        else:
-            self._normal_geometry = self.root.geometry()
-            self.root.overrideredirect(False)
-            self.root.state("zoomed")
-            self.root.overrideredirect(True)
-            self._is_maximized = True
-        self._apply_rounded_corners()
-
-    def _apply_rounded_corners(self):
-        """给无边框窗口裁剪圆角区域"""
-        if sys.platform != "win32":
-            return
+    def _make_status_dot_image(self, color: str, size: int = 16):
+        """用 PIL 绘制抗锯齿圆点，超采样 4x 后缩小，彻底消除锯齿。"""
         try:
-            self.root.update_idletasks()
-            hwnd = self.root.winfo_id()
-            width = self.root.winfo_width()
-            height = self.root.winfo_height()
-            if hwnd == 0 or width < 10 or height < 10:
-                self.root.after(100, self._apply_rounded_corners)
-                return
-            radius = 16
-            hrgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius)
-            ctypes.windll.user32.SetWindowRgn(hwnd, hrgn, True)
-        except Exception:
-            pass
+            from PIL import Image, ImageDraw, ImageTk
+        except ImportError:
+            return None
+        scale = 4
+        big = size * scale
+        img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        margin = 2 * scale
+        draw.ellipse(
+            [margin, margin, big - margin, big - margin],
+            fill=color, outline=(255, 255, 255, 180), width=scale,
+        )
+        img = img.resize((size, size), Image.LANCZOS)
+        return ImageTk.PhotoImage(img)
 
     def _draw_status_dot(self, color: str):
-        """绘制状态指示点"""
-        self.status_dot.delete("all")
-        self.status_dot.create_oval(2, 2, 10, 10, fill=color, outline="")
+        """更新状态指示点（PIL 抗锯齿圆，16x16）。"""
+        img = self._make_status_dot_image(color, size=16)
+        if img is not None:
+            self._status_dot_img = img  # 保留引用避免 GC
+            self.status_dot.config(image=img, text="")
+        else:
+            # PIL 不可用时回退到文字圆点
+            self.status_dot.config(image="", text="●", fg=color,
+                                   font=(_FONT, 12), bg=COLORS["header_bg"])
 
     def _log(self, msg: str):
         """向日志面板追加消息"""
@@ -1171,7 +1113,7 @@ class SyncMainWindow:
         self.run_btn.config(state=tk.DISABLED)
         self.rollback_btn.config(state=tk.DISABLED)
         self.status_var.set("同步中...")
-        self._draw_status_dot(COLORS["warning"])
+        self._draw_status_dot(COLORS["status_running"])
 
         # 清空日志
         self.log_text.config(state=tk.NORMAL)
@@ -1193,10 +1135,10 @@ class SyncMainWindow:
                     self.root.after(0, lambda: self.status_var.set(
                         "完成 ({} 个错误)".format(len(report.errors))
                     ))
-                    self.root.after(0, lambda: self._draw_status_dot(COLORS["error"]))
+                    self.root.after(0, lambda: self._draw_status_dot(COLORS["status_error"]))
                 else:
                     self.root.after(0, lambda: self.status_var.set("同步完成"))
-                    self.root.after(0, lambda: self._draw_status_dot(COLORS["success"]))
+                    self.root.after(0, lambda: self._draw_status_dot(COLORS["status_ready"]))
 
                 # 发送托盘气泡通知
                 notify_body = "设备: {} | Agent: {} 个 | 提取: {} 条 | 写回: {} 条".format(
@@ -1212,7 +1154,7 @@ class SyncMainWindow:
             except Exception as e:
                 self._log("同步失败: {}".format(e))
                 self.root.after(0, lambda: self.status_var.set("同步失败"))
-                self.root.after(0, lambda: self._draw_status_dot(COLORS["error"]))
+                self.root.after(0, lambda: self._draw_status_dot(COLORS["status_error"]))
             finally:
                 self._last_sync_time = time.time()
                 self.is_syncing = False
@@ -1254,7 +1196,7 @@ class SyncMainWindow:
             return
 
         self.status_var.set("回滚中...")
-        self._draw_status_dot(COLORS["warning"])
+        self._draw_status_dot(COLORS["status_running"])
 
         def _rollback_thread():
             try:
@@ -1263,11 +1205,11 @@ class SyncMainWindow:
                 restored = engine.rollback()
                 self._log("回滚完成, 恢复 {} 个文件".format(restored))
                 self.root.after(0, lambda: self.status_var.set("回滚完成"))
-                self.root.after(0, lambda: self._draw_status_dot(COLORS["success"]))
+                self.root.after(0, lambda: self._draw_status_dot(COLORS["status_ready"]))
             except Exception as e:
                 self._log("回滚失败: {}".format(e))
                 self.root.after(0, lambda: self.status_var.set("回滚失败"))
-                self.root.after(0, lambda: self._draw_status_dot(COLORS["error"]))
+                self.root.after(0, lambda: self._draw_status_dot(COLORS["status_error"]))
 
         threading.Thread(target=_rollback_thread, daemon=True).start()
 
@@ -1451,6 +1393,7 @@ class SyncMainWindow:
             return False
 
         self._log("系统托盘图标注册成功")
+        self._tray_ignore_until = time.time() + 2.0
         # 启动消息泵轮询
         self._pump_tray_messages()
         return True
@@ -1561,9 +1504,13 @@ class SyncMainWindow:
                 except Exception:
                     pass
                 if lparam == _WM_LBUTTONUP:
+                    if time.time() < getattr(self, "_tray_ignore_until", 0.0):
+                        return 0
                     self._tray_click_action = "show"
                     return 0
                 elif lparam == _WM_RBUTTONUP:
+                    if time.time() < getattr(self, "_tray_ignore_until", 0.0):
+                        return 0
                     self._tray_click_action = "menu"
                     return 0
             elif msg == _WM_TASKBARCREATED:
@@ -1741,6 +1688,7 @@ class SyncMainWindow:
                 nid.szInfoTitle = title[:63]
                 nid.szInfo = body[:255]
                 nid.dwInfoFlags = _NIIF_INFO
+                nid.uTimeout = 2000  # 2 秒（Vista+ 系统可能忽略，但设置无害）
                 ok = _shell32.Shell_NotifyIconW(_NIM_MODIFY, ctypes.byref(nid))
                 # 重置 uFlags，避免影响后续操作
                 nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP | _NIF_SHOWTIP
@@ -1755,13 +1703,14 @@ class SyncMainWindow:
             xml_body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
             ps_title = xml_title.replace("'", "''")
             ps_body = xml_body.replace("'", "''")
+            # duration="short" 显式短时长（~3 秒），audio silent 静音
             ps_script = (
                 "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
                 "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] > $null; "
-                f"$template = '<toast><visual><binding template=\"ToastText02\">"
+                f"$template = '<toast duration=\"short\"><visual><binding template=\"ToastText02\">"
                 f"<text id=\"1\">{ps_title}</text>"
                 f"<text id=\"2\">{ps_body}</text>"
-                f"</binding></visual></toast>'; "
+                f"</binding></visual><audio src=\"ms-winsoundevent:Notification.Default\" silent=\"true\"/></toast>'; "
                 "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
                 "$xml.LoadXml($template); "
                 "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
@@ -1777,25 +1726,16 @@ class SyncMainWindow:
 
     def run(self):
         """启动主循环"""
-        # 居中窗口
-        self.root.update_idletasks()
-        w = self.root.winfo_width()
-        h = self.root.winfo_height()
-        x = (self.root.winfo_screenwidth() - w) // 2
-        y = (self.root.winfo_screenheight() - h) // 2
-        self.root.geometry("+{}+{}".format(x, y))
-
+        # 居中逻辑已移到 __init__ 的 _center_window(),这里不再重复
         # 自动同步：启动时执行一次 + 定时循环
         if self.settings.get("auto_start", False):
             self.root.after(1000, self._start_sync)
 
-        # 启动时最小化到托盘（--minimized 参数或设置中 auto_start）
+        # 启动时最小化到托盘（--minimized 参数）
         if self._start_minimized:
             self.root.after(500, self._minimize_to_tray)
 
-        # 若启用最小化到托盘，启动时即创建托盘图标，方便用户随时找到
-        if self.settings.get("minimize_to_tray", True):
-            self.root.after(500, self._create_tray_icon)
+        # 正常显示窗口启动时，不预创建托盘图标；仅在最小化到托盘时再创建。
 
         # 定时自动同步调度器（每 60 秒检查一次）
         self._schedule_next_sync()
@@ -1808,12 +1748,11 @@ class SyncMainWindow:
 # ---------------------------------------------------------------------------
 
 class SettingsDialog:
-    """设置对话框 - macOS 风格，支持滚动 (v1.3.2)
+    """设置对话框 —— Windows 桌面工具风格，三段式布局（顶部说明 + 滚动表单 + 底部操作）。
 
-    设计：
-    - 外层 Canvas + Scrollbar：容纳 12+ 个 Agent 路径不裁切
-    - Agent 路径覆盖默认折叠到 LabelFrame，避免干扰常用配置
-    - 窗口高度自适应内容，最大 80% 屏高
+    - 顶部：标题 + 副标题说明
+    - 中部：Canvas + Scrollbar + 卡片，承载常见设置 + 高级路径覆盖
+    - 底部：固定操作区，取消 / 保存（保存=主按钮，取消=次按钮）
     """
 
     def __init__(self, parent, settings: dict, on_save):
@@ -1824,14 +1763,17 @@ class SettingsDialog:
 
         self.win = tk.Toplevel(parent)
         self.win.title("设置")
-        # 自适应高度：先小一点，内容定后 update
-        self.win.geometry("460x560")
-        self.win.minsize(420, 420)
+        self.win.geometry("500x600")
+        self.win.minsize(480, 520)
         self.win.transient(parent)
         self.win.grab_set()
         self.win.configure(bg=COLORS["bg"])
 
         self._build()
+
+        # Windows 系统标题栏改成灰白配色（Win10 1903+ / Win11）
+        self.win.update_idletasks()
+        apply_dwm_caption_colors(self.win)
 
         # 点 X 关闭时先询问是否保存改动
         self.win.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -1851,37 +1793,52 @@ class SettingsDialog:
         self.win.geometry("+{}+{}".format(x, y))
 
     def _build(self):
-        # 顶部内容区域：Canvas + Scrollbar
-        outer = tk.Frame(self.win, bg=COLORS["bg"])
-        outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        # === 顶部说明区 ===
+        header = tk.Frame(self.win, bg=COLORS["bg"])
+        header.pack(fill=tk.X, padx=20, pady=(16, 12))
 
-        canvas = tk.Canvas(outer, bg=COLORS["bg"], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        ttk.Label(header, text="设置", style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            header,
+            text="管理自动同步、冲突处理和 Agent 路径覆盖",
+            style="Subtitle.TLabel",
+        ).pack(anchor=tk.W, pady=(2, 0))
+
+        # === 中部滚动内容 ===
+        scroll_box = tk.Frame(self.win, bg=COLORS["bg"])
+        scroll_box.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 0))
+
+        canvas = tk.Canvas(
+            scroll_box, bg=COLORS["bg"], highlightthickness=0, borderwidth=0,
+        )
+        scrollbar = ttk.Scrollbar(
+            scroll_box, orient="vertical", command=canvas.yview,
+            style="Vertical.TScrollbar",
+        )
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Canvas 内卡片
-        card = tk.Frame(canvas, bg=COLORS["card_bg"], highlightthickness=1,
-                        highlightbackground=COLORS["border"])
+        card = tk.Frame(
+            canvas, bg=COLORS["card_bg"], bd=0,
+            highlightthickness=1, highlightbackground=COLORS["border"],
+        )
         inner = tk.Frame(card, bg=COLORS["card_bg"])
-        inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
+        inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
 
-        # 让 Canvas 控制内部 Frame 的可滚动区域
         canvas_window = canvas.create_window(0, 0, window=card, anchor="nw")
-
-        def _on_card_resize(_evt):
-            # 让 inner 占据 canvas 宽度
-            canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
-        card.bind("<Configure>", _on_card_resize)
 
         def _on_canvas_resize(_evt):
             canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
             canvas.config(scrollregion=canvas.bbox("all"))
         canvas.bind("<Configure>", _on_canvas_resize)
-        card.bind("<Configure>", lambda e: canvas.config(scrollregion=canvas.bbox("all")))
+        card.bind(
+            "<Configure>",
+            lambda e: canvas.config(scrollregion=canvas.bbox("all")),
+        )
 
-        # 鼠标滚轮支持（Windows + macOS）
+        # 鼠标滚轮支持
         def _on_wheel(event):
             delta = -1 if event.delta > 0 else 1
             canvas.yview_scroll(delta, "units")
@@ -1890,48 +1847,59 @@ class SettingsDialog:
         self._wheel_handler = _on_wheel
 
         # === 常用配置区 ===
+
         # 自动同步间隔
         row = tk.Frame(inner, bg=COLORS["card_bg"])
-        row.pack(fill=tk.X, pady=6)
+        row.pack(fill=tk.X, pady=(0, 8))
         ttk.Label(row, text="自动同步间隔", style="Card.TLabel").pack(side=tk.LEFT)
         hour_options = ["1", "2", "4", "8", "16", "24", "48", "72"]
         current_hours = str(self.settings.get("auto_interval_hours", 2))
         if current_hours not in hour_options:
             current_hours = "2"
         self.interval_var = tk.StringVar(value=current_hours)
-        combo = ttk.Combobox(row, values=hour_options, textvariable=self.interval_var,
-                             width=5, state="readonly", font=(_FONT, 10))
+        combo = ttk.Combobox(
+            row, values=hour_options, textvariable=self.interval_var,
+            state="readonly", font=(_FONT, 10), width=5,
+        )
         combo.pack(side=tk.RIGHT)
         ttk.Label(row, text="小时", style="Card.TLabel").pack(side=tk.RIGHT, padx=(0, 8))
 
         ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
 
         # OneDrive 冲突处理
-        ttk.Label(inner, text="OneDrive 冲突时", style="Card.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(inner, text="OneDrive 冲突时", style="Card.TLabel").pack(anchor=tk.W, pady=(0, 8))
         self.conflict_var = tk.StringVar(value=self.settings.get("conflict_action", "prompt"))
         conflict_frame = tk.Frame(inner, bg=COLORS["card_bg"])
-        conflict_frame.pack(anchor=tk.W, pady=(0, 6))
+        conflict_frame.pack(anchor=tk.W, pady=(0, 8))
         ttk.Radiobutton(conflict_frame, text="提示我", variable=self.conflict_var, value="prompt").pack(side=tk.LEFT)
-        ttk.Radiobutton(conflict_frame, text="自动跳过", variable=self.conflict_var, value="skip").pack(side=tk.LEFT, padx=20)
+        ttk.Radiobutton(conflict_frame, text="自动跳过", variable=self.conflict_var, value="skip").pack(side=tk.LEFT, padx=(20, 0))
 
         ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
 
         # 选项
         self.tray_var = tk.BooleanVar(value=self.settings.get("minimize_to_tray", True))
-        ttk.Checkbutton(inner, text="关闭窗口时最小化到托盘", variable=self.tray_var).pack(anchor=tk.W, pady=4)
+        ttk.Checkbutton(
+            inner, text="关闭窗口时最小化到托盘", variable=self.tray_var,
+        ).pack(anchor=tk.W, pady=4)
 
         self.auto_start_var = tk.BooleanVar(value=self.settings.get("auto_start", False))
-        ttk.Checkbutton(inner, text="启动时自动执行同步", variable=self.auto_start_var).pack(anchor=tk.W, pady=4)
+        ttk.Checkbutton(
+            inner, text="启动时自动执行同步", variable=self.auto_start_var,
+        ).pack(anchor=tk.W, pady=4)
 
         # === 高级区域（折叠） ===
         ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
-        advanced_label = ttk.Label(
+        self._advanced_label_text = "高级 ▾  Agent 路径覆盖（展开可手动填，留空=自动检测）"
+        self._advanced_label = tk.Label(
             inner,
-            text="高级 ▾  Agent 路径覆盖（展开可手动填，留空=自动检测）",
-            style="CardTitle.TLabel",
+            text=self._advanced_label_text,
+            bg=COLORS["card_bg"],
+            fg=COLORS["text"],
+            font=(_FONT, 11, "bold"),
+            cursor="hand2",
         )
-        advanced_label.pack(anchor=tk.W, pady=(4, 6))
-        advanced_label.bind("<Button-1>", self._toggle_advanced)
+        self._advanced_label.pack(anchor=tk.W, pady=(4, 6))
+        self._advanced_label.bind("<Button-1>", self._toggle_advanced)
 
         self._advanced_frame = tk.Frame(inner, bg=COLORS["card_bg"])
         self.sw_advanced = False  # 默认折叠
@@ -1947,25 +1915,85 @@ class SettingsDialog:
         except Exception:
             agent_list = list(overrides.keys())
 
+        # === 预置 Agent 区 ===
+        ttk.Label(
+            self._advanced_frame, text="预置 Agent（留空=自动检测）",
+            style="Card.TLabel", font=(_FONT, 9, "bold"),
+        ).pack(anchor=tk.W, pady=(4, 2))
         for agent in agent_list:
             row = tk.Frame(self._advanced_frame, bg=COLORS["card_bg"])
-            row.pack(fill=tk.X, pady=3)
+            row.pack(fill=tk.X, pady=4)
             ttk.Label(row, text="{}:".format(agent), style="Card.TLabel", width=12).pack(side=tk.LEFT)
             var = tk.StringVar(value=overrides.get(agent, ""))
-            entry = ttk.Entry(row, textvariable=var, font=(_FONT, 9))
-            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+            entry = ttk.Entry(row, textvariable=var, font=(_FONT, 10))
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
             self.override_vars[agent] = var
 
-        # === 底部按钮 ===
-        btn_frame = tk.Frame(self.win, bg=COLORS["bg"])
-        btn_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+        # === 自定义 Agent 区 ===
+        ttk.Separator(self._advanced_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        ttk.Label(
+            self._advanced_frame, text="自定义 Agent（手动填名称和路径）",
+            style="Card.TLabel", font=(_FONT, 9, "bold"),
+        ).pack(anchor=tk.W, pady=(2, 4))
 
-        ttk.Button(btn_frame, text="取消", command=self._close).pack(side=tk.RIGHT)
-        ttk.Button(btn_frame, text="保存", style="Accent.TButton", command=self._save).pack(side=tk.RIGHT, padx=(0, 10))
+        # 自定义 agent 容器（动态行）
+        self._custom_rows = []  # [(frame, name_var, path_var), ...]
+        self._custom_container = tk.Frame(self._advanced_frame, bg=COLORS["card_bg"])
+        self._custom_container.pack(fill=tk.X)
+
+        # 加载已保存的自定义 agent（overrides 里不在 agent_list 中的 key）
+        for name, path_val in overrides.items():
+            if name not in agent_list and path_val:
+                self._add_custom_row(name, path_val)
+
+        # "+ 添加自定义 Agent" 按钮
+        ttk.Button(
+            self._advanced_frame, text="+ 添加自定义 Agent", style="Secondary.TButton",
+            command=self._add_custom_row,
+        ).pack(anchor=tk.W, pady=4)
+
+        # === 底部固定操作区 ===
+        ttk.Separator(self.win, orient=tk.HORIZONTAL).pack(fill=tk.X)
+
+        btn_bar = tk.Frame(self.win, bg=COLORS["bg"])
+        btn_bar.pack(fill=tk.X, padx=20, pady=(12, 16))
+
+        ttk.Button(
+            btn_bar, text="取消", style="Secondary.TButton",
+            command=self._close,
+        ).pack(side=tk.RIGHT, ipady=3, padx=(8, 0))
+
+        ttk.Button(
+            btn_bar, text="保存", style="Primary.TButton",
+            command=self._save,
+        ).pack(side=tk.RIGHT, ipady=3)
+
+    def _add_custom_row(self, name: str = "", path_val: str = ""):
+        """添加一行自定义 Agent（名称 + 路径 + 删除按钮）。"""
+        row = tk.Frame(self._custom_container, bg=COLORS["card_bg"])
+        row.pack(fill=tk.X, pady=4)
+        name_var = tk.StringVar(value=name)
+        path_var = tk.StringVar(value=path_val)
+        ttk.Entry(row, textvariable=name_var, font=(_FONT, 10), width=12).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(row, textvariable=path_var, font=(_FONT, 10)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(
+            row, text="✕", style="Secondary.TButton", width=3,
+            command=lambda r=row: self._remove_custom_row(r),
+        ).pack(side=tk.LEFT)
+        self._custom_rows.append((row, name_var, path_var))
+
+    def _remove_custom_row(self, row):
+        """删除一行自定义 Agent。"""
+        row.destroy()
+        self._custom_rows = [r for r in self._custom_rows if r[0] is not row]
 
     def _toggle_advanced(self, _evt=None):
-        """展开/折叠高级区域（v1.3.2 折叠设计）"""
+        """展开/折叠高级区域。"""
         self.sw_advanced = not self.sw_advanced
+        self._advanced_label.config(
+            text="高级 ▴  Agent 路径覆盖（展开可手动填，留空=自动检测）"
+            if self.sw_advanced else self._advanced_label_text,
+        )
         if self.sw_advanced:
             self._advanced_frame.pack(fill=tk.X, pady=(0, 8))
         else:
@@ -1977,10 +2005,17 @@ class SettingsDialog:
     def _current_settings(self) -> dict:
         """根据当前控件值生成设置字典"""
         overrides = {}
+        # 预置 agent
         for agent, var in self.override_vars.items():
             val = var.get().strip()
             if val:
                 overrides[agent] = val
+        # 自定义 agent
+        for _row, name_var, path_var in self._custom_rows:
+            name = name_var.get().strip()
+            path_val = path_var.get().strip()
+            if name and path_val:
+                overrides[name] = path_val
         return {
             "auto_interval_hours": int(self.interval_var.get()),
             "conflict_action": self.conflict_var.get(),
@@ -2092,8 +2127,12 @@ def run_cli():
 
 def _check_single_instance():
     """Windows 互斥锁，防止重复启动。返回 True 表示是第一个实例。"""
+    global _SINGLE_INSTANCE_MUTEX
     try:
         import ctypes
+        if _SINGLE_INSTANCE_MUTEX:
+            return True
+
         mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\AgentMemorySyncMutex")
         if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
             ctypes.windll.user32.MessageBoxW(
@@ -2103,6 +2142,9 @@ def _check_single_instance():
                 0x40 | 0x10000  # MB_ICONINFO | MB_TOPMOST
             )
             return False
+
+        # 必须保留句柄到进程结束，防止被 GC/Close 导致互斥锁提前失效。
+        _SINGLE_INSTANCE_MUTEX = mutex
         return True
     except Exception:
         return True
@@ -2136,16 +2178,6 @@ def _ensure_local_install():
     仅对 PyInstaller 打包后的 Windows EXE 生效；本地 Python 源码运行时不处理。
     可通过命令行参数 --no-relocate 禁用。
     """
-    def _reloc_log(msg: str):
-        """记录迁移诊断信息到 tray_error.log（ OneDrive 进程失败时这里最有价值）"""
-        try:
-            d = Path(sys.executable).parent / "data"
-            d.mkdir(parents=True, exist_ok=True)
-            with open(d / "tray_error.log", "a", encoding="utf-8") as f:
-                f.write(f"[RELOC] {msg}\n")
-        except Exception:
-            pass
-
     _reloc_log(f"start frozen={getattr(sys, 'frozen', None)} argv={sys.argv}")
     if sys.platform != "win32":
         _reloc_log("skip: not win32")
@@ -2157,7 +2189,7 @@ def _ensure_local_install():
         _reloc_log(f"skip: not frozen (frozen={getattr(sys, 'frozen', None)})")
         return
 
-    exe_path = Path(sys.executable)
+    exe_path = _normalize_windows_path(Path(sys.executable))
     _reloc_log(f"exe_path={exe_path}")
     is_od = _is_onedrive_path(exe_path)
     _reloc_log(f"is_onedrive_path={is_od}")
@@ -2166,13 +2198,13 @@ def _ensure_local_install():
 
     # 候选本地目录：优先持久化的 LOCALAPPDATA，不可写时回退到 TEMP
     local_dir_candidates = [
-        Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local")) / "AgentMemorySystem" / "App",
-        Path(os.environ.get("TEMP", "C:\\temp")) / "AgentMemorySystem" / "App",
+        _normalize_windows_path(Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local")) / "AgentMemorySystem" / "App"),
+        _normalize_windows_path(Path(os.environ.get("TEMP", "C:\\temp")) / "AgentMemorySystem" / "App"),
     ]
     # 测试环境可覆盖本地目录（不会暴露给最终用户）
     _env_local = os.environ.get("AGENT_MEMORY_LOCAL_DIR")
     if _env_local:
-        local_dir_candidates.insert(0, Path(_env_local))
+        local_dir_candidates.insert(0, _normalize_windows_path(Path(_env_local)))
 
     local_dir = None
     local_exe = None

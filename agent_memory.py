@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from safe_io import _safe_write_text
+from safe_io import _safe_write_text, get_data_root
 
 
 # ---------------------------------------------------------------------------
@@ -4722,14 +4722,27 @@ def detect_agents(
 
     # 检查手动覆盖（从 config.json 和 sync_settings.json 合并）
     overrides = dict(config.get("agent_overrides", {}))
-    # 也读取 GUI 设置中保存的 override（~/.agent_memory/sync_settings.json）
-    sync_settings_path = Path.home() / ".agent_memory" / "sync_settings.json"
+    # 也读取 GUI 设置中保存的 override
+    # 修复：用 safe_io.get_data_root() 解析实际路径，而非硬编码旧路径 ~/.agent_memory/
+    sync_settings_path = get_data_root() / "sync_settings.json"
     if sync_settings_path.exists():
         try:
             with open(sync_settings_path, "r", encoding="utf-8") as f:
                 sync_settings = json.load(f)
             gui_overrides = sync_settings.get("agent_overrides", {})
             for k, v in gui_overrides.items():
+                if k not in overrides or not overrides[k]:
+                    overrides[k] = v
+        except (json.JSONDecodeError, OSError):
+            pass
+    # 兼容旧路径（迁移残留）
+    legacy_settings_path = Path.home() / ".agent_memory" / "sync_settings.json"
+    if legacy_settings_path.exists() and legacy_settings_path != sync_settings_path:
+        try:
+            with open(legacy_settings_path, "r", encoding="utf-8") as f:
+                legacy_settings = json.load(f)
+            legacy_overrides = legacy_settings.get("agent_overrides", {})
+            for k, v in legacy_overrides.items():
                 if k not in overrides or not overrides[k]:
                     overrides[k] = v
         except (json.JSONDecodeError, OSError):
@@ -4821,6 +4834,28 @@ def detect_agents(
                 }
                 logger.info("发现 Agent {}: {}".format(agent_id, path))
                 break
+
+    # 处理自定义 Agent：overrides 里有但 config.json agent_detection 没有的 key
+    # 这些是用户在 GUI 里手动添加的自定义 agent（如 openclaw 或任意新 agent）
+    for custom_id, custom_path_str in overrides.items():
+        if custom_id in found or not custom_path_str:
+            continue
+        if custom_id in profiles:
+            continue  # 已在 profile 循环里处理过
+        custom_path = Path(custom_path_str)
+        if custom_path.exists():
+            # 扫描自定义 agent 路径下的 .md 文件作为记忆文件
+            memory_files = []
+            if custom_path.is_dir():
+                for md_file in custom_path.rglob("*.md"):
+                    memory_files.append(str(md_file))
+            found[custom_id] = {
+                "path": str(custom_path),
+                "memory_files": memory_files,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+                "source": "custom_override"
+            }
+            logger.info("自定义 Agent {} 使用手动路径: {}".format(custom_id, custom_path))
 
     # 通用发现：扫描未被已知 profile 覆盖的 AI 工具目录
     found = _discover_generic_agents(found, home, logger)
