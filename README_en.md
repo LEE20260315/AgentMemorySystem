@@ -179,6 +179,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the detailed changelog.
 
 *Main UI: real-time log panel + smart status indicators + one-click sync*
 
+<img src="docs/assets/screenshots/settings_panel.png" alt="AgentMemorySync Settings Panel" width="720"/>
+
+*Settings panel: custom sync interval, agent path override (preset + custom)*
+
 </div>
 
 ## Project Structure

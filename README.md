@@ -177,6 +177,10 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 *主介面：即時日誌面板 + 智慧狀態燈 + 一鍵同步*
 
+<img src="docs/assets/screenshots/settings_panel.png" alt="AgentMemorySync 設置面板" width="720"/>
+
+*設置面板：自訂同步間隔、Agent 路徑覆蓋（預置 + 自訂）*
+
 </div>
 
 ## 目錄
