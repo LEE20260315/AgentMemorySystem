@@ -7,6 +7,21 @@
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-07-02
+
+### Changed
+
+- **資料目錄回歸專案根**：`safe_io.get_data_root()` 解析邏輯簡化，專案根 `AgentMemory/` 成為預設位置（v1.3.2 曾改為 OneDrive 根下，但造成資料與專案割裂、雙 OneDrive 帳號定位錯誤等問題）
+- 去除 OneDrive 環境變數獨立探測邏輯（`OneDrive`/`OneDriveConsumer`/`OneDriveCommercial` 掃描），跨裝置同步靠專案資料夾本身在 OneDrive 下即可
+- 快捷方式圖示改用本地 TEMP 副本（`%TEMP%\AgentMemorySync_Run\_internal\assets\app_icon.ico`），修復 OneDrive 雲佔位符導致的白底圖示問題
+- `build.py` 圖示選擇邏輯調整：本地副本優先 > 源構建目錄 > 專案根（原專案根優先會觸發雲佔位符問題）
+
+### Added
+
+- v1.3.4 升級自動遷移：`_migrate_old_data()` 自動從舊位置 `OneDrive\AgentMemory\` 複製資料到新位置 `專案根\AgentMemory\`（保留舊目錄作為備份，避免 OneDrive 同步衝突導致資料遺失）
+
+## [1.3.3] - 2026-07
+
 ### Fixed
 
 - 修复 EXE 打包缺少 tkinter.ttk 导致启动崩溃（ImportError: cannot import name 'ttk'）

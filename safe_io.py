@@ -11,14 +11,16 @@ from typing import Optional
 def get_data_root() -> Path:
     """获取数据根目录（用于同步数据、设置、备份等）。
 
-    解析优先级（v1.3.2 调整）：
+    解析优先级（v1.3.4 调整，简化为项目根优先）：
     1. 环境变量 AGENT_MEMORY_DATA_DIR（启动器注入，含 BAT 启动器或 OneDrive 迁移）
-    2. 跨设备默认：OneDrive 下的 AgentMemory/（同步数据真相源）
-       先按 OneDrive / OneDriveConsumer / OneDriveCommercial 环境变量找，
-       再兜底探测用户主目录下常见的 OneDrive/AgentMemory/
+    2. 项目根目录下的 AgentMemory/（跨设备同步靠 OneDrive 本身，
+       项目文件夹在 OneDrive 下即可同步，无需独立探测 OneDrive 根）
     3. 打包模式 fallback（frozen）：EXE 所在目录下的 data/
     4. 开发模式 fallback：脚本所在目录下的 data/
     5. LOCALAPPDATA 标准位置（仅作为最后兜底）
+
+    设计理由：项目文件夹本身已在 OneDrive 下，再独立探测 OneDrive 根
+    反而造成数据与项目割裂、用户难找、双 OneDrive 账户定位错误等问题。
 
     Returns
     -------
@@ -37,29 +39,21 @@ def get_data_root() -> Path:
             test.unlink()
             return p
         except OSError:
-            # env 指向的目录不可写，回退到 OneDrive 候选
+            # env 指向的目录不可写，回退到项目根候选
             pass
 
-    # 2. 跨设备默认（OneDrive/AgentMemory/）—— v1.3.2 改为优先项
-    onedrive_candidates = []
-    for env_var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-        root = os.environ.get(env_var)
-        if root:
-            onedrive_candidates.append(Path(root) / "AgentMemory")
-    # 兜底：拼用户目录下常见位置（开发机）
-    home_onedrive = Path.home() / "OneDrive" / "AgentMemory"
-    if home_onedrive not in onedrive_candidates:
-        onedrive_candidates.append(home_onedrive)
-
-    for cand in onedrive_candidates:
-        try:
-            cand.mkdir(parents=True, exist_ok=True)
-            test = cand / ".writable_test"
-            test.write_text("ok", encoding="utf-8")
-            test.unlink()
-            return cand
-        except OSError:
-            continue
+    # 2. 项目根目录下的 AgentMemory/（v1.3.4 改为优先项）
+    # 项目文件夹本身在 OneDrive 下即可跨设备同步，无需独立探测 OneDrive 根
+    project_root = Path(__file__).resolve().parent
+    project_data = project_root / "AgentMemory"
+    try:
+        project_data.mkdir(parents=True, exist_ok=True)
+        test = project_data / ".writable_test"
+        test.write_text("ok", encoding="utf-8")
+        test.unlink()
+        return project_data
+    except OSError:
+        pass
 
     # 3. 打包模式 fallback：EXE 同级目录
     if getattr(sys, "frozen", False):

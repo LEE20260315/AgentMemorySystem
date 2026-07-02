@@ -161,6 +161,7 @@ See `config.json` in the repository for the full configuration reference.
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v1.3.4** | 2026-07 | Data directory relocated back to project root `AgentMemory/` (simpler resolution, avoids OneDrive dual-account mis-targeting), one-time auto-migration from legacy `OneDrive\AgentMemory\` location, shortcut icons now use local copy (fixes white-placeholder icons caused by OneDrive cloud placeholders) |
 | **v1.3.3** | 2026-07 | Echo-pollution self-healing (`strip_sync_markers` + section-header dedup), UI polish (PIL anti-aliased status dots, shorter tray notifications, shortcut targets bat + icon), auto-cleanup of `.old_*` backups, agent path override now hybrid preset + custom mode (supports openclaw etc.) |
 | **v1.3.2** | 2026-06 | Data directory resolution redirected to OneDrive `AgentMemory/`, native Windows tray API (no longer depends on pystray), cross-device launcher stability hardening |
 | **v1.3.1** | 2026-06 | Cross-device launcher: OneDrive bundle + local runtime copy + OneDrive `AgentMemory/` binding. System tray restored. |

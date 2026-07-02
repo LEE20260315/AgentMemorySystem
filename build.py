@@ -266,6 +266,8 @@ def _install_local(source_dir: Path, dist_name: str, project_dir: Path = None) -
     # 创建快捷方式：优先指向项目根目录的 bat（保留 OneDrive 同步能力 + 带图标）
     # bat 不存在时回退到本地 exe（兼容旧场景）
     desktop, start_menu = _get_shortcut_paths()
+    # 图标优先用本地 TEMP 副本（一定在本地磁盘，避免 OneDrive 云占位符导致白底图标）
+    # 其次用源构建目录，最后才回退到项目根（OneDrive 路径，可能是云占位符）
     icon = local_dir / "_internal" / "assets" / "app_icon.ico"
     if not icon.exists():
         icon = source_dir / "_internal" / "assets" / "app_icon.ico"
@@ -276,10 +278,6 @@ def _install_local(source_dir: Path, dist_name: str, project_dir: Path = None) -
         bat_candidate = project_dir / f"{dist_name}.bat"
         if bat_candidate.exists():
             bat_target = bat_candidate
-        # 项目根的图标优先（更稳定，不依赖 TEMP 副本）
-        project_icon = project_dir / "assets" / "app_icon.ico"
-        if project_icon.exists():
-            icon = project_icon
 
     # 快捷方式目标：bat 优先（带更新同步），否则回退到本地 exe
     shortcut_target = bat_target if bat_target is not None else local_exe

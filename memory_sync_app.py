@@ -362,9 +362,9 @@ def _reloc_log(msg: str):
 def _data_dir() -> Path:
     r"""获取应用数据目录
 
-    解析优先级（v1.3.2 调整，默认指向 OneDrive/AgentMemory/）：
+    解析优先级（v1.3.4 调整，默认指向项目根/AgentMemory/）：
     1. 环境变量 AGENT_MEMORY_DATA_DIR（启动器注入）
-    2. 跨设备默认：OneDrive 下的 AgentMemory/
+    2. 项目根目录下的 AgentMemory/（跨设备同步靠 OneDrive 本身）
     3. EXE 同级目录下的 data/
     4. LOCALAPPDATA 标准位置
 
@@ -376,26 +376,58 @@ def _data_dir() -> Path:
 
 
 def _migrate_old_data():
-    """把旧版本数据迁移到新目录"""
+    """把旧版本数据迁移到新目录。
+
+    v1.3.4 升级迁移：从 OneDrive\\AgentMemory\\ 迁移到 项目根\\AgentMemory\\。
+    判断条件：新目录中没有 sync_settings.json，但旧目录有。
+    迁移采用复制（非移动），保留旧目录作为备份，避免 OneDrive 同步冲突导致数据丢失。
+    """
     new_dir = _data_dir()
-    if new_dir.exists():
+    new_settings = new_dir / "sync_settings.json"
+    # 新目录已有配置 → 已迁移过或全新安装，跳过
+    if new_settings.exists():
         return
-    candidates = [
-        _safe_home() / ".agent_memory",
-        Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local")) / "AgentMemorySystem",
-    ]
+
+    # v1.3.4 升级：从 OneDrive\AgentMemory\ 迁移
+    old_candidates = []
+    for env_var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        root = os.environ.get(env_var)
+        if root:
+            old_candidates.append(Path(root) / "AgentMemory")
+    old_candidates.append(_safe_home() / "OneDrive" / "AgentMemory")
+
+    # 旧版 fallback 位置
+    old_candidates.append(_safe_home() / ".agent_memory")
+    old_candidates.append(
+        Path(os.environ.get("LOCALAPPDATA", _safe_home() / "AppData" / "Local")) / "AgentMemorySystem"
+    )
+
     try:
         new_dir.mkdir(parents=True, exist_ok=True)
-        for old_dir in candidates:
-            if not old_dir.exists():
+        import shutil
+        for old_dir in old_candidates:
+            if not old_dir.exists() or old_dir.resolve() == new_dir.resolve():
                 continue
             old_settings = old_dir / "sync_settings.json"
-            if old_settings.exists():
-                import shutil
-                shutil.copy2(old_settings, new_dir / "sync_settings.json")
-                break
-    except Exception:
-        pass
+            if not old_settings.exists():
+                continue
+            # 复制整个旧目录内容到新目录（保留旧目录作为备份）
+            print(f"[迁移] 从 {old_dir} 迁移数据到 {new_dir}")
+            for item in old_dir.iterdir():
+                target = new_dir / item.name
+                if target.exists():
+                    continue  # 不覆盖已有文件
+                try:
+                    if item.is_dir():
+                        shutil.copytree(item, target)
+                    else:
+                        shutil.copy2(item, target)
+                except Exception:
+                    pass
+            print(f"[迁移] 完成（旧目录保留作为备份: {old_dir}）")
+            break
+    except Exception as e:
+        print(f"[迁移] 警告: {e}")
 
 
 SETTINGS_PATH = _data_dir() / "sync_settings.json"

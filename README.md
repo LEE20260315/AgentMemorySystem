@@ -159,6 +159,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v1.3.4** | 2026-07 | 資料目錄回歸專案根 `AgentMemory/`（簡化解析邏輯，避免 OneDrive 雙帳號定位錯誤）、自動從舊位置 `OneDrive\AgentMemory\` 一次性遷移、快捷方式圖示改用本地副本（修復 OneDrive 雲佔位符導致的白底圖示） |
 | **v1.3.3** | 2026-07 | 回聲污染自愈機制（`strip_sync_markers` + 段頭去重）、UI 精修（PIL 抗鋸齒狀態燈、托盤通知時長縮短、捷徑指向 bat + 圖示）、`.old_*` 備份自動清理、Agent 路徑覆蓋改為預置 + 自訂混合模式（支援 openclaw 等） |
 | **v1.3.2** | 2026-06 | 資料目錄解析重定向至 OneDrive `AgentMemory/`、原生 Windows 托盤 API（不再依賴 pystray）、跨裝置啟動器穩定性強化 |
 | **v1.3.1** | 2026-06 | 跨裝置啟動器：OneDrive 分發包 + 本地副本 + OneDrive `AgentMemory/` 綁定。托盤常駐恢復。 |
