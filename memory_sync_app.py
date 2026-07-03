@@ -436,6 +436,7 @@ DEFAULT_SETTINGS = {
     "auto_interval_hours": 2,
     "conflict_action": "prompt",
     "auto_start": False,
+    "auto_sync": False,
     "minimize_to_tray": True,
     "window_geometry": "880x620",
 }
@@ -833,21 +834,39 @@ class SyncMainWindow:
                 pass
 
         # ---- 自适应窗口尺寸：小屏幕下缩小默认尺寸 ----
-        # 避免 1366x768 笔记本（尤其 125% 缩放）下窗口超出屏幕
+        # 避免 1366x768 笔记本（尤其 125% 缩放）下窗口超出屏幕。
+        # 关键：保存的 window_geometry 可能在更大屏幕上记录（如 1100x720），
+        # 直接套用到小屏会超出，必须按当前屏幕工作区裁剪。
         saved_geo = load_settings().get("window_geometry", "")
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
+        # 预留任务栏 100px、左右各 20px，作为可用工作区上限
+        max_w = max(640, screen_w - 40)
+        max_h = max(460, screen_h - 100)
+
         if saved_geo:
-            self.root.geometry(saved_geo)
+            # 解析保存的几何，裁剪到当前屏幕可容纳范围，并丢弃旧位置坐标
+            # （位置由 _center_window 重新计算，避免多显示器/换屏幕后窗口跑到屏外）
+            try:
+                w_str, rest = saved_geo.split("x", 1)
+                h_str = rest.split("+")[0].split("-")[0]
+                geo_w = int(w_str)
+                geo_h = int(h_str)
+                geo_w = max(640, min(geo_w, max_w))
+                geo_h = max(460, min(geo_h, max_h))
+                self.root.geometry("{}x{}".format(geo_w, geo_h))
+            except (ValueError, IndexError):
+                # 解析失败，回退到自适应默认尺寸
+                if screen_w <= 1366 or screen_h <= 768:
+                    self.root.geometry("{}x{}".format(min(760, max_w), min(540, max_h)))
+                else:
+                    self.root.geometry("{}x{}".format(min(880, max_w), min(620, max_h)))
         else:
             # 默认尺寸根据屏幕自适应
             if screen_w <= 1366 or screen_h <= 768:
                 default_w, default_h = 760, 540
             else:
                 default_w, default_h = 880, 620
-            # 确保不超过屏幕工作区（预留任务栏 60px）
-            max_w = screen_w - 40
-            max_h = screen_h - 100
             default_w = min(default_w, max_w)
             default_h = min(default_h, max_h)
             self.root.geometry("{}x{}".format(default_w, default_h))
@@ -868,7 +887,9 @@ class SyncMainWindow:
         self._tray_hwnd = None
         self._tray_class_registered = False  # 窗口类是否已注册
         self._start_minimized = "--minimized" in sys.argv
-        self._last_sync_time = 0  # timestamp of last sync
+        # 初始化为当前时间，避免定时调度器首次检查时因 elapsed 巨大而立刻触发
+        # （若启用 auto_start，启动同步完成后会刷新该值）
+        self._last_sync_time = time.time()
         self._tray_ignore_until = 0.0
 
         apply_modern_style(self.root)
@@ -891,10 +912,23 @@ class SyncMainWindow:
         h = self.root.winfo_height()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        # 预留任务栏空间（底部 60px）
+        # 预留任务栏空间（底部 60px）、左右各 20px
+        max_w = screen_w - 40
         max_h = screen_h - 60
-        if h > max_h:
-            h = max_h
+        # winfo_width() 在某些时序下返回 1，回退到 geometry 解析
+        if w <= 1 or h <= 1:
+            try:
+                geo = self.root.geometry()
+                # 形如 "880x620+100+50"
+                w_part, _ = geo.split("x", 1)
+                h_part = _.split("+")[0].split("-")[0]
+                w = int(w_part)
+                h = int(h_part)
+            except Exception:
+                w, h = 880, 620
+        if w > max_w or h > max_h:
+            w = min(w, max_w)
+            h = min(h, max_h)
             self.root.geometry("{}x{}".format(w, h))
         x = (screen_w - w) // 2
         y = max(0, (screen_h - 60 - h) // 2)
@@ -1197,22 +1231,33 @@ class SyncMainWindow:
         self.sync_thread.start()
 
     def _schedule_next_sync(self):
-        """定时自动同步调度器"""
+        """定时自动同步调度器
+
+        与 auto_start（启动时立刻同步一次）解耦：仅当 auto_sync 启用时才按
+        auto_interval_hours 周期触发。间隔值在每次检查时动态读取，设置变更
+        无需重启即可生效。
+        """
         import time as _time
-        interval_hours = self.settings.get("auto_interval_hours", 2)
-        interval_seconds = interval_hours * 3600
 
         def _check():
-            if not self.settings.get("auto_start", False):
-                # 未启用自动同步，继续检查
+            # 动态读取设置，使运行中修改立即生效
+            if not self.settings.get("auto_sync", False):
+                # 未启用定时同步，继续轮询等待用户开启
                 self.root.after(60000, _check)
                 return
             if self.is_syncing:
                 self.root.after(60000, _check)
                 return
+            interval_hours = self.settings.get("auto_interval_hours", 2)
+            try:
+                interval_hours = float(interval_hours)
+            except (TypeError, ValueError):
+                interval_hours = 2
+            interval_seconds = interval_hours * 3600
             elapsed = _time.time() - self._last_sync_time
             if elapsed >= interval_seconds:
-                self._log("[自动同步] 距离上次同步 {:.0f} 分钟，触发同步".format(elapsed / 60))
+                self._log("[自动同步] 距离上次同步 {:.0f} 分钟，达到设定间隔 {} 小时，触发同步".format(
+                    elapsed / 60, int(interval_hours) if interval_hours.is_integer() else interval_hours))
                 self._start_sync()
             self.root.after(60000, _check)
 
@@ -1260,6 +1305,14 @@ class SyncMainWindow:
                 self._log("⚠ 设置保存验证失败，文件可能未更新")
             else:
                 self._log("设置已保存 (间隔={}小时)".format(saved.get("auto_interval_hours")))
+            # 定时同步状态反馈：让用户在日志里看到调度器是否已生效
+            if saved.get("auto_sync", False):
+                # 重置计时基准，使新间隔从现在起算
+                self._last_sync_time = time.time()
+                self._log("[定时同步] 已启用，下次同步预计在 {} 小时后".format(
+                    saved.get("auto_interval_hours", 2)))
+            else:
+                self._log("[定时同步] 未启用，仅手动同步")
         except Exception:
             self._log("设置已保存")
 
@@ -1771,6 +1824,11 @@ class SyncMainWindow:
 
         # 定时自动同步调度器（每 60 秒检查一次）
         self._schedule_next_sync()
+        # 若已启用定时同步，在日志里提示用户调度器已就绪
+        if self.settings.get("auto_sync", False):
+            self.root.after(1500, lambda: self._log(
+                "[定时同步] 已启用，间隔 {} 小时，调度器已就绪".format(
+                    self.settings.get("auto_interval_hours", 2))))
 
         self.root.mainloop()
 
@@ -1879,6 +1937,13 @@ class SettingsDialog:
         self._wheel_handler = _on_wheel
 
         # === 常用配置区 ===
+
+        # 启用定时自动同步（与"启动时自动执行同步"解耦）
+        self.auto_sync_var = tk.BooleanVar(value=self.settings.get("auto_sync", False))
+        ttk.Checkbutton(
+            inner, text="启用定时自动同步（按下方间隔周期执行）",
+            variable=self.auto_sync_var,
+        ).pack(anchor=tk.W, pady=(0, 6))
 
         # 自动同步间隔
         row = tk.Frame(inner, bg=COLORS["card_bg"])
@@ -2053,6 +2118,7 @@ class SettingsDialog:
             "conflict_action": self.conflict_var.get(),
             "minimize_to_tray": self.tray_var.get(),
             "auto_start": self.auto_start_var.get(),
+            "auto_sync": self.auto_sync_var.get(),
             "agent_overrides": overrides,
             "window_geometry": self._original_settings.get("window_geometry", "720x520"),
         }

@@ -9,6 +9,7 @@ build/
 # 打包产物
 AgentMemorySync.exe
 AgentMemorySync/
+AgentMemorySync-*/
 AgentMemorySync.old_*/
 *.current.txt
 *.bak_polluted*
