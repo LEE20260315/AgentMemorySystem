@@ -7,6 +7,25 @@
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-07-06
+
+### Added
+
+- **同步進度條**：`_start_sync` 啟動時顯示不確定型進度條，根據 `SyncEngine` 進度消息自動切換階段文字（檢測 Agent 中 / 提取記憶中 / 融合共享中 / 寫回 Agent 中 / 已完成），同步完成自動隱藏
+- **日誌彩色 tag**：`_log()` 支援 `level` 參數與自動推斷，時間戳灰、錯誤紅、成功綠、警告橙、信息藍；在 `tk.Text` 上配置 `timestamp` / `error` / `success` / `warning` / `info` 五個 tag
+- **錯誤卡片**：同步失敗時在主窗口頂部顯示紅色邊框錯誤卡片（標題 + 錯誤詳情 + 關閉按鈕），不再只靠日誌排查
+- **統計數值狀態著色**：同步完成動態切換數值標籤樣式（`StatSuccess.TLabel` 綠 / `StatWarning.TLabel` 橙 / `StatError.TLabel` 紅）
+- **COLORS token 擴展**：新增進度條（`progress_bg`/`progress_fill`/`progress_trough`）、日誌彩色（`log_timestamp`/`log_error`/`log_success`/`log_warning`/`log_info`）、錯誤卡片（`error_card_bg`/`error_card_border`）、統計狀色（`stat_success`/`stat_warning`/`stat_error`）、卡片陰影（`card_shadow`）
+- **ttk 樣式新增**：`Horizontal.TProgressbar`（4px 細條）、`Stage.TLabel`、`ErrorTitle.TLabel`、`ErrorBody.TLabel`、`StatSuccess/Warning/Error.TLabel`；`Vertical/Horizontal.TScrollbar` 加 `active` hover map
+
+### Changed
+
+- **PIL 狀態點升級**：`_make_status_dot_image` 改為三層疊加繪製 —— 外圈半透明光暈（alpha=50）+ 中圈主光暈（alpha=90）+ 實心圓點 + 左上角中心高光（alpha=120），超採樣 4x 後 LANCZOS 縮小，視覺更精緻
+
+### Fixed
+
+- 修復托盤通知 `agents_found` 屬性不存在 bug：`SyncReport` 真實屬性名為 `agents_detected`，原寫法導致托盤通知 Agent 數永遠顯示 0
+
 ## [1.3.4] - 2026-07-02
 
 ### Changed

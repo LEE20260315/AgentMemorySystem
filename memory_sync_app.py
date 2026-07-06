@@ -534,6 +534,26 @@ COLORS = {
     "btn_disabled_bg": "#9a9a9e",       # 主按钮 disabled：浅石板灰
     "btn_disabled_fg": "#ffffff",       # 主按钮 disabled 文字：白
     "btn_secondary_disabled_bg": "#f1f1f3",  # 次按钮 disabled：极浅灰
+    # --- v1.4 视觉精修新增 token（折中方案，不换框架） ---
+    # 进度条
+    "progress_bg": "#e0e0e6",            # 进度条槽色
+    "progress_fill": "#3a3a3c",          # 进度条填充：石墨灰
+    "progress_trough": "#f1f1f3",        # 进度条背景
+    # 日志彩色 tag
+    "log_timestamp": "#86868b",          # 时间戳：浅灰
+    "log_error": "#d73a49",              # 错误：暖红
+    "log_success": "#28a745",            # 成功：暖绿
+    "log_warning": "#f5a623",            # 警告：橙
+    "log_info": "#0366d6",               # 信息：暖蓝（进行中）
+    # 错误卡片
+    "error_card_bg": "#fdf3f2",          # 浅红底
+    "error_card_border": "#d73a49",      # 红边框
+    # 卡片阴影模拟（用于更精致的边框）
+    "card_shadow": "#e8e8ed",            # 卡片外阴影色
+    # 统计数值状态色（动态切换）
+    "stat_success": "#28a745",            # 成功绿
+    "stat_warning": "#f5a623",           # 警告橙
+    "stat_error": "#d73a49",             # 错误红
 }
 
 
@@ -812,6 +832,78 @@ def apply_modern_style(root: tk.Tk):
         arrowcolor=COLORS["text_secondary"],
         gripcount=0,
     )
+    style.map(
+        "Vertical.TScrollbar",
+        background=[("active", COLORS["btn_secondary_hover"])],
+    )
+
+    # ---- 水平滚动条 ----
+    style.configure(
+        "Horizontal.TScrollbar",
+        background=COLORS["bg"],
+        troughcolor=COLORS["bg"],
+        bordercolor=COLORS["bg"],
+        arrowcolor=COLORS["text_secondary"],
+        gripcount=0,
+    )
+    style.map(
+        "Horizontal.TScrollbar",
+        background=[("active", COLORS["btn_secondary_hover"])],
+    )
+
+    # ---- 进度条（同步时显示） ----
+    style.configure(
+        "Horizontal.TProgressbar",
+        background=COLORS["progress_fill"],
+        troughcolor=COLORS["progress_trough"],
+        bordercolor=COLORS["border"],
+        lightcolor=COLORS["progress_fill"],
+        darkcolor=COLORS["progress_fill"],
+        borderwidth=0,
+        thickness=4,
+    )
+
+    # ---- 进度条文字标签样式（用于阶段提示） ----
+    style.configure(
+        "Stage.TLabel",
+        background=COLORS["card_bg"],
+        foreground=COLORS["text_secondary"],
+        font=(_FONT, 9),
+    )
+
+    # ---- 错误卡片标题 ----
+    style.configure(
+        "ErrorTitle.TLabel",
+        background=COLORS["error_card_bg"],
+        foreground=COLORS["error_card_border"],
+        font=(_FONT, 11, "bold"),
+    )
+    style.configure(
+        "ErrorBody.TLabel",
+        background=COLORS["error_card_bg"],
+        foreground=COLORS["text"],
+        font=(_FONT, 10),
+    )
+
+    # ---- 统计数值状态色样式（同步完成后动态切换） ----
+    style.configure(
+        "StatSuccess.TLabel",
+        background=COLORS["card_bg"],
+        foreground=COLORS["stat_success"],
+        font=(_FONT, 14, "bold"),
+    )
+    style.configure(
+        "StatWarning.TLabel",
+        background=COLORS["card_bg"],
+        foreground=COLORS["stat_warning"],
+        font=(_FONT, 14, "bold"),
+    )
+    style.configure(
+        "StatError.TLabel",
+        background=COLORS["card_bg"],
+        foreground=COLORS["stat_error"],
+        font=(_FONT, 14, "bold"),
+    )
 
     return style
 
@@ -939,18 +1031,21 @@ class SyncMainWindow:
         # === 内容头部：左侧标题 + 右侧状态 ===
         self._build_content_header()
 
+        # === 错误卡片占位（默认不显示，同步失败时动态创建） ===
+        self.error_card = None
+
         # === 主内容区 ===
-        content = ttk.Frame(self.root, style="TFrame")
-        content.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        self.content_frame = ttk.Frame(self.root, style="TFrame")
+        self.content_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
 
         # 左列：日志卡片
-        left_panel = ttk.Frame(content, style="TFrame")
+        left_panel = ttk.Frame(self.content_frame, style="TFrame")
         left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._build_log_card(left_panel)
 
         # 右列：汇总 + 操作（固定宽度 260）
-        right_panel = tk.Frame(content, width=260, bg=COLORS["bg"])
+        right_panel = tk.Frame(self.content_frame, width=260, bg=COLORS["bg"])
         right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(16, 0))
         right_panel.pack_propagate(False)
 
@@ -1026,6 +1121,8 @@ class SyncMainWindow:
             relief="flat",
             padx=12,
             pady=10,
+            spacing1=2,  # 段前间距
+            spacing3=2,  # 段后间距
             selectbackground=COLORS["log_selection_bg"],
             selectforeground=COLORS["text"],
             insertbackground=COLORS["log_insert_bg"],
@@ -1033,6 +1130,33 @@ class SyncMainWindow:
             borderwidth=0,
         )
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=1, pady=(0, 1))
+
+        # 配置彩色 tag：时间戳灰色、错误红、成功绿、警告橙、信息蓝
+        self.log_text.tag_configure("timestamp", foreground=COLORS["log_timestamp"])
+        self.log_text.tag_configure("error", foreground=COLORS["log_error"])
+        self.log_text.tag_configure("success", foreground=COLORS["log_success"])
+        self.log_text.tag_configure("warning", foreground=COLORS["log_warning"])
+        self.log_text.tag_configure("info", foreground=COLORS["log_info"])
+
+        # 进度条 + 阶段提示（同步时显示，默认隐藏）
+        self.progress_frame = tk.Frame(log_card, bg=COLORS["card_bg"])
+        # 不 pack，默认隐藏；同步时再 pack
+
+        self.progress_bar = ttk.Progressbar(
+            self.progress_frame, orient="horizontal", mode="indeterminate",
+            style="Horizontal.TProgressbar", length=80,
+        )
+        self.progress_bar.pack(side=tk.LEFT, padx=(16, 8))
+
+        self.stage_label = ttk.Label(
+            self.progress_frame, text="准备中...", style="Stage.TLabel",
+        )
+        self.stage_label.pack(side=tk.LEFT)
+
+        # 底部分隔线（进度条下方）
+        tk.Frame(
+            log_card, bg=COLORS["card_bg"], height=8,
+        ).pack(fill=tk.X)
 
     def _build_summary_card(self, parent):
         """同步汇总卡片：白底 + 标签/数值两列。"""
@@ -1107,7 +1231,10 @@ class SyncMainWindow:
         self.minimize_btn.pack(fill=tk.X, ipady=4)
 
     def _make_status_dot_image(self, color: str, size: int = 16):
-        """用 PIL 绘制抗锯齿圆点，超采样 4x 后缩小，彻底消除锯齿。"""
+        """用 PIL 绘制带光晕的抗锯齿状态点。
+
+        三层叠加：外圈半透明光晕 + 实心圆点 + 中心高光，超采样 4x 消除锯齿。
+        """
         try:
             from PIL import Image, ImageDraw, ImageTk
         except ImportError:
@@ -1116,11 +1243,45 @@ class SyncMainWindow:
         big = size * scale
         img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        margin = 2 * scale
+
+        # 解析颜色为 RGB 元组
+        def _hex_to_rgb(hex_str: str):
+            h = hex_str.lstrip("#")
+            if len(h) != 6:
+                return (58, 58, 60)
+            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+        rgb = _hex_to_rgb(color)
+
+        # 外圈光晕：半径最大、透明度最低（模拟环境光散射）
+        glow_margin = 0
         draw.ellipse(
-            [margin, margin, big - margin, big - margin],
-            fill=color, outline=(255, 255, 255, 180), width=scale,
+            [glow_margin, glow_margin, big - glow_margin, big - glow_margin],
+            fill=(rgb[0], rgb[1], rgb[2], 50),
         )
+
+        # 中圈：稍小、透明度中（主光晕）
+        mid_margin = scale
+        draw.ellipse(
+            [mid_margin, mid_margin, big - mid_margin, big - mid_margin],
+            fill=(rgb[0], rgb[1], rgb[2], 90),
+        )
+
+        # 实心圆点：主体
+        dot_margin = 2 * scale
+        draw.ellipse(
+            [dot_margin, dot_margin, big - dot_margin, big - dot_margin],
+            fill=color, outline=(255, 255, 255, 200), width=scale,
+        )
+
+        # 中心高光：左上角小白点（模拟光源照射）
+        highlight_r = scale
+        draw.ellipse(
+            [dot_margin + scale, dot_margin + scale,
+             dot_margin + scale + highlight_r * 2, dot_margin + scale + highlight_r * 2],
+            fill=(255, 255, 255, 120),
+        )
+
         img = img.resize((size, size), Image.LANCZOS)
         return ImageTk.PhotoImage(img)
 
@@ -1135,14 +1296,88 @@ class SyncMainWindow:
             self.status_dot.config(image="", text="●", fg=color,
                                    font=(_FONT, 12), bg=COLORS["header_bg"])
 
-    def _log(self, msg: str):
-        """向日志面板追加消息"""
+    # ---- 进度条控制（同步阶段反馈） ----
+    def _show_progress(self, stage_text: str = "准备中..."):
+        """显示进度条并启动滚动动画 + 设置阶段文字。"""
+        def _do():
+            self.stage_label.config(text=stage_text)
+            self.progress_frame.pack(fill=tk.X, padx=1, pady=(0, 4))
+            try:
+                self.progress_bar.start(15)  # 15ms 间隔滚动
+            except Exception:
+                pass
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            self.root.after(0, _do)
+
+    def _update_stage(self, stage_text: str):
+        """更新阶段提示文字（同步过程中切换）。"""
+        def _do():
+            self.stage_label.config(text=stage_text)
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            self.root.after(0, _do)
+
+    def _hide_progress(self):
+        """隐藏进度条并停止滚动。"""
+        def _do():
+            try:
+                self.progress_bar.stop()
+            except Exception:
+                pass
+            self.progress_frame.pack_forget()
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            self.root.after(0, _do)
+
+    def _log(self, msg: str, level: str = ""):
+        """向日志面板追加消息（支持彩色 tag）
+
+        level 可选值：
+          - "error"   红色（失败/错误/异常）
+          - "success" 绿色（完成/成功）
+          - "warning" 橙色（警告/⚠）
+          - "info"    蓝色（进行中/活动）
+          - ""        默认色（普通日志）
+        若 level 为空，则根据消息内容自动判断。
+        """
         timestamp = datetime.now().strftime("%H:%M:%S")
-        line = "[{}] {}\n".format(timestamp, msg)
+
+        # 自动推断颜色等级
+        if not level:
+            lower = msg.lower()
+            if any(kw in msg for kw in ("失败", "错误", "异常", "回滚失败")) or "error" in lower or "fail" in lower:
+                level = "error"
+            elif any(kw in msg for kw in ("完成", "成功", "已保存", "已启用", "已加载", "注册成功")) or "success" in lower:
+                level = "success"
+            elif "⚠" in msg or any(kw in msg for kw in ("警告", "未启用", "失败创建")):
+                level = "warning"
+            elif any(kw in msg for kw in ("同步中", "提取中", "融合中", "写回中", "进行中", "正在")):
+                level = "info"
+
+        # 同步过程中根据引擎进度消息自动切换进度条阶段文字
+        if getattr(self, "is_syncing", False):
+            if "正在检测" in msg or ("发现" in msg and "Agent" in msg):
+                self._update_stage("检测 Agent 中...")
+            elif "开始提取" in msg or ("提取" in msg and ("个文件" in msg or "条" in msg)):
+                self._update_stage("提取记忆中...")
+            elif "开始跨 Agent 融合" in msg or "融合完成" in msg:
+                self._update_stage("融合共享中...")
+            elif "开始写回" in msg or ("写回" in msg and ("条" in msg or "Agent" in msg)):
+                self._update_stage("写回 Agent 中...")
+            elif "同步完成" in msg:
+                self._update_stage("已完成")
 
         def _append():
             self.log_text.config(state=tk.NORMAL)
-            self.log_text.insert(tk.END, line)
+            self.log_text.insert(tk.END, "[{}] ".format(timestamp), "timestamp")
+            if level in ("error", "success", "warning", "info"):
+                self.log_text.insert(tk.END, "{}\n".format(msg), level)
+            else:
+                self.log_text.insert(tk.END, "{}\n".format(msg))
             self.log_text.see(tk.END)
             self.log_text.config(state=tk.DISABLED)
 
@@ -1181,6 +1416,11 @@ class SyncMainWindow:
         self.status_var.set("同步中...")
         self._draw_status_dot(COLORS["status_running"])
 
+        # 隐藏旧的错误卡片（本次同步开始）
+        self._hide_error_card()
+        # 显示进度条
+        self._show_progress("准备中...")
+
         # 清空日志
         self.log_text.config(state=tk.NORMAL)
         self.log_text.delete(1.0, tk.END)
@@ -1193,23 +1433,27 @@ class SyncMainWindow:
                 report = engine.run()
                 self.last_report = report
 
+                self._update_stage("汇总中...")
                 self._log("")
                 self._log(report.summary_text())
                 self._update_summary(report)
 
+                # 根据错误数动态切换统计数值颜色
                 if report.errors:
+                    self._apply_stat_style("StatWarning.TLabel")
                     self.root.after(0, lambda: self.status_var.set(
                         "完成 ({} 个错误)".format(len(report.errors))
                     ))
                     self.root.after(0, lambda: self._draw_status_dot(COLORS["status_error"]))
                 else:
+                    self._apply_stat_style("StatSuccess.TLabel")
                     self.root.after(0, lambda: self.status_var.set("同步完成"))
                     self.root.after(0, lambda: self._draw_status_dot(COLORS["status_ready"]))
 
-                # 发送托盘气泡通知
+                # 发送托盘气泡通知（修复：agents_found → agents_detected）
                 notify_body = "设备: {} | Agent: {} 个 | 提取: {} 条 | 写回: {} 条".format(
                     getattr(report, 'device', 'unknown'),
-                    len(getattr(report, 'agents_found', [])),
+                    len(report.agents_detected),
                     report.total_extracted,
                     report.total_written
                 )
@@ -1218,17 +1462,98 @@ class SyncMainWindow:
                 self._notify("AgentMemorySync", notify_body)
 
             except Exception as e:
-                self._log("同步失败: {}".format(e))
+                self._log("同步失败: {}".format(e), level="error")
+                self._apply_stat_style("StatError.TLabel")
+                self._show_error_card(str(e))
                 self.root.after(0, lambda: self.status_var.set("同步失败"))
                 self.root.after(0, lambda: self._draw_status_dot(COLORS["status_error"]))
             finally:
                 self._last_sync_time = time.time()
                 self.is_syncing = False
+                self._hide_progress()
                 self.root.after(0, lambda: self.run_btn.config(state=tk.NORMAL))
                 self.root.after(0, lambda: self.rollback_btn.config(state=tk.NORMAL))
 
         self.sync_thread = threading.Thread(target=_sync_thread, daemon=True)
         self.sync_thread.start()
+
+    def _apply_stat_style(self, style_name: str):
+        """切换所有统计数值标签的样式（同步完成后状态着色）。"""
+        def _do():
+            for _key, label in self.summary_widgets:
+                try:
+                    label.configure(style=style_name)
+                except Exception:
+                    pass
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            self.root.after(0, _do)
+
+    def _show_error_card(self, error_msg: str):
+        """在主窗口顶部显示红色边框的错误卡片（同步失败时调用）。"""
+        def _do():
+            # 已存在则先移除
+            if self.error_card is not None:
+                try:
+                    self.error_card.destroy()
+                except Exception:
+                    pass
+                self.error_card = None
+
+            card = tk.Frame(
+                self.root, bg=COLORS["error_card_bg"], bd=0,
+                highlightthickness=1, highlightbackground=COLORS["error_card_border"],
+            )
+            # 插入到 content_frame 之前，显示在内容头部下方
+            card.pack(fill=tk.X, padx=16, pady=(8, 0), before=self.content_frame)
+            self.error_card = card
+
+            # 内容行：图标 + 文字 + 关闭按钮
+            row = tk.Frame(card, bg=COLORS["error_card_bg"])
+            row.pack(fill=tk.X, padx=14, pady=10)
+
+            # 左侧错误图标（文字 ⚠，红色）
+            tk.Label(
+                row, text="⚠", bg=COLORS["error_card_bg"],
+                fg=COLORS["error_card_border"], font=(_FONT, 14, "bold"),
+            ).pack(side=tk.LEFT, padx=(0, 10))
+
+            # 中间文字区
+            text_frame = tk.Frame(row, bg=COLORS["error_card_bg"])
+            text_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            ttk.Label(
+                text_frame, text="同步失败", style="ErrorTitle.TLabel",
+            ).pack(anchor=tk.W)
+            ttk.Label(
+                text_frame, text=error_msg, style="ErrorBody.TLabel",
+                wraplength=500,
+            ).pack(anchor=tk.W, pady=(2, 0))
+
+            # 右侧关闭按钮
+            ttk.Button(
+                row, text="✕", style="Secondary.TButton", width=3,
+                command=self._hide_error_card,
+            ).pack(side=tk.RIGHT)
+
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            self.root.after(0, _do)
+
+    def _hide_error_card(self):
+        """隐藏错误卡片。"""
+        def _do():
+            if self.error_card is not None:
+                try:
+                    self.error_card.destroy()
+                except Exception:
+                    pass
+                self.error_card = None
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            self.root.after(0, _do)
 
     def _schedule_next_sync(self):
         """定时自动同步调度器
