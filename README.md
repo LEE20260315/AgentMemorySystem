@@ -159,6 +159,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v1.3.6** | 2026-07 | 修復托盤圖示靜默消失（wndproc 回呼在高頻滑鼠移動事件中做 OneDrive 檔案 I/O 導致行程被 Windows 強制終止）：移除 wndproc 內全部檔案 I/O、新增 5 分鐘心跳日誌、全域崩潰捕獲（`sys.excepthook` + `threading.excepthook` + `atexit`）、`mainloop` 崩潰自動重啟（最多 3 次） |
 | **v1.3.5** | 2026-07 | ttk 視覺精修折中方案（不換框架、零新依賴）：COLORS 配色 token 擴展（進度條/日誌彩色 tag/錯誤卡片/統計狀態色）、PIL 狀態點升級為三層光暈 + 中心高光、同步進度條 + 階段自動檢測、日誌彩色 tag 自動推斷（時間戳灰/錯誤紅/成功綠/警告橙/信息藍）、同步失敗錯誤卡片、統計數值狀態著色、修復托盤通知 `agents_found` bug |
 | **v1.3.4** | 2026-07 | 資料目錄回歸專案根 `AgentMemory/`（簡化解析邏輯，避免 OneDrive 雙帳號定位錯誤）、自動從舊位置 `OneDrive\AgentMemory\` 一次性遷移、快捷方式圖示改用本地副本（修復 OneDrive 雲佔位符導致的白底圖示） |
 | **v1.3.3** | 2026-07 | 回聲污染自愈機制（`strip_sync_markers` + 段頭去重）、UI 精修（PIL 抗鋸齒狀態燈、托盤通知時長縮短、捷徑指向 bat + 圖示）、`.old_*` 備份自動清理、Agent 路徑覆蓋改為預置 + 自訂混合模式（支援 openclaw 等） |

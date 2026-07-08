@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import ctypes.wintypes
 import json
@@ -28,6 +29,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
@@ -997,6 +999,31 @@ class SyncMainWindow:
         # 关闭按钮 → 最小化到托盘（而非退出）
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # ---- 心跳日志：每 5 分钟记录一次存活状态 ----
+        # 用于诊断"托盘静默消失"问题：进程崩溃后心跳停止，可从日志判断死亡时间
+        self._heartbeat_counter = 0
+        self._heartbeat()
+
+    def _heartbeat(self):
+        """每 5 分钟向 tray_error.log 写入一次心跳，用于诊断进程静默崩溃。
+
+        崩溃后心跳停止，下次启动时可据此判断上次进程的存活时间。
+        """
+        try:
+            self._heartbeat_counter += 1
+            _tray_log = _data_dir() / "tray_error.log"
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("HEARTBEAT #{} {} tray_active={} syncing={}\n".format(
+                    self._heartbeat_counter,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    self._tray_nid is not None,
+                    getattr(self, "is_syncing", False),
+                ))
+        except Exception:
+            pass
+        # 每 5 分钟一次
+        self.root.after(300000, self._heartbeat)
+
     def _center_window(self):
         """将主窗口居中显示，并确保不超出屏幕工作区。"""
         self.root.update_idletasks()
@@ -1904,15 +1931,15 @@ class SyncMainWindow:
         return hwnd
 
     def _tray_wndproc(self, hwnd, msg, wparam, lparam):
-        """托盘消息窗口的窗口过程"""
+        """托盘消息窗口的窗口过程
+
+        注意：此函数由 Windows 直接调用，必须快速返回。
+        绝不能在此函数内做文件 I/O，否则 OneDrive 锁文件会导致回调阻塞，
+        Windows 会因超时强制终止进程（表现为托盘静默消失，无任何日志）。
+        """
         try:
             if msg == _WM_TRAYICON:
-                try:
-                    _tray_log = _data_dir() / "tray_error.log"
-                    with open(_tray_log, "a", encoding="utf-8") as f:
-                        f.write("DEBUG: tray msg lparam={}\n".format(lparam))
-                except Exception:
-                    pass
+                # 仅记录关键事件（点击/右键），跳过 WM_MOUSEMOVE(512) 等高频事件
                 if lparam == _WM_LBUTTONUP:
                     if time.time() < getattr(self, "_tray_ignore_until", 0.0):
                         return 0
@@ -1923,20 +1950,16 @@ class SyncMainWindow:
                         return 0
                     self._tray_click_action = "menu"
                     return 0
+                # 鼠标移动等事件直接忽略，不做任何处理
+                return 0
             elif msg == _WM_TASKBARCREATED:
                 # 资源管理器重启后恢复托盘图标
                 if self._tray_nid:
                     _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(self._tray_nid))
                 return 0
-        except Exception as e:
-            try:
-                _tray_log = _data_dir() / "tray_error.log"
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    import traceback
-                    f.write("ERROR: wndproc exception: {}\n".format(e))
-                    traceback.print_exc(file=f)
-            except Exception:
-                pass
+        except Exception:
+            # 异常时不做文件 I/O，仅返回默认处理，避免 wndproc 阻塞
+            pass
         return int(_user32.DefWindowProcW(hwnd, msg, wparam, lparam))
 
     def _show_tray_menu(self):
@@ -2736,6 +2759,57 @@ def _try_powershell_relocate(exe_path: Path):
         _reloc_log(f"relaunch from temp failed: {e}")
 
 
+def _write_crash_log(exc_type, exc_value, exc_tb):
+    """将未捕获异常写入 tray_error.log，便于事后排查。"""
+    try:
+        _tray_log = _data_dir() / "tray_error.log"
+        _tray_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(_tray_log, "a", encoding="utf-8") as f:
+            f.write("\n=== CRASH {} ===\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            f.write("Exception: {}:{}\n".format(exc_type.__name__ if exc_type else "Unknown", exc_value))
+            if exc_tb:
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+            f.write("=== END CRASH ===\n\n")
+    except Exception:
+        pass
+
+
+def _setup_crash_handlers():
+    """安装全局异常钩子和 atexit 处理器，确保崩溃时留下日志。"""
+    # 捕获主线程未处理的异常
+    _orig_excepthook = sys.excepthook
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        _write_crash_log(exc_type, exc_value, exc_tb)
+        # 调用原始钩子保持控制台输出
+        if _orig_excepthook:
+            _orig_excepthook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _excepthook
+
+    # 捕获子线程未处理的异常
+    _orig_threading_excepthook = getattr(threading, "excepthook", None)
+
+    def _threading_excepthook(args):
+        _write_crash_log(args.exc_type, args.exc_value, args.exc_traceback)
+        if _orig_threading_excepthook:
+            _orig_threading_excepthook(args)
+
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _threading_excepthook
+
+    # atexit 记录正常退出
+    def _on_exit():
+        try:
+            _tray_log = _data_dir() / "tray_error.log"
+            with open(_tray_log, "a", encoding="utf-8") as f:
+                f.write("APP EXIT {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        except Exception:
+            pass
+
+    atexit.register(_on_exit)
+
+
 def main():
     # OneDrive 内运行会导致 Shell_NotifyIconW 拒绝访问，优先迁移到本地
     _ensure_local_install()
@@ -2752,6 +2826,9 @@ def main():
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_APP_USER_MODEL_ID)
         except Exception:
             pass
+
+    # 安装崩溃处理器（在写日志之前安装，确保后续异常都能被捕获）
+    _setup_crash_handlers()
 
     # 启动诊断日志（文件可能被锁定，不能因此崩溃）
     _diag_lines = [
@@ -2794,8 +2871,35 @@ def main():
     if not _check_single_instance():
         return
 
-    app = SyncMainWindow()
-    app.run()
+    # 用 try/except 包裹 mainloop，崩溃时记录日志后自动重启
+    _max_restarts = 3
+    _restart_count = 0
+
+    while True:
+        try:
+            app = SyncMainWindow()
+            app.run()
+            break  # 正常退出
+        except SystemExit:
+            break  # sys.exit() 退出
+        except Exception as e:
+            _write_crash_log(type(e), e, sys.exc_info()[2])
+            _restart_count += 1
+            if _restart_count > _max_restarts:
+                # 超过重启上限，放弃并提示用户
+                try:
+                    ctypes.windll.user32.MessageBoxW(
+                        0,
+                        "多Agent记忆融合器多次崩溃，已停止自动重启。\n"
+                        "请查看 tray_error.log 排查原因后手动重启。",
+                        "AgentMemorySync",
+                        0x10 | 0x10000  # MB_ICONERROR | MB_TOPMOST
+                    )
+                except Exception:
+                    pass
+                break
+            # 等待 2 秒后重启，避免崩溃循环占用 CPU
+            time.sleep(2)
 
 
 if __name__ == "__main__":

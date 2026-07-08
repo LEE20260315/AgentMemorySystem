@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+## [1.3.6] - 2026-07-08
+
+### Fixed
+
+- **修复托盘圖示靜默消失問題**（辦公室與家中兩台電腦均復現）：根因是 `_tray_wndproc` 回呼在每次滑鼠移過托盤圖示（`WM_MOUSEMOVE`，`lparam=512`）時都對 OneDrive 目錄下的 `tray_error.log` 做 `open/write/close`。OneDrive 同步鎖檔時回呼阻塞，Windows 因 wndproc 超時強制終止行程，Python 來不及記錄任何日誌。修復後 wndproc 不再做任何檔案 I/O，僅處理左鍵/右鍵點擊事件，其餘事件直接 `return 0`。
+
+### Added
+
+- **心跳日誌**：`_heartbeat()` 每 5 分鐘向 `tray_error.log` 寫入一次存活狀態（計數、時間戳、托盤是否啟用、是否同步中）。行程崩潰後心跳停止，下次啟動可據此判斷上次行程的死亡時刻
+- **全域崩潰捕獲**：`_setup_crash_handlers()` 安裝 `sys.excepthook` + `threading.excepthook` + `atexit`，主/子線程未捕獲異常會寫入 `=== CRASH ===` 區塊（含完整 traceback），正常退出時寫入 `APP EXIT` 記錄
+- **mainloop 自動重啟**：`main()` 用 `try/except` 包裹 `mainloop()`，崩潰後記錄日誌並自動重啟（最多 3 次，每次間隔 2 秒），超過上限彈窗提示使用者查看日誌後手動重啟。避免托盤靜默消失後使用者需手動重啟
+
 ## [1.3.5] - 2026-07-06
 
 ### Added
