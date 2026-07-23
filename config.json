@@ -141,6 +141,12 @@
         "~/AppData/Roaming/openclaw"
       ],
       "signature_glob": "**/*.md"
+    },
+    "pi": {
+      "candidate_paths": [
+        "~/.pi"
+      ],
+      "signature_file": "agent/auth.json"
     }
   },
   "agent_overrides": {},

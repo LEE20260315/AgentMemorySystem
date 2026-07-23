@@ -5075,6 +5075,22 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
         for md_file in install_path.glob("*.md"):
             if str(md_file) not in memory_files:
                 memory_files.append(str(md_file))
+    elif "pi" in agent_id or "pi" in path_str:
+        # pi / pi-web 记忆文件：~/.pi/ 下的 .md, .jsonl, memory/ 子目录
+        for md_file in install_path.glob("*.md"):
+            if _size_ok(md_file):
+                memory_files.append(str(md_file))
+        for jsonl_file in install_path.glob("memory.jsonl"):
+            if _size_ok(jsonl_file):
+                memory_files.append(str(jsonl_file))
+        mem_subdir = install_path / "memory"
+        if mem_subdir.exists() and mem_subdir.is_dir():
+            for md_file in mem_subdir.glob("*.md"):
+                if _size_ok(md_file):
+                    memory_files.append(str(md_file))
+            for jsonl_file in mem_subdir.glob("*.jsonl"):
+                if _size_ok(jsonl_file):
+                    memory_files.append(str(jsonl_file))
     else:
         candidates = ["MEMORY.md", "memory.md", "memories.md", "USER.md", "user.md"]
         for c in candidates:
