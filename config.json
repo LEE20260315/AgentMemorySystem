@@ -34,8 +34,8 @@
   },
   "logging": {
     "level": "INFO",
-    "max_log_size_mb": 10,
-    "max_log_files": 5,
+    "max_log_size_mb": 2,
+    "max_log_files": 3,
     "log_format": "%(asctime)s [%(levelname)s] %(message)s"
   },
   "database": {
