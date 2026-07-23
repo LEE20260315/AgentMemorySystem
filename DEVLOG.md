@@ -1173,4 +1173,6 @@ reconcile 清理: trae 61 孤儿 (自愈积累)
 ```
 
 ### 待确认
-- [ ] 常驻托盘程序 (memory_sync_app.py) 正常运行检查
+- [x] 常驻托盘程序 (memory_sync_app.py) 正常运行检查 — SyncEngine 接口未变，导入验证通过
+- [x] 测试全通过: 129/129
+- [x] 合并到 main
