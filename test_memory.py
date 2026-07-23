@@ -1609,7 +1609,8 @@ def test_hermes_writer():
         content = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
         assert "§" in content, "应包含 § 分隔符"
         assert "来自 Claude 的共享知识" in content, "应包含写入的内容"
-        assert "[sync:mem_test_001]" in content, "应包含同步标记"
+        # v1.3.7 格式: [sync:mem_test_001|h:...|src:claude]
+        assert "[sync:mem_test_001" in content, "应包含同步标记前缀"
 
         # 重复写入应跳过
         result2 = writer.write("hermes", mem_dir, [mem], backup_dir=tmp_dir / "bak")

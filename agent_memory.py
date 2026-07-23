@@ -5804,7 +5804,7 @@ def _strip_sync_generated_sections(text: str) -> str:
 def _is_sync_generated_content(text: str) -> bool:
     """判断内容是否为写回阶段生成的同步产物。
     v1.3.7 改进：不再是"含 sync marker 就过滤"，而是"剥离 marker 后无实质内容才过滤"。
-    这样用户本体内容混有 sync marker 时不会被误判为纯同步产物。
+    只有存在 sync 标记/前缀时，剥离检查才触发。纯原生内容不经过长度检查。
     """
     normalized = _normalize_memory_content(text)
     if not normalized:
@@ -5819,11 +5819,23 @@ def _is_sync_generated_content(text: str) -> bool:
     if "shared_from_agents.md" in lowered:
         return True
 
-    # 剥离 sync marker 后，剩余内容少于 30 字 → 纯 sync 产物
+    # 检查是否存在 sync 标记/前缀
     import re
+    has_sync_marker = bool(re.search(r"\[sync:[^\]]*\]", normalized))
+    has_sync_prefix = bool(re.search(
+        r"(?m)^[—\-]\s*来自\s*(hermes|trae|claude|codebuddy|codepilot|openclaw|pi.web|unknown|generic)",
+        normalized
+    ))
+    if not has_sync_marker and not has_sync_prefix:
+        # 原生内容，不拦截
+        return False
+
+    # 剥离 sync marker/前缀后，剩余内容 < 30 字 → 纯 sync 产物
     stripped = re.sub(r"\[sync:[^\]]*\]", "", normalized).strip()
-    # 也剥离常见的 sync 行前缀 "— 来自 ..."
-    stripped = re.sub(r"(?m)^[—\-]\s*来自\s*(hermes|trae|claude|codebuddy|codepilot|openclaw|pi.web|unknown|generic)[^\n]*", "", stripped)
+    stripped = re.sub(
+        r"(?m)^[—\-]\s*来自\s*(hermes|trae|claude|codebuddy|codepilot|openclaw|pi.web|unknown|generic)[^\n]*",
+        "", stripped
+    )
     stripped = re.sub(r"(?m)^\s*$\n?", "", stripped)
     stripped = stripped.strip()
     if len(stripped) < 30:
