@@ -49,7 +49,9 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 | Hermes | `MEMORY.md` 尾部 `§` 分隔 | 追加 § 段落 |
 | Trae | `user_profile.md` 章節 | 追加 `## Shared Knowledge` |
 | CodePilot | SQLite (`codepilot.db`) | 匯出為 Markdown |
-| Cursor / Windsurf / Cline / Continue / Aider / Roo-Code / Codex | 通用 Markdown | 自動適配 |
+| pi / pi-web | `memory/MEMORY.md` + `.jsonl` | 通用 Markdown 寫回 |
+| OpenClaw | `.md` | 通用 Markdown 寫回 |
+| Cursor / Windsurf / Cline / Continue / Aider / Roo-Code / Codex / CodeBuddy | 通用 Markdown | 自動適配 |
 
 ## 速覽
 
@@ -159,6 +161,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v1.4.0** | 2026-07 | **根治寫回始終為 0 的核心問題**（reconcile 自愈、增量加載、過濾邏輯修正、提取階段污染自愈、檔案大小上限）；新增 **pi/pi-web + OpenClaw** 精確檢測與寫回支援；通用 Agent 發現擴展至 OneDrive/npm 全域；日誌輪轉閾值優化 |
 | **v1.3.6** | 2026-07 | 修復托盤圖示靜默消失（wndproc 回呼在高頻滑鼠移動事件中做 OneDrive 檔案 I/O 導致行程被 Windows 強制終止）：移除 wndproc 內全部檔案 I/O、新增 5 分鐘心跳日誌、全域崩潰捕獲（`sys.excepthook` + `threading.excepthook` + `atexit`）、`mainloop` 崩潰自動重啟（最多 3 次） |
 | **v1.3.5** | 2026-07 | ttk 視覺精修折中方案（不換框架、零新依賴）：COLORS 配色 token 擴展（進度條/日誌彩色 tag/錯誤卡片/統計狀態色）、PIL 狀態點升級為三層光暈 + 中心高光、同步進度條 + 階段自動檢測、日誌彩色 tag 自動推斷（時間戳灰/錯誤紅/成功綠/警告橙/信息藍）、同步失敗錯誤卡片、統計數值狀態著色、修復托盤通知 `agents_found` bug |
 | **v1.3.4** | 2026-07 | 資料目錄回歸專案根 `AgentMemory/`（簡化解析邏輯，避免 OneDrive 雙帳號定位錯誤）、自動從舊位置 `OneDrive\AgentMemory\` 一次性遷移、快捷方式圖示改用本地副本（修復 OneDrive 雲佔位符導致的白底圖示） |

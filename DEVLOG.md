@@ -1116,7 +1116,7 @@ data/
 - EXE 重新打包：19.4 MB
 
 
-## 2026-07-23：v1.3.7 根治写回始终为0 + pi-web/openclaw 发现
+## 2026-07-23：v1.4.0 根治寫回始終為0 + pi-web/openclaw 發現
 
 ### 背景
 
@@ -1170,9 +1170,16 @@ reconcile 清理: hermes 5 孤儿, trae 69 孤儿
 hermes: 142, trae: 267, codepilot: 200, codebuddy: 109, openclaw: 149
 reconcile 清理: trae 61 孤儿 (自愈积累)
 耗时: 42.4 秒
+
+=== pi-web 检测修正后 ===
+hermes: 252, trae: 376, codepilot: 297, codebuddy: 208, openclaw: 193, **pi: 821**
+reconcile 清理: trae 208 孤儿
+耗时: 74.5 秒
 ```
 
 ### 待确认
 - [x] 常驻托盘程序 (memory_sync_app.py) 正常运行检查 — SyncEngine 接口未变，导入验证通过
 - [x] 测试全通过: 129/129
 - [x] 合并到 main
+- [x] pi-web 独立检测 (config.json + _scan_agent_memory_files pi 分支 + 种子记忆创建)
+- [x] pi 和 trae 记忆分离确认（memory.jsonl 无 pi 特定条目）

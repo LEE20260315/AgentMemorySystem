@@ -57,6 +57,7 @@ _apply_onedrive_changes.py
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # 用户上传（CodePilot）
 .codepilot-uploads/

@@ -7,6 +7,52 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-23
+
+### Fixed
+
+- **根治寫回始終為 0 條的核心 BUG**（`hermes=0, trae=0, codepilot=0, codebuddy=0` 但記憶檔案持續膨脹）：
+  - `reconcile_with_target_hashes()` 只定義無調用 → SyncState 孤兒 hash 永不清零，目標條目數 < state 條目數導致全部跳過寫回
+  - `_load_shared_memories()` 硬編碼 `LIMIT 500 + ORDER BY timestamp DESC`，每次載入相同 500 條，增量來源枯竭
+  - `_is_sync_generated_content()` 匹配所有 `[sync:*]` marker → 含 marker 的用戶本體內容被誤殺
+  - `_scan_agent_memory_files()` 無檔案大小上限，5MB+ 檔案直接讀入
+  - 提取階段缺乏污染自愈（原僅在寫回階段自愈）
+- **SyncState 去重狀態系統性偏離目標檔案真實內容**（target 內容增長但 state 不變，邏輯鎖死）
+
+### Changed
+
+- `sync_engine.py` `run()`：寫回前新增 `reconcile_with_target_hashes()` 調用，對齊 SyncState 與目標檔案實際 hash
+- `sync_engine.py` `_load_shared_memories()`：改為增量加載（LIMIT 2000 + content_hash 跳過已寫回），不再固定返回 500 條
+- `agent_memory.py` `_is_sync_generated_content()`：預檢查 sync 標記/前綴，無 sync 痕跡的原生內容直接放行；有 sync 痕跡才剝離後檢查長度 < 30 字
+- `agent_memory.py` `_scan_agent_memory_files()`：所有分支添加 10MB 上限 + `_size_ok()` 校驗
+- `agent_memory.py` `parse_hermes_memory()` / `parse_markdown()`：超大檔案前置污染自愈（備份 → 重建 → 解析）
+- `sync_writers.py` `detect_pollution()` / `repair_polluted_file()`：提升為模塊級函數（供 agent_memory.py 提取階段復用）
+- `sync_writers.py` `_repair_polluted_file()`：新增 `sync_state` 參數，自愈後清零對應 agent 的 SyncState hash 條目
+- 日誌輪轉默認值：10MB → 2MB, 5 備份 → 3 備份
+
+### Added
+
+- **pi / pi-web Agent 精確檢測與寫回支援**：
+  - `config.json` 新增 `pi` 檢測配置：`candidate_paths=['~/.pi']`, `signature_file='agent/auth.json'`
+  - `_scan_agent_memory_files()` 新增 pi 專有分支：掃描 `.md`、`.jsonl`、`memory/` 子目錄
+  - `WRITER_REGISTRY` 新增 `pi-web`、`pi`、`clawdbot` 寫回器
+- **OpenClaw Agent 寫回支援**：`WRITER_REGISTRY` 新增 `openclaw` 映射
+- **通用 Agent 發現擴展**：`ai_keywords` 追加 `pi`、`openclaw`、`deepseek`、`gemini`、`chatgpt`、`coding`、`trae`、`hermes`
+- **`~/.npm-global/node_modules/@agegr` + `~/OneDrive`** 加入通用發現掃描目錄
+
+### 實測數據
+
+| Agent | 修復前寫回 | 修復後寫回 |
+|-------|----------|----------|
+| hermes | 0 | 252 |
+| trae | 0/16 | 376 |
+| codepilot | 0 | 297 |
+| codebuddy | 0 | 208 |
+| openclaw | 未檢測 | 193 |
+| **pi** | **新支援** | **821** |
+
+reconcile 自愈：trae 清理 208 條孤兒 hash。測試：129/129 全部通過。
+
 ## [1.3.6] - 2026-07-08
 
 ### Fixed
