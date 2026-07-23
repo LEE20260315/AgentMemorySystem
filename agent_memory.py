@@ -219,8 +219,8 @@ class LogManager:
         log_file = self.log_dir / "agent_memory.log"
         file_handler = logging.handlers.RotatingFileHandler(
             log_file,
-            maxBytes=config.get("logging.max_log_size_mb", 10) * 1024 * 1024,
-            backupCount=config.get("logging.max_log_files", 5),
+            maxBytes=config.get("logging.max_log_size_mb", 2) * 1024 * 1024,  # v1.3.7: 默认 2MB
+            backupCount=config.get("logging.max_log_files", 3),
             encoding="utf-8"
         )
         file_handler.setFormatter(logging.Formatter(
@@ -4882,19 +4882,24 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
     已知 Agent 已通过 config.json 精确检测，这里只处理未知目录。
     """
     # 常见 AI 工具的配置/数据目录
+    # v1.3.7: 增加 ~/OneDrive 扫描（pi-web 等可能安装在 OneDrive 项目目录下）
     generic_candidates = [
         ("~/.config", "config"),
         ("~/AppData/Local", "appdata_local"),
         ("~/AppData/Roaming", "appdata_roaming"),
+        ("~/.npm-global/node_modules/@agegr", "npm_global"),  # pi-web
+        ("~/OneDrive", "onedrive_root"),
     ]
 
     # AI 工具名称关键词（目录名包含这些词的会被识别为潜在 Agent）
+    # v1.3.7: 补充 pi, openclaw, deepseek, gemini, chatgpt, coding 等关键词
     ai_keywords = [
         "agent", "ai", "llm", "gpt", "copilot", "cursor", "windsurf",
         "cline", "continue", "aider", "roo", "codex", "devin", "replit",
         "tabby", "supermaven", "codeium", "mentat", "openhands",
         "sweep", "factory", "magic", "augment", "poolside", "codepilot",
-        "codebuddy", "ima",
+        "codebuddy", "ima", "pi", "openclaw", "deepseek", "gemini",
+        "chatgpt", "coding", "trae", "hermes",
     ]
 
     # 排除的目录名（非 Agent 工具，或已知浏览器壳应用）
@@ -5013,13 +5018,21 @@ def _detect_agents_legacy(config: ConfigManager) -> dict:
 
 
 def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
-    """扫描指定 Agent 的记忆文件"""
+    """扫描指定 Agent 的记忆文件（v1.3.7: 添加 10MB 上限防止超大文件）"""
     memory_files = []
     path_str = str(install_path).lower()
+    max_file_size = 10 * 1024 * 1024  # 10MB 上限
+
+    def _size_ok(p: Path) -> bool:
+        try:
+            return p.stat().st_size <= max_file_size
+        except OSError:
+            return False
 
     if "hermes" in agent_id or "hermes" in path_str:
         for md_file in install_path.glob("*.md"):
-            memory_files.append(str(md_file))
+            if _size_ok(md_file):
+                memory_files.append(str(md_file))
     elif "claude" in agent_id or "claude" in path_str:
         if "projects" in path_str:
             # 已经是 projects 目录
@@ -5066,8 +5079,17 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
         candidates = ["MEMORY.md", "memory.md", "memories.md", "USER.md", "user.md"]
         for c in candidates:
             p = install_path / c
-            if p.exists():
+            if p.exists() and _size_ok(p):
                 memory_files.append(str(p))
+        # 也检查 memory/ 子目录（pi-web 等 agent 的记忆可能在子目录）
+        mem_subdir = install_path / "memory"
+        if mem_subdir.exists() and mem_subdir.is_dir():
+            for md_file in mem_subdir.glob("*.md"):
+                if _size_ok(md_file):
+                    memory_files.append(str(md_file))
+            for jsonl_file in mem_subdir.glob("*.jsonl"):
+                if _size_ok(jsonl_file):
+                    memory_files.append(str(jsonl_file))
 
     return memory_files
 
@@ -5780,20 +5802,45 @@ def _strip_sync_generated_sections(text: str) -> str:
 
 
 def _is_sync_generated_content(text: str) -> bool:
-    """判断内容是否为写回阶段生成的同步产物。"""
+    """判断内容是否为写回阶段生成的同步产物。
+    v1.3.7 改进：不再是"含 sync marker 就过滤"，而是"剥离 marker 后无实质内容才过滤"。
+    只有存在 sync 标记/前缀时，剥离检查才触发。纯原生内容不经过长度检查。
+    """
     normalized = _normalize_memory_content(text)
     if not normalized:
         return False
 
     lowered = normalized.lower()
-    if _SYNC_MARKER_RE.search(normalized):
-        return True
-    if "shared_from_agents.md" in lowered:
-        return True
+    # 明确的纯同步文件特征
     if "name: 来自其他 agent 的共享记忆" in lowered:
         return True
     if "以下记忆由同步工具从其他 agent 自动导入" in normalized:
         return True
+    if "shared_from_agents.md" in lowered:
+        return True
+
+    # 检查是否存在 sync 标记/前缀
+    import re
+    has_sync_marker = bool(re.search(r"\[sync:[^\]]*\]", normalized))
+    has_sync_prefix = bool(re.search(
+        r"(?m)^[—\-]\s*来自\s*(hermes|trae|claude|codebuddy|codepilot|openclaw|pi.web|unknown|generic)",
+        normalized
+    ))
+    if not has_sync_marker and not has_sync_prefix:
+        # 原生内容，不拦截
+        return False
+
+    # 剥离 sync marker/前缀后，剩余内容 < 30 字 → 纯 sync 产物
+    stripped = re.sub(r"\[sync:[^\]]*\]", "", normalized).strip()
+    stripped = re.sub(
+        r"(?m)^[—\-]\s*来自\s*(hermes|trae|claude|codebuddy|codepilot|openclaw|pi.web|unknown|generic)[^\n]*",
+        "", stripped
+    )
+    stripped = re.sub(r"(?m)^\s*$\n?", "", stripped)
+    stripped = stripped.strip()
+    if len(stripped) < 30:
+        return True
+
     return False
 
 
@@ -5881,8 +5928,30 @@ class LocalMemoryParser:
     def parse_hermes_memory(self, file_path: Path) -> list:
         """
         解析 Hermes MEMORY.md (用 § 分隔的多条记忆)
+        v1.3.7: 添加污染自愈——读取后若检测到回声污染，先备份+重建再解析
         """
-        text = file_path.read_text(encoding="utf-8")
+        # 文件大小检查：>5MB 先做污染自愈
+        try:
+            file_size = file_path.stat().st_size
+        except OSError:
+            return []
+        if file_size > 5 * 1024 * 1024:
+            from sync_writers import detect_pollution, repair_polluted_file
+            logger = get_logger()
+            logger.warning("parse_hermes_memory: 文件 {} 超过 5MB ({}KB)，触发污染自愈".format(
+                file_path.name, file_size // 1024))
+            try:
+                text = file_path.read_text(encoding="utf-8")
+            except Exception:
+                return []
+            pollution = detect_pollution(text)
+            if pollution["polluted"]:
+                text = repair_polluted_file(file_path, text)
+            else:
+                # 大但不污染（可能是正常积累），截断到后 2MB
+                text = text[-2 * 1024 * 1024:]
+        else:
+            text = file_path.read_text(encoding="utf-8")
         sections = [s.strip() for s in text.split("§") if s.strip()]
         entries = []
         kept_idx = 0
@@ -5920,8 +5989,25 @@ class LocalMemoryParser:
     def parse_markdown(self, file_path: Path) -> list:
         """
         解析通用 Markdown: 按 front matter 或空行分块
+        v1.3.7: 添加污染自愈
         """
-        text = _strip_sync_generated_sections(file_path.read_text(encoding="utf-8"))
+        # 文件大小检查
+        try:
+            file_size = file_path.stat().st_size
+        except OSError:
+            return []
+        raw_text = file_path.read_text(encoding="utf-8")
+        if file_size > 5 * 1024 * 1024:
+            from sync_writers import detect_pollution, repair_polluted_file
+            logger = get_logger()
+            logger.warning("parse_markdown: 文件 {} 超过 5MB ({}KB)，触发污染自愈".format(
+                file_path.name, file_size // 1024))
+            pollution = detect_pollution(raw_text)
+            if pollution["polluted"]:
+                raw_text = repair_polluted_file(file_path, raw_text)
+            else:
+                raw_text = raw_text[-2 * 1024 * 1024:]
+        text = _strip_sync_generated_sections(raw_text)
         entries = []
         # 先按 front matter 切分
         import re

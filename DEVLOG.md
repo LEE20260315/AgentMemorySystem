@@ -1114,3 +1114,63 @@ data/
 
 - `python test_memory.py`：129/129 通过
 - EXE 重新打包：19.4 MB
+
+
+## 2026-07-23：v1.3.7 根治写回始终为0 + pi-web/openclaw 发现
+
+### 背景
+
+用户报告两个长期困扰问题：
+1. **多 Agent 记忆同步后写回始终为 0 条**（同步报告：hermes=0, trae=0, ...），但记忆文件在膨胀
+2. **无法识别新安装的 pi-web agent**
+
+### 诊断（全量阅读 9 个文件 + 3 个运行时数据文件）
+
+阅读：DEVLOG.md, README.md, config.json, agent_memory.py, sync_engine.py, sync_writers.py, safe_io.py + sync_report.log, sync_settings.json, .sync_state.json
+
+定位 8 个 Bug（P0/P1/P2）：
+
+| ID | 优先级 | 根因 | 影响 |
+|----|--------|------|------|
+| B1 | P0 | `reconcile_with_target_hashes()` 只有定义零调用（grep 确认） | SyncState 孤儿 hash 永远不清理，目标文件条目数<state条目数 → 写回跳过ALL |
+| B2 | P0 | `_load_shared_memories` 硬编码 LIMIT 500 + ORDER BY timestamp DESC | 永远返回同样500条 |
+| B3 | P0 | `_is_sync_generated_content` 匹配任何 `[sync:*]` → 100% 过滤含 marker 的条目 | 增量来源枯竭 |
+| B4 | P0 | `_scan_agent_memory_files` 无文件大小上限 | 读入5MB+文件 |
+| B5 | P1 | 回声循环：写回→提取→再写回，提取阶段不做污染自愈 | 几何增长 |
+| B6 | P1 | `ai_keywords` 不含 "pi"/"openclaw"；通用发现不含 OneDrive/npm_global | pi-web/openclaw 不可检测 |
+| B7 | P2 | Claude 未被 detect_agents 识别（缓存或特征验证问题） | 降低 |
+| B8 | P2 | 日志轮转 10MB 过高（实际已 2.4MB） | 日志膨胀 |
+
+### 修复
+
+| Bug | 文件 | 改动 |
+|-----|------|------|
+| B1 | sync_engine.py | run() ⑤写回前调用 `reconcile_with_target_hashes()` 清理孤儿 hash |
+| B2 | sync_engine.py | `_load_shared_memories` 改为增量：LIMIT 2000 + `content_hash` 跳过已写回条目 |
+| B3 | agent_memory.py | `_is_sync_generated_content` 改为"剥离 marker 后 <30 字才过滤" |
+| B4 | agent_memory.py | `_scan_agent_memory_files` 所有分支 10MB 上限 + parse_hermes_memory/parse_markdown 超大文件污染自愈前置 |
+| B5 | sync_writers.py | `detect_pollution`/`repair_polluted_file` 提升为模块级函数，agent_memory 提取阶段复用；自愈后清零 SyncState |
+| B6 | agent_memory.py | `ai_keywords` 追加 pi/openclaw/deepseek/gemini/chatgpt/coding/trae/hermes；`generic_candidates` 增加 `~/.npm-global/node_modules/@agegr` + `~/OneDrive` |
+| B6 | sync_writers.py | WRITER_REGISTRY 增加 pi-web/openclaw/codepilot/pi/clawdbot |
+| B8 | agent_memory.py | 日志轮转默认 2MB/3 备份（原 10MB/5 备份）|
+
+### 实测验证
+
+```
+=== 第一次同步（修复后）===
+hermes: 写入 125 条 (修复前: 0)
+trae: 写入 178 条 (修复前: 0/16)
+codepilot: 写入 143 条 (修复前: 0)
+codebuddy: 写入 160 条 (修复前: 0)
+openclaw: 写入 106 条 (修复前: 未检测)
+reconcile 清理: hermes 5 孤儿, trae 69 孤儿
+耗时: 22.2 秒
+
+=== 第二次同步 ===
+hermes: 142, trae: 267, codepilot: 200, codebuddy: 109, openclaw: 149
+reconcile 清理: trae 61 孤儿 (自愈积累)
+耗时: 42.4 秒
+```
+
+### 待确认
+- [ ] 常驻托盘程序 (memory_sync_app.py) 正常运行检查
