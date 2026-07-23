@@ -436,6 +436,8 @@ class BaseMemoryWriter(ABC):
         text: str,
         clean_prefix: str = "",
         section_header: str = "",
+        sync_state: "SyncState" = None,
+        agent_id: str = "",
     ) -> str:
         """备份污染文件并重建干净版本。
 
@@ -504,6 +506,17 @@ class BaseMemoryWriter(ABC):
             )
         except Exception as e:
             self.logger.error("污染自愈: 写回失败 {}: {}".format(file_path, e))
+            return text  # 写回失败时返回原文，不丢失数据
+
+        # 自愈成功后清除该 agent 的 SyncState（文件内容已变，旧 hash 全部无效）
+        if sync_state and agent_id:
+            if agent_id in sync_state.state:
+                old_count = len(sync_state.state[agent_id])
+                del sync_state.state[agent_id]
+                sync_state.save()
+                self.logger.info(
+                    "污染自愈: 清除 agent {} sync_state ({} 条旧 hash)".format(
+                        agent_id, old_count))
 
         return rebuilt
 
@@ -571,6 +584,104 @@ class BaseMemoryWriter(ABC):
                 self.logger.info("备份: {} → {}".format(file_path, bp))
                 return str(bp)
         return None
+
+
+# ---------------------------------------------------------------------------
+# 独立污染检测/自愈函数（供提取阶段 agent_memory.py 调用，无需 writer 实例）
+# ---------------------------------------------------------------------------
+
+POLLUTION_SIZE_THRESHOLD = BaseMemoryWriter.POLLUTION_SIZE_THRESHOLD
+POLLUTION_MARKER_THRESHOLD = BaseMemoryWriter.POLLUTION_MARKER_THRESHOLD
+
+
+def detect_pollution(text: str) -> dict:
+    """独立函数版：检测目标文本是否已被回声污染。"""
+    if not text:
+        return {"polluted": False, "reason": "", "marker_count": 0, "size": 0}
+    size = len(text.encode("utf-8", errors="ignore"))
+    import re
+    marker_count = len(re.findall(r"\[sync:[^\]]+\]", text or ""))
+    polluted = False
+    reason = ""
+    if size > POLLUTION_SIZE_THRESHOLD:
+        polluted = True
+        reason = "文件超 5MB ({}KB)".format(size // 1024)
+    elif marker_count > POLLUTION_MARKER_THRESHOLD:
+        polluted = True
+        reason = "sync marker 超阈值 ({})".format(marker_count)
+    return {
+        "polluted": polluted,
+        "reason": reason,
+        "marker_count": marker_count,
+        "size": size,
+    }
+
+
+def repair_polluted_file(
+    file_path: Path,
+    text: str,
+    clean_prefix: str = "",
+    section_header: str = "",
+    sync_state: "SyncState" = None,
+    agent_id: str = "",
+) -> str:
+    """独立函数版：备份污染文件并重建干净版本。"""
+    import time
+    import shutil
+    logger = get_logger()
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    bak_path = file_path.parent / "{}.bak_polluted_{}".format(file_path.name, ts)
+    try:
+        shutil.copy2(str(file_path), str(bak_path))
+        logger.warning(
+            "污染自愈(独立): 备份 {} → {} ({}KB)".format(
+                file_path.name, bak_path.name,
+                len(text.encode("utf-8", errors="ignore")) // 1024,
+            )
+        )
+    except Exception as e:
+        logger.warning("污染自愈(独立): 备份失败 {}: {}".format(bak_path, e))
+
+    # 重建干净内容
+    if section_header and section_header in text:
+        prefix = text.split(section_header, 1)[0].rstrip()
+        if clean_prefix:
+            rebuilt = clean_prefix.rstrip() + "\n\n" + section_header + "\n"
+        elif prefix:
+            rebuilt = prefix + "\n\n" + section_header + "\n"
+        else:
+            rebuilt = section_header + "\n"
+    elif clean_prefix:
+        rebuilt = clean_prefix.rstrip() + "\n"
+    else:
+        rebuilt = "# Memory (rebuilt after pollution)\n\n"
+        if section_header:
+            rebuilt += section_header + "\n"
+
+    try:
+        _safe_write_text(file_path, rebuilt)
+        logger.info(
+            "污染自愈(独立): {} 重建完成 ({} → {}KB)".format(
+                file_path.name,
+                len(text.encode("utf-8", errors="ignore")) // 1024,
+                len(rebuilt.encode("utf-8", errors="ignore")) // 1024,
+            )
+        )
+    except Exception as e:
+        logger.error("污染自愈(独立): 写回失败 {}: {}".format(file_path, e))
+        return text
+
+    # 自愈成功后清除该 agent 的 SyncState
+    if sync_state and agent_id:
+        if agent_id in sync_state.state:
+            old_count = len(sync_state.state[agent_id])
+            del sync_state.state[agent_id]
+            sync_state.save()
+            logger.info(
+                "污染自愈(独立): 清除 agent {} sync_state ({} 条旧 hash)".format(
+                    agent_id, old_count))
+
+    return rebuilt
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +965,8 @@ class TraeMemoryWriter(BaseMemoryWriter):
                                   "The ## Shared Knowledge section below is used by the "
                                   "multi-agent memory sync system.",
                     section_header=self.SECTION_HEADER,
+                    sync_state=self.sync_state,
+                    agent_id=agent_id,
                 )
 
             # ---- 段头去重：只保留首个 ## Shared Knowledge ----
@@ -944,6 +1057,8 @@ class TraeMemoryWriter(BaseMemoryWriter):
                               "The ## Shared Knowledge section below is used by the "
                               "multi-agent memory sync system.",
                 section_header=self.SECTION_HEADER,
+                sync_state=self.sync_state,
+                agent_id=agent_id,
             )
             # 重建后文件无 sync marker,返回空集合让 reconciler 清理 orphan state
             return {"hashes": set(), "legacy": 0, "file_present": True}
@@ -1071,7 +1186,11 @@ class HermesMemoryWriter(BaseMemoryWriter):
                 self.logger.warning(
                     "Hermes: 检测到文件污染 ({}), 触发自愈重建".format(pollution["reason"])
                 )
-                content = self._repair_polluted_file(md_path, content)
+                content = self._repair_polluted_file(
+                    md_path, content,
+                    sync_state=self.sync_state,
+                    agent_id=agent_id,
+                )
 
             # 追加记忆（用 § 分隔）
             for mem in new_memories:
@@ -1251,6 +1370,8 @@ class GenericMarkdownWriter(BaseMemoryWriter):
                 content = self._repair_polluted_file(
                     md_path, content,
                     clean_prefix="# Memory\n",
+                    sync_state=self.sync_state,
+                    agent_id=agent_id,
                 )
 
             for mem in new_memories:
@@ -1372,7 +1493,15 @@ WRITER_REGISTRY = {
     "hermes": HermesMemoryWriter,
     "hermes-appdata": HermesMemoryWriter,
     "codebuddy": GenericMarkdownWriter,
+    "codepilot": GenericMarkdownWriter,
+    "openclaw": GenericMarkdownWriter,
+    "pi-web": GenericMarkdownWriter,   # v1.3.7: pi-web 支持
+    "pi": GenericMarkdownWriter,
+    "clawdbot": GenericMarkdownWriter,
 }
+
+# v1.3.7: 凡是 generic- 开头的未知 agent，自动使用 GenericMarkdownWriter
+# 已在 get_writer() 中通过 fallback 实现
 
 
 def get_writer(agent_id: str, sync_state: SyncState = None) -> BaseMemoryWriter:

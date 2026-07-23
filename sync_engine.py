@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 from agent_memory import (
     AgentRegistry, ConfigManager, MemoryDatabase, MemoryEntry,
-    MemoryMerger, check_onedrive_conflicts, create_merger,
+    MemoryMerger, check_onedrive_conflicts, content_hash, create_merger,
     detect_agents, extract_local_to_fused, get_config, get_logger,
     get_loaded_context, load_private_memories, startup,
 )
@@ -276,11 +276,25 @@ class SyncEngine:
                 extract_id = agent_id.replace("-appdata", "")
                 target_path = Path(agent_info["path"])
 
-                # 从融合层读取共享记忆
+                # 从融合层读取共享记忆（增量：跳过已写回的）
                 shared_memories = self._load_shared_memories(extract_id)
                 if not shared_memories:
-                    self._emit("{}: 无共享记忆需要写回".format(agent_id))
+                    self._emit("{}: 无新共享记忆需要写回".format(agent_id))
                     continue
+
+                # ★ v1.3.7 自愈 reconcile：写回前对齐 SyncState 与目标文件实际状态
+                # 这是根治"永远是 0"的核心修复：清理 state 中目标文件已不存在的孤儿 hash
+                writer_for_state = get_writer(agent_id, self.sync_state)
+                target_info = writer_for_state.extract_target_info(extract_id, target_path)
+                reconcile_result = self.sync_state.reconcile_with_target_hashes(
+                    extract_id,
+                    target_info["hashes"],
+                    target_info.get("legacy", 0),
+                    target_info.get("file_present", True),
+                )
+                if reconcile_result["removed"] > 0:
+                    self._emit("  reconcile {}: 清理 {} 条孤儿 hash, 保留 {} 条".format(
+                        agent_id, reconcile_result["removed"], reconcile_result["kept"]))
 
                 self._emit("写回 {}: {} 条共享记忆".format(agent_id, len(shared_memories)))
 
@@ -318,21 +332,27 @@ class SyncEngine:
         return report
 
     def _load_shared_memories(self, agent_id: str) -> list:
-        """从融合层读取指定 Agent 的共享记忆"""
+        """从融合层读取指定 Agent 的共享记忆
+        v1.3.7: 增量加载——跳过 SyncState 中已写回的条目，不再 LIMIT 500。
+        """
         shared_db = self.root / "shared.db"
         if not shared_db.exists():
             return []
 
         memories = []
+        known_hashes = self.sync_state.bulk_known_hashes(agent_id)
         try:
             with MemoryDatabase(shared_db) as db:
-                # 读取所有共享记忆，排除来自自身的
                 cursor = db.conn.execute(
-                    "SELECT * FROM memories WHERE agent_id != ? ORDER BY timestamp DESC LIMIT 500",
+                    "SELECT * FROM memories WHERE agent_id != ? ORDER BY timestamp DESC LIMIT 2000",
                     (agent_id,)
                 )
                 for row in cursor.fetchall():
                     entry = db._row_to_entry(row)
+                    # 增量跳过：已在 sync_state 中且 hash 一致的跳过
+                    h = content_hash(entry.content)
+                    if h in known_hashes:
+                        continue
                     memories.append(entry)
         except Exception as e:
             self.logger.warning("读取共享记忆失败: {}".format(e))
