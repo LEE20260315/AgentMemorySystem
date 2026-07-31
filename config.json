@@ -89,10 +89,13 @@
     },
     "cline": {
       "candidate_paths": [
-        "~/.cline/memory",
+        "~/.cline",
+        "~/Documents/Cline",
         "~/AppData/Roaming/Claude/memory"
       ],
-      "signature_glob": "**/*.md"
+      "signature_glob": "**/*.md",
+      "memory_bank_pattern": "memory-bank/*.md",
+      "note": "Cline；项目级 .clinerules/ + 全局 ~/Documents/Cline/Rules/；Memory Bank 最佳实践 memory-bank/*.md"
     },
     "continue": {
       "candidate_paths": [
@@ -117,10 +120,11 @@
     },
     "codex": {
       "candidate_paths": [
-        "~/.codex/memory",
-        "~/AppData/Roaming/Codex/memory"
+        "~/.codex"
       ],
-      "signature_glob": "**/*.md"
+      "signature_file": "config.toml",
+      "memory_file": "AGENTS.md",
+      "note": "OpenAI Codex CLI 2026；全局 AGENTS.md 在 ~/.codex/，项目级 AGENTS.md 向上查找；会话历史在 sessions/"
     },
     "codepilot": {
       "candidate_paths": [
@@ -131,9 +135,79 @@
     },
     "codebuddy": {
       "candidate_paths": [
-        "~/.codebuddy/memery"
+        "~/.codebuddy",
+        "~/.codebuddy/memory",
+        "~/.codebuddy/memery",
+        "~/AppData/Roaming/CodeBuddy"
       ],
-      "signature_glob": "*_memery.md"
+      "signature_file": "settings.json",
+      "signature_glob": "*_mem*.md",
+      "note": "CodeBuddy CLI 根目录只有配置；记忆文件在 ~/.codebuddy/memery/*_memery.md（CodeBuddy 自身拼写错误，glob 用 *_mem*.md 容错）或同步到 codepilot/openclaw"
+    },
+    "workbuddy": {
+      "candidate_paths": [
+        "~/.workbuddy",
+        "~/AppData/Roaming/WorkBuddy"
+      ],
+      "signature_file": "MEMORY.md",
+      "additional_memory_files": ["SOUL.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md"],
+      "sqlite_db": "workbuddy.db",
+      "note": "WorkBuddy IDE；MEMORY.md 等为模板文件，实际记忆在 workbuddy.db + sessions/*.json + audit-log/*.jsonl"
+    },
+    "qwen": {
+      "candidate_paths": [
+        "~/.qwen"
+      ],
+      "signature_file": "settings.json",
+      "memory_glob": "projects/*/chats/*.jsonl",
+      "note": "Qwen Code CLI；会话历史在 projects/*/chats/*.jsonl，todos/*.json"
+    },
+    "qoder": {
+      "candidate_paths": [
+        "~/.qoder"
+      ],
+      "signature_file": "MEMORY.md",
+      "note": "Qoder IDE；MEMORY.md 可异常膨胀，需流式或截断读取"
+    },
+    "qwenpaw": {
+      "candidate_paths": [
+        "~/.qwenpaw"
+      ],
+      "signature_file": "HEARTBEAT.md",
+      "note": "QwenPaw 自主 Agent；HEARTBEAT.md 为心跳清单"
+    },
+    "gemini-cli": {
+      "candidate_paths": [
+        "~/.gemini"
+      ],
+      "signature_file": "settings.json",
+      "memory_file": "GEMINI.md",
+      "memory_section_header": "## Gemini Added Memories",
+      "memory_creation_command": "/memory",
+      "note": "Gemini CLI；GEMINI.md 需用户通过 /memory 或 save_memory 工具主动创建，默认不存在"
+    },
+    "opencode": {
+      "candidate_paths": [
+        "~/.config/opencode"
+      ],
+      "signature_file": "agents.md",
+      "note": "OpenCode；全局 agents.md 在 ~/.config/opencode/，项目级 AGENTS.md 在项目根目录"
+    },
+    "alphaclaw": {
+      "candidate_paths": [
+        "~/.config/alphaclaw"
+      ],
+      "signature_glob": "*.db",
+      "storage_type": "sqlite_config_only",
+      "note": "AlphaClaw；3 个 .db 全为配置/凭据/技能状态存储（connector-config.db + pending-tool-results.db + skill-preferences.db），实测全为空表，不存储记忆内容；保留检测但跳过导出"
+    },
+    "copilot": {
+      "candidate_paths": [
+        "~/.config/github-copilot",
+        "~/AppData/Local/GitHub Copilot"
+      ],
+      "signature_glob": "**/*.md",
+      "note": "GitHub Copilot 以项目级 .github/copilot-instructions.md 为主，全局记忆有限"
     },
     "openclaw": {
       "candidate_paths": [
@@ -146,8 +220,17 @@
       "candidate_paths": [
         "~/.pi"
       ],
-      "signature_file": "agent/auth.json"
+      "signature_file": "MEMORY.md",
+      "additional_signature_paths": ["~/.pi/agent/settings.json"],
+      "note": "Pi Agent；signature 用根目录 MEMORY.md（~/.pi/settings.json 不存在）；记忆在 MEMORY.md + memory/MEMORY.md + agent/sessions/*.jsonl；agent/auth.json 含明文 API Key 需排除"
     }
+  },
+  "agents_md_standard": {
+    "enabled": true,
+    "project_level_file": "AGENTS.md",
+    "global_path": "~/.agents/AGENTS.md",
+    "supported_agents": ["codex", "opencode", "cline", "claude", "gemini-cli", "roo-code"],
+    "note": "AGENTS.md 是 2026 年跨工具标准；AgentMemorySystem 可读取项目级 AGENTS.md 作为记忆源"
   },
   "agent_overrides": {},
   "sync_tool": {

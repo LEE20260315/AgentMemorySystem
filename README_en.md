@@ -49,7 +49,11 @@ Claude, Hermes, Trae, Cursor, CodePilot — each AI agent keeps its own memory, 
 | Hermes | `MEMORY.md` with `§` delimiters | Append § sections |
 | Trae | `user_profile.md` sections | Append `## Shared Knowledge` |
 | CodePilot | SQLite (`codepilot.db`) | Export as Markdown |
-| Cursor / Windsurf / Cline / Continue / Aider / Roo-Code / Codex | Generic Markdown | Auto-adapted |
+| CodeBuddy | `MEMORY.md` | Generic Markdown writer |
+| pi / pi-web | `memory/MEMORY.md` + `.jsonl` | Generic Markdown writer |
+| OpenClaw | `.md` | Generic Markdown writer |
+| WorkBuddy | `MEMORY.md` | Generic Markdown writer |
+| Cursor / Windsurf / Cline / Continue / Aider / Roo-Code / Codex / Gemini CLI / OpenCode / Qwen / Qoder / QwenPaw / AlphaClaw | Generic Markdown / JSONL | Auto-adapted |
 
 ## Quick Start
 
@@ -161,6 +165,11 @@ See `config.json` in the repository for the full configuration reference.
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v2.0.4** | 2026-07 | **Icon unification** (tray/taskbar/window all use `app_icon.ico`, eliminating legacy multi-icon divergence); process file cleanup (removed DEVLOG.md, test_memory.py, design docs, one-time migration scripts, redundant icon assets, preserving version evolution path) |
+| **v2.0.3** | 2026-07 | Pre-write volume protection (`_enforce_write_volume_limit`, truncates old content at front matter boundary when over limit); `agent_runtime_manual.md` refactor; `prompt.md` hardcoded paths eliminated; `shrink_memory_files.py` sort logic simplified (6 sorts → single sorted) |
+| **v2.0.2** | 2026-07 | **Echo pollution root fix**: `_is_sync_generated_content` adds RAW_JSON/nested echo marker detection; `_purge_polluted_entries` auto-cleans DB and .md polluted entries before sync; `_count_legacy_markers` semantic fix; all `identity.json` migrated to relative paths (multi-machine portability); `extract_local_to_fused` parses `source_device` from `device_config.json` |
+| **v2.0** | 2026-07 | **Multi-machine support + volume governance + front matter format**: `device_config.json` multi-machine registry; `identity.json` relative paths; `volume_policy.json` volume policy; `memory_shared.md` front matter format rebuild; `full-merge` cross-agent memory fusion; Agent detection expansion (WorkBuddy/Qwen/Qoder/QwenPaw/AlphaClaw/Gemini CLI/OpenCode/Codex 2026/Cline/GitHub Copilot); ultra-large files (Qoder 145MB) read only tail 1MB; AGENTS.md cross-tool standard support |
+| **v1.4.0** | 2026-07 | **Root fix for write-back always 0** (reconcile self-healing, incremental loading, filter logic fix, extraction stage pollution self-healing, file size limit); added **pi/pi-web + OpenClaw** precise detection and write-back support; generic Agent discovery expanded to OneDrive/npm global; log rotation threshold optimization |
 | **v1.3.6** | 2026-07 | Fixed silent tray-icon disappearance (reproduced on two machines): root cause was `_tray_wndproc` callback doing OneDrive file I/O on every high-frequency `WM_MOUSEMOVE` event, blocking the callback and causing Windows to forcibly terminate the process. Removed all file I/O from wndproc, added 5-minute heartbeat logging, global crash capture (`sys.excepthook` + `threading.excepthook` + `atexit`), and automatic mainloop restart (up to 3 times) |
 | **v1.3.5** | 2026-07 | ttk visual polish compromise (no framework switch, zero new dependencies): COLORS tokens expanded (progress bar / colored log tags / error card / stat status colors), PIL status dot upgraded to 3-layer glow + center highlight, sync progress bar with auto stage detection, colored log tags auto-inference (timestamp gray / error red / success green / warning orange / info blue), sync-failure error card, stat values status coloring, fixed tray notification `agents_found` bug |
 | **v1.3.4** | 2026-07 | Data directory relocated back to project root `AgentMemory/` (simpler resolution, avoids OneDrive dual-account mis-targeting), one-time auto-migration from legacy `OneDrive\AgentMemory\` location, shortcut icons now use local copy (fixes white-placeholder icons caused by OneDrive cloud placeholders) |
@@ -203,13 +212,12 @@ AgentMemorySystem/
 ├── config.json               # Configuration file
 ├── requirements.txt          # Python dependencies
 ├── pyproject.toml            # Package metadata
-├── assets/                   # Icon assets
-├── docs/                     # Documentation
-├── tools/                    # Migration scripts and utilities
+├── assets/                   # Icon assets (app_icon.ico/png)
+├── docs/                     # Documentation (USAGE_EXAMPLE.md + screenshots)
+├── tools/                    # Utilities (shrink_memory_files.py, clean_legacy_markers.py)
 ├── CHANGELOG.md              # Changelog
-├── DEVLOG.md                 # Development log
 ├── LICENSE                   # MIT License
-└── test_memory.py            # Test suite
+└── test_full.py              # Test suite
 ```
 
 ## FAQ

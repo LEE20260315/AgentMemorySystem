@@ -49,9 +49,11 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 | Hermes | `MEMORY.md` 尾部 `§` 分隔 | 追加 § 段落 |
 | Trae | `user_profile.md` 章節 | 追加 `## Shared Knowledge` |
 | CodePilot | SQLite (`codepilot.db`) | 匯出為 Markdown |
+| CodeBuddy | `MEMORY.md` | 通用 Markdown 寫回 |
 | pi / pi-web | `memory/MEMORY.md` + `.jsonl` | 通用 Markdown 寫回 |
 | OpenClaw | `.md` | 通用 Markdown 寫回 |
-| Cursor / Windsurf / Cline / Continue / Aider / Roo-Code / Codex / CodeBuddy | 通用 Markdown | 自動適配 |
+| WorkBuddy | `MEMORY.md` | 通用 Markdown 寫回 |
+| Cursor / Windsurf / Cline / Continue / Aider / Roo-Code / Codex / Gemini CLI / OpenCode / Qwen / Qoder / QwenPaw / AlphaClaw | 通用 Markdown / JSONL | 自動適配 |
 
 ## 速覽
 
@@ -161,6 +163,10 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v2.0.4** | 2026-07 | **圖示統一**（托盤/任務欄/視窗均使用 `app_icon.ico`，消除歷史遺留的多圖示分歧）；過程性文件清理（刪除 DEVLOG.md、test_memory.py、設計文檔、一次性遷移腳本、冗餘圖示資源，保留版本演變路徑） |
+| **v2.0.3** | 2026-07 | 寫回前體積保護（`_enforce_write_volume_limit`，超限按 front matter 邊界截斷舊內容）；`agent_runtime_manual.md` 重構（移除不可執行的 `write_memory()` API 規則，改為直接編輯 `memory_private.md`）；`prompt.md` 消除硬編碼路徑；`shrink_memory_files.py` 排序邏輯簡化（6 次 sort → 單次 sorted） |
+| **v2.0.2** | 2026-07 | **徹底根治回聲污染**：`_is_sync_generated_content` 新增 RAW_JSON/嵌套 echo marker 檢測；`_purge_polluted_entries` 同步前自動清理 DB 和 .md 污染條目；`_count_legacy_markers` 語義修正；所有 `identity.json` 改為相對路徑（多機可移植）；`extract_local_to_fused` 從 `device_config.json` 解析 source_device |
+| **v2.0** | 2026-07 | **多機支援 + 體積治理 + front matter 格式**：`device_config.json` 多機註冊表；`identity.json` 相對路徑；`volume_policy.json` 體積策略；`memory_shared.md` front matter 格式重建；`full-merge` 跨 Agent 記憶融合；Agent 偵測擴展（WorkBuddy/Qwen/Qoder/QwenPaw/AlphaClaw/Gemini CLI/OpenCode/Codex 2026/Cline/GitHub Copilot）；超大檔案（Qoder 145MB）只讀尾部 1MB；AGENTS.md 跨工具標準支援 |
 | **v1.4.0** | 2026-07 | **根治寫回始終為 0 的核心問題**（reconcile 自愈、增量加載、過濾邏輯修正、提取階段污染自愈、檔案大小上限）；新增 **pi/pi-web + OpenClaw** 精確檢測與寫回支援；通用 Agent 發現擴展至 OneDrive/npm 全域；日誌輪轉閾值優化 |
 | **v1.3.6** | 2026-07 | 修復托盤圖示靜默消失（wndproc 回呼在高頻滑鼠移動事件中做 OneDrive 檔案 I/O 導致行程被 Windows 強制終止）：移除 wndproc 內全部檔案 I/O、新增 5 分鐘心跳日誌、全域崩潰捕獲（`sys.excepthook` + `threading.excepthook` + `atexit`）、`mainloop` 崩潰自動重啟（最多 3 次） |
 | **v1.3.5** | 2026-07 | ttk 視覺精修折中方案（不換框架、零新依賴）：COLORS 配色 token 擴展（進度條/日誌彩色 tag/錯誤卡片/統計狀態色）、PIL 狀態點升級為三層光暈 + 中心高光、同步進度條 + 階段自動檢測、日誌彩色 tag 自動推斷（時間戳灰/錯誤紅/成功綠/警告橙/信息藍）、同步失敗錯誤卡片、統計數值狀態著色、修復托盤通知 `agents_found` bug |
@@ -204,13 +210,12 @@ AgentMemorySystem/
 ├── config.json               # 配置檔
 ├── requirements.txt          # Python 依賴
 ├── pyproject.toml            # 包元資訊
-├── assets/                   # 圖示資源
-├── docs/                     # 文檔
-├── tools/                    # 遷移腳本等工具
+├── assets/                   # 圖示資源（app_icon.ico/png）
+├── docs/                     # 文檔（USAGE_EXAMPLE.md + 螢幕截圖）
+├── tools/                    # 工具（shrink_memory_files.py、clean_legacy_markers.py）
 ├── CHANGELOG.md              # 變更日誌
-├── DEVLOG.md                 # 開發日誌
 ├── LICENSE                   # MIT 許可證
-└── test_memory.py            # 測試用例
+└── test_full.py              # 測試套件
 ```
 
 ## 常見之問

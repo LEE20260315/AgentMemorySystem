@@ -630,10 +630,34 @@ def main():
     flush_parser.add_argument("--dry-run", action="store_true", help="试运行（不实际写入）")
 
     # full-sync (新增: 完整同步流程)
-    subparsers.add_parser("full-sync", help="完整同步: 发现 → 提取 → 融合 → 写回各 Agent")
+    full_sync_parser = subparsers.add_parser(
+        "full-sync", help="完整同步: 发现 → 提取 → 融合 → 写回各 Agent"
+    )
+    full_sync_parser.add_argument(
+        "--reset-sync-state", action="store_true",
+        help="重置同步状态（删除 .sync_state.json，所有共享记忆将重新写回）"
+    )
+    full_sync_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="试运行：仅打印流程，不实际写回 Agent 文件"
+    )
 
     # redetect (新增: 重新检测 Agent)
     subparsers.add_parser("redetect", help="重新检测本机 Agent 路径")
+
+    # register-device (v2.0: 多机注册)
+    register_device_parser = subparsers.add_parser(
+        "register-device",
+        help="将当前机器注册到 device_config.json（多机协同）"
+    )
+    register_device_parser.add_argument(
+        "--name", default=None,
+        help="设备名称（不传则用 hostname）"
+    )
+    register_device_parser.add_argument(
+        "--all-agents", action="store_true",
+        help="对所有 agent_*/device_config.json 都执行注册（默认只注册 root/device_config.json）"
+    )
 
     args = parser.parse_args()
 
@@ -667,6 +691,7 @@ def main():
         "flush": cmd_flush,
         "full-sync": cmd_full_sync,
         "redetect": cmd_redetect,
+        "register-device": cmd_register_device,
     }
 
     commands[args.command](args)
@@ -918,8 +943,13 @@ def cmd_flush(args):
 def cmd_full_sync(args):
     """
     完整同步流程: 发现 Agent → 提取记忆 → 融合 → 写回各 Agent
+
+    选项:
+      --reset-sync-state : 删除 .sync_state.json，让所有共享记忆重新写回
+      --dry-run          : 试运行，不实际写回 Agent 文件
     """
     from sync_engine import SyncEngine
+    from safe_io import get_data_root
 
     def cli_progress(msg):
         print("  {}".format(msg))
@@ -927,7 +957,28 @@ def cmd_full_sync(args):
     print("=== 完整同步 ===")
     print()
 
-    engine = SyncEngine(on_progress=cli_progress)
+    # --reset-sync-state: 删除同步状态文件
+    if getattr(args, "reset_sync_state", False):
+        state_path = get_data_root() / ".sync_state.json"
+        if state_path.exists():
+            try:
+                state_path.unlink()
+                print("[RESET] 已删除同步状态: {}".format(state_path))
+                print("        下次 sync 时所有共享记忆将重新写回各 Agent")
+            except OSError as e:
+                print("[RESET] 删除失败: {}".format(e))
+                sys.exit(1)
+        else:
+            print("[RESET] 同步状态文件不存在，无需重置: {}".format(state_path))
+        print()
+
+    # --dry-run: SyncEngine 支持 dry_run 模式
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        print("[DRY-RUN] 试运行模式：不会实际写回 Agent 文件")
+        print()
+
+    engine = SyncEngine(on_progress=cli_progress, dry_run=dry_run)
     report = engine.run()
 
     print()
@@ -971,6 +1022,74 @@ def cmd_redetect(args):
             if len(files) > 3:
                 print("      ... 还有 {} 个".format(len(files) - 3))
         print()
+
+
+def cmd_register_device(args):
+    """
+    v2.0: 将当前机器注册到 device_config.json
+
+    支持多机协同：每台机器在 device_config.json 的 devices 字典中登记
+    hostname 与 user_home，load_identity 时按 hostname 自动匹配。
+    """
+    import socket
+    from agent_memory import register_current_device
+
+    print("=== 注册当前设备 ===")
+    print()
+    print("Hostname: {}".format(socket.gethostname()))
+    print("User Home: {}".format(Path.home()))
+    print()
+
+    device_name = args.name
+    if device_name:
+        print("使用指定名称: {}".format(device_name))
+    else:
+        device_name = socket.gethostname().lower().replace("-", "_")
+        print("使用 hostname 作为名称: {}".format(device_name))
+    print()
+
+    # 确定要注册的 device_config.json 路径列表
+    # args.root 默认是 <project>/data 目录
+    root = Path(args.root)
+    targets = []
+
+    if getattr(args, "all_agents", False):
+        # args.root 可能是 data/ 也可能是 project 根
+        # 先找 agent_*/device_config.json
+        if root.name == "data":
+            data_dir = root
+        elif (root / "data").exists():
+            data_dir = root / "data"
+        else:
+            data_dir = root
+
+        if data_dir.exists():
+            for agent_dir in sorted(data_dir.iterdir()):
+                if not agent_dir.is_dir() or not agent_dir.name.startswith("agent_"):
+                    continue
+                dc = agent_dir / "device_config.json"
+                targets.append((agent_dir.name, dc))
+        # 也注册 data/device_config.json（全局默认）
+        targets.append(("(data-root)", data_dir / "device_config.json"))
+    else:
+        # 默认只注册 root/device_config.json
+        targets.append(("(root)", root / "device_config.json"))
+
+    print("将注册到 {} 个 device_config.json:".format(len(targets)))
+    for label, dc in targets:
+        print("  - {}: {}".format(label, dc))
+    print()
+
+    for label, dc in targets:
+        try:
+            registered_name = register_current_device(dc, device_name=device_name)
+            print("  ✓ {}: 注册为 '{}'".format(label, registered_name))
+        except Exception as e:
+            print("  ❌ {}: 失败 - {}".format(label, e))
+
+    print()
+    print("完成。多机协同时，在新机器上运行相同命令即可注册。")
+    print("提示：使用 --all-agents 可为所有 agent_*/device_config.json 同时注册。")
 
 
 if __name__ == "__main__":

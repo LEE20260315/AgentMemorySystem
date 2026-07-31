@@ -715,6 +715,11 @@ def load_identity(identity_path, device_config_path=None):
     """
     第 1~2 步: 读取 identity.json + device_config.json, 确认 agent_id 与所有路径。
     source_device 从 device_config.json 读取, 不再从 identity.json 读取。
+
+    v2.0: 支持 memory_root / shared_root 相对路径（相对 identity.json 所在目录）。
+    - 绝对路径（含盘符或以 / 开头）：按原方式使用
+    - 相对路径：相对 identity.json 所在目录解析
+    这样 identity.json 可跨设备同步，无需每台机器改路径。
     """
     if not identity_path.exists():
         raise IdentityNotFoundError(
@@ -745,22 +750,177 @@ def load_identity(identity_path, device_config_path=None):
         )
 
     device_raw = json.loads(device_config_path.read_text(encoding="utf-8"))
-    if "source_device" not in device_raw:
-        raise DeviceConfigNotFoundError(
-            "device_config.json 缺少 source_device 字段: {}".format(
-                device_config_path
-            )
-        )
+
+    # v2.0: 多机注册表解析
+    # 优先级：hostname 匹配 > user_home 匹配 > default_device > source_device (legacy)
+    source_device = _resolve_source_device(device_raw, device_config_path)
+
+    # v2.0: 相对路径解析
+    # identity.json 所在目录作为基准
+    identity_dir = identity_path.resolve().parent
+    memory_root_path = Path(raw["memory_root"])
+    shared_root_path = Path(raw["shared_root"])
+
+    def _is_relative(p: str) -> bool:
+        if not p:
+            return True
+        if len(p) >= 2 and p[1] == ":":  # Windows 盘符
+            return False
+        return not p.startswith(("/", "\\"))
+
+    if _is_relative(raw["memory_root"]):
+        memory_root_path = (identity_dir / memory_root_path).resolve()
+    if _is_relative(raw["shared_root"]):
+        shared_root_path = (identity_dir / shared_root_path).resolve()
 
     return Identity(
         agent_id=raw["agent_id"],
         display_name=raw["display_name"],
         primary_domain=raw["primary_domain"],
-        memory_root=Path(raw["memory_root"]),
-        shared_root=Path(raw["shared_root"]),
-        source_device=device_raw["source_device"],
+        memory_root=memory_root_path,
+        shared_root=shared_root_path,
+        source_device=source_device,
         created_at=raw["created_at"],
     )
+
+
+def _resolve_source_device(device_raw: dict, device_config_path: Path) -> str:
+    """从 device_config.json 解析当前机器的 source_device。
+
+    v2.0 多机注册表支持：
+    1. 若 devices 字典存在，按 hostname / user_home 匹配当前机器
+    2. 无匹配时回退到 default_device
+    3. 兼容旧格式：仅有 source_device 字段时直接使用
+
+    Returns
+    -------
+    str
+        当前机器的 source_device 名称
+
+    Raises
+    ------
+    DeviceConfigNotFoundError
+        无法确定 source_device 时
+    """
+    import socket
+
+    # 旧格式：仅有 source_device
+    if "devices" not in device_raw:
+        if "source_device" in device_raw:
+            return device_raw["source_device"]
+        raise DeviceConfigNotFoundError(
+            "device_config.json 缺少 source_device 字段: {}".format(device_config_path)
+        )
+
+    # 新格式：多机注册表
+    devices = device_raw.get("devices", {})
+    if not devices:
+        # devices 字段存在但为空，回退
+        if "source_device" in device_raw:
+            return device_raw["source_device"]
+        raise DeviceConfigNotFoundError(
+            "device_config.json devices 字段为空且无 source_device: {}".format(device_config_path)
+        )
+
+    current_hostname = socket.gethostname().lower()
+    current_user_home = str(Path.home())
+
+    # 1. hostname 精确匹配（大小写不敏感）
+    for device_name, info in devices.items():
+        if not isinstance(info, dict):
+            continue
+        device_hostname = info.get("hostname", "").lower()
+        if device_hostname and device_hostname == current_hostname:
+            return device_name
+
+    # 2. user_home 匹配
+    for device_name, info in devices.items():
+        if not isinstance(info, dict):
+            continue
+        device_home = info.get("user_home", "")
+        if device_home and Path(device_home).resolve() == Path(current_user_home).resolve():
+            return device_name
+
+    # 3. default_device
+    default_device = device_raw.get("default_device")
+    if default_device and default_device in devices:
+        return default_device
+
+    # 4. 兼容旧字段
+    if "source_device" in device_raw:
+        return device_raw["source_device"]
+
+    # 无法匹配：报错并提示
+    available = ", ".join("{} (host={})".format(
+        name, info.get("hostname", "?") if isinstance(info, dict) else "?"
+    ) for name, info in devices.items())
+    raise DeviceConfigNotFoundError(
+        "device_config.json 中无设备匹配当前机器 (hostname={}, user_home={})。"
+        "可用设备: {}。请运行: python memory_cli.py register-device".format(
+            current_hostname, current_user_home, available
+        )
+    )
+
+
+def register_current_device(device_config_path: Path, device_name: str = None) -> str:
+    """将当前机器注册到 device_config.json 的多机注册表中。
+
+    Parameters
+    ----------
+    device_config_path : Path
+        device_config.json 路径
+    device_name : str, optional
+        设备名称（不传则用 hostname）
+
+    Returns
+    -------
+    str
+        注册的设备名称
+    """
+    import socket
+
+    if device_name is None:
+        device_name = socket.gethostname().lower().replace("-", "_")
+
+    # 读取现有配置
+    if device_config_path.exists():
+        config = json.loads(device_config_path.read_text(encoding="utf-8"))
+    else:
+        config = {}
+
+    # 初始化 devices 字典
+    if "devices" not in config or not isinstance(config["devices"], dict):
+        config["devices"] = {}
+
+    # 注册/更新当前机器
+    now_iso = datetime.now(timezone.utc).isoformat()
+    current_hostname = socket.gethostname()
+    current_user_home = str(Path.home())
+
+    if device_name in config["devices"]:
+        # 更新已有条目
+        config["devices"][device_name]["last_seen"] = now_iso
+        config["devices"][device_name]["hostname"] = current_hostname
+        config["devices"][device_name]["user_home"] = current_user_home
+    else:
+        # 新增条目
+        config["devices"][device_name] = {
+            "hostname": current_hostname,
+            "user_home": current_user_home,
+            "registered_at": now_iso,
+            "last_seen": now_iso,
+        }
+
+    # 兼容字段：同时更新 source_device（让旧代码也能工作）
+    config["source_device"] = device_name
+    config["default_device"] = config.get("default_device", device_name)
+
+    device_config_path.parent.mkdir(parents=True, exist_ok=True)
+    device_config_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return device_name
 
 
 def load_writing_policy(shared_root):
@@ -4819,6 +4979,10 @@ def detect_agents(
                         export_path = export_codepilot_memory(db_path)
                         memory_files = [str(export_path)]
                         logger.info("Agent {} SQLite 导出: {}".format(agent_id, export_path))
+                elif profile.get("storage_type") == "sqlite_config_only":
+                    # v2.1.1: AlphaClaw 等 — SQLite 仅存配置/凭据，无记忆内容，跳过导出
+                    logger.info("Agent {} 仅 SQLite 配置存储，跳过记忆导出".format(agent_id))
+                    memory_files = []
                 else:
                     # 扫描记忆文件
                     memory_files = _filter_agent_memory_files(
@@ -4893,6 +5057,7 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
 
     # AI 工具名称关键词（目录名包含这些词的会被识别为潜在 Agent）
     # v1.3.7: 补充 pi, openclaw, deepseek, gemini, chatgpt, coding 等关键词
+    # v2.1: 补充 workbuddy, qwen, qoder, alphaclaw, opencode, amazonq 等
     ai_keywords = [
         "agent", "ai", "llm", "gpt", "copilot", "cursor", "windsurf",
         "cline", "continue", "aider", "roo", "codex", "devin", "replit",
@@ -4900,6 +5065,13 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
         "sweep", "factory", "magic", "augment", "poolside", "codepilot",
         "codebuddy", "ima", "pi", "openclaw", "deepseek", "gemini",
         "chatgpt", "coding", "trae", "hermes",
+        # v2.1 新增
+        "workbuddy", "workbody",  # WorkBuddy IDE（含拼写容错）
+        "qwen", "qoder", "qwenpaw",  # 阿里系 + Qoder
+        "alphaclaw",  # AlphaClaw
+        "aipyapp",  # aipyapp
+        "opencode",  # OpenCode
+        "amazonq",  # Amazon Q
     ]
 
     # 排除的目录名（非 Agent 工具，或已知浏览器壳应用）
@@ -5068,12 +5240,92 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
                 memory_files.append(str(topics_file))
             for proj_mem in mem_dir.glob("projects/*/project_memory.md"):
                 memory_files.append(str(proj_mem))
-    elif "codebuddy" in agent_id or "memery" in path_str:
-        # CodeBuddy 记忆文件：~/.codebuddy/memery/*_memery.md
-        for md_file in install_path.glob("*_memery.md"):
-            memory_files.append(str(md_file))
-        for md_file in install_path.glob("*.md"):
-            if str(md_file) not in memory_files:
+    elif "workbuddy" in agent_id or "workbuddy" in path_str or "workbody" in path_str:
+        # v2.1: WorkBuddy IDE — MEMORY.md + SOUL.md + IDENTITY.md 等模板文件
+        for md_name in ["MEMORY.md", "SOUL.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md"]:
+            md_file = install_path / md_name
+            if md_file.exists() and _size_ok(md_file):
+                memory_files.append(str(md_file))
+        # audit-log/*.jsonl（每日审计日志）
+        audit_dir = install_path / "audit-log"
+        if audit_dir.exists():
+            for jsonl_file in audit_dir.glob("*.jsonl"):
+                if _size_ok(jsonl_file):
+                    memory_files.append(str(jsonl_file))
+        # sessions/*.json（会话记录，可能很多，只取最近 N 个）
+        sessions_dir = install_path / "sessions"
+        if sessions_dir.exists():
+            session_files = sorted(
+                sessions_dir.glob("*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+            for sf in session_files[:20]:  # 只取最近 20 个会话
+                if _size_ok(sf):
+                    memory_files.append(str(sf))
+    elif "qwenpaw" in agent_id or "qwenpaw" in path_str:
+        # v2.1: QwenPaw 自主 Agent
+        for md_name in ["HEARTBEAT.md"]:
+            md_file = install_path / md_name
+            if md_file.exists() and _size_ok(md_file):
+                memory_files.append(str(md_file))
+    elif "qwen" in agent_id or ("qwen" in path_str and "qwenpaw" not in path_str):
+        # v2.1: Qwen Code CLI — 会话历史在 projects/*/chats/*.jsonl
+        projects_dir = install_path / "projects"
+        if projects_dir.exists():
+            for jsonl_file in projects_dir.glob("*/chats/*.jsonl"):
+                if _size_ok(jsonl_file):
+                    memory_files.append(str(jsonl_file))
+        # todos/*.json
+        todos_dir = install_path / "todos"
+        if todos_dir.exists():
+            for json_file in todos_dir.glob("*.json"):
+                if _size_ok(json_file):
+                    memory_files.append(str(json_file))
+        # output-language.md
+        lang_file = install_path / "output-language.md"
+        if lang_file.exists() and _size_ok(lang_file):
+            memory_files.append(str(lang_file))
+    elif "qoder" in agent_id or "qoder" in path_str:
+        # v2.1: Qoder IDE — MEMORY.md（可能异常膨胀）
+        md_file = install_path / "MEMORY.md"
+        if md_file.exists():
+            if _size_ok(md_file):
+                memory_files.append(str(md_file))
+            else:
+                # 超大文件处理：标记为 oversize，由 extract 阶段特殊处理
+                get_logger().warning(
+                    "Qoder MEMORY.md (%d bytes) 超过 %d 上限，标记为需清理",
+                    md_file.stat().st_size, max_file_size
+                )
+                memory_files.append(str(md_file) + "?oversize=true")
+    elif "gemini" in agent_id or "gemini" in path_str:
+        # v2.1: Gemini CLI — GEMINI.md（可能不存在）+ tmp/<project>/chats/*.jsonl
+        # v2.1.1: 实测会话历史在 tmp/<project>/chats/*.jsonl，不在 history/
+        gemini_md = install_path / "GEMINI.md"
+        if gemini_md.exists() and _size_ok(gemini_md):
+            memory_files.append(str(gemini_md))
+        # 会话历史：tmp/<project>/chats/*.jsonl + *.json
+        tmp_dir = install_path / "tmp"
+        if tmp_dir.exists():
+            for chat_file in tmp_dir.rglob("chats/*.json*"):
+                if _size_ok(chat_file):
+                    memory_files.append(str(chat_file))
+    elif "codebuddy" in agent_id:
+        # v2.1 修正: CodeBuddy 记忆文件在 memory/ 子目录（拼写修正 memery→memory）
+        # v2.1.1: 实测 CodeBuddy 自身拼写为 memery/，需同时扫描两种拼写
+        for subdir_name in ["memory", "memery"]:
+            memory_subdir = install_path / subdir_name
+            if memory_subdir.exists():
+                for md_file in memory_subdir.glob("*_mem*.md"):
+                    if _size_ok(md_file):
+                        memory_files.append(str(md_file))
+                for md_file in memory_subdir.glob("*.md"):
+                    if str(md_file) not in memory_files and _size_ok(md_file):
+                        memory_files.append(str(md_file))
+        # 也扫描根目录的 *_mem*.md（部分版本可能有，容错拼写）
+        for md_file in install_path.glob("*_mem*.md"):
+            if _size_ok(md_file) and str(md_file) not in memory_files:
                 memory_files.append(str(md_file))
     elif "pi" in agent_id or "pi" in path_str:
         # pi / pi-web 记忆文件：~/.pi/ 下的 .md, .jsonl, memory/ 子目录
@@ -5091,8 +5343,16 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
             for jsonl_file in mem_subdir.glob("*.jsonl"):
                 if _size_ok(jsonl_file):
                     memory_files.append(str(jsonl_file))
+        # v2.1 新增：agent/sessions/**/*.jsonl（会话历史）
+        agent_sessions = install_path / "agent" / "sessions"
+        if agent_sessions.exists():
+            for jsonl_file in agent_sessions.rglob("*.jsonl"):
+                if _size_ok(jsonl_file):
+                    memory_files.append(str(jsonl_file))
+        # v2.1 安全：显式排除 agent/auth.json（含明文 API Key，不扫描）
     else:
-        candidates = ["MEMORY.md", "memory.md", "memories.md", "USER.md", "user.md"]
+        # v2.1: 新增 AGENTS.md 到候选（2026 跨工具标准）
+        candidates = ["MEMORY.md", "memory.md", "memories.md", "USER.md", "user.md", "AGENTS.md"]
         for c in candidates:
             p = install_path / c
             if p.exists() and _size_ok(p):
@@ -5110,6 +5370,30 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
     return memory_files
 
 
+def _read_oversize_md_tail(filepath: Path, max_bytes: int = 1024 * 1024) -> str:
+    """读取超大 Markdown 文件的最后 N 字节
+    v2.1: 用于 Qoder MEMORY.md (138MB) 等异常膨胀文件。
+    只提取最近的记忆条目，避免内存溢出。
+    """
+    try:
+        file_size = filepath.stat().st_size
+    except OSError:
+        return ""
+    with open(filepath, "rb") as f:
+        f.seek(max(0, file_size - max_bytes))
+        data = f.read(max_bytes)
+    # 尝试 UTF-8 解码，跳过可能的不完整行
+    try:
+        text = data.decode("utf-8", errors="ignore")
+        # 跳过第一行（可能不完整）
+        first_nl = text.find("\n")
+        if first_nl > 0:
+            text = text[first_nl + 1:]
+        return text
+    except Exception:
+        return ""
+
+
 def _sanitize_sensitive(text: str) -> str:
     """过滤文本中的敏感信息（API 密钥、密码等）"""
     import re
@@ -5122,6 +5406,8 @@ def _sanitize_sensitive(text: str) -> str:
         (r'(password[=:]\s*\S+)', 'password=***REDACTED***'),
         (r'(token[=:]\s*[a-zA-Z0-9_-]{20,})', 'token=***REDACTED***'),
         (r'(secret[=:]\s*\S+)', 'secret=***REDACTED***'),
+        # v2.1: JSON 格式的 key 字段（如 pi auth.json 中的 "key": "sk-xxx"）
+        (r'("key"\s*:\s*")[^"]+(")', r'\1***REDACTED***\2'),
     ]
     for pattern, replacement in patterns:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
@@ -5694,6 +5980,31 @@ class AgentRegistry:
             )
             new_agents.append(agent_id)
 
+        # v2.1.1: 合并 detect_agents() 的结果（读取 config.json agent_detection 配置）
+        # 解决架构性问题：scan_local 原本只用硬编码的 _AGENT_SUBDIRS（7 个 Agent），
+        # 不走 config.json 的 agent_detection 配置。这里把 detect_agents 发现的
+        # 新 Agent 也注册到 registry，让 discover 命令能识别所有配置的 Agent。
+        try:
+            detected = detect_agents(force_redetect=True, write_cache=False)
+            for agent_id, info in detected.items():
+                if agent_id in self.agents:
+                    # 已存在则更新 last_seen 和 memory_files
+                    self.agents[agent_id]["last_seen"] = datetime.now(timezone.utc).isoformat()
+                    if info.get("memory_files"):
+                        self.agents[agent_id]["memory_files"] = info["memory_files"]
+                    self.agents[agent_id]["installation_path"] = info.get("path", "")
+                    continue
+                # 新发现（来自 config.json agent_detection 配置）
+                self.register(
+                    agent_id,
+                    installation_path=info.get("path", ""),
+                    memory_files=info.get("memory_files", []),
+                    source="auto_config"
+                )
+                new_agents.append(agent_id)
+        except Exception as e:
+            get_logger().warning("scan_local 合并 detect_agents 结果失败: {}".format(e))
+
         self._save()
         return new_agents
 
@@ -5819,8 +6130,18 @@ def _strip_sync_generated_sections(text: str) -> str:
 
 def _is_sync_generated_content(text: str) -> bool:
     """判断内容是否为写回阶段生成的同步产物。
-    v1.3.7 改进：不再是"含 sync marker 就过滤"，而是"剥离 marker 后无实质内容才过滤"。
-    只有存在 sync 标记/前缀时，剥离检查才触发。纯原生内容不经过长度检查。
+
+    v2.0 改进：含 [sync:...] 标记的条目始终视为同步产物。
+    原因：sync 标记只由同步引擎写入，不会出现在 Agent 原生记忆中。
+    旧逻辑（剥离后 <30 字才过滤）导致长 sync 条目被重新提取为新记忆，
+    造成 shared.db 膨胀和正反馈循环。
+
+    v2.0.1 改进：检测嵌套 "— 来自 xxx (date)" 标记。
+    单条内容出现 2+ 个 "— 来自" 标记 → 明确是回声污染，始终过滤。
+    同时检测 RAW_JSON_START/END 包装，这是 sync 写回的明证。
+
+    保留对 "— 来自 xxx" 前缀的保守检查（仅过滤短内容），
+    因为 Agent 可能引用其他 Agent 的内容但非 sync 产物。
     """
     normalized = _normalize_memory_content(text)
     if not normalized:
@@ -5835,22 +6156,36 @@ def _is_sync_generated_content(text: str) -> bool:
     if "shared_from_agents.md" in lowered:
         return True
 
-    # 检查是否存在 sync 标记/前缀
+    # v2.0: 含 [sync:...] 标记 → 始终视为同步产物
     import re
-    has_sync_marker = bool(re.search(r"\[sync:[^\]]*\]", normalized))
+    if re.search(r"\[sync:[^\]]*\]", normalized):
+        return True
+
+    # v2.0.1: RAW_JSON_START/END 包装 → sync 写回产物
+    if "RAW_JSON_START" in normalized or "RAW_JSON_END" in normalized:
+        return True
+
+    # v2.0.1: 统计 "— 来自 xxx (date)" 标记出现次数
+    # 嵌套 2+ 次 → 回声污染，始终过滤
+    echo_marker_re = re.compile(
+        r"[—\-]\s*来自\s*\S+\s*\(\d{4}-\d{2}-\d{2}\)"
+    )
+    echo_count = len(echo_marker_re.findall(normalized))
+    if echo_count >= 2:
+        return True
+
+    # 检查 "— 来自 xxx" 前缀（保守：仅过滤短内容）
     has_sync_prefix = bool(re.search(
         r"(?m)^[—\-]\s*来自\s*(hermes|trae|claude|codebuddy|codepilot|openclaw|pi.web|unknown|generic)",
         normalized
     ))
-    if not has_sync_marker and not has_sync_prefix:
-        # 原生内容，不拦截
+    if not has_sync_prefix:
         return False
 
-    # 剥离 sync marker/前缀后，剩余内容 < 30 字 → 纯 sync 产物
-    stripped = re.sub(r"\[sync:[^\]]*\]", "", normalized).strip()
+    # 剥离 "— 来自 xxx" 前缀后，剩余内容 < 30 字 → 纯 sync 产物
     stripped = re.sub(
         r"(?m)^[—\-]\s*来自\s*(hermes|trae|claude|codebuddy|codepilot|openclaw|pi.web|unknown|generic)[^\n]*",
-        "", stripped
+        "", normalized
     )
     stripped = re.sub(r"(?m)^\s*$\n?", "", stripped)
     stripped = stripped.strip()
@@ -5904,13 +6239,20 @@ class LocalMemoryParser:
         Returns
         -------
         str
-            'hermes_section' / 'hermes_user' / 'markdown' / 'jsonl' / 'unknown'
+            'hermes_section' / 'hermes_user' / 'markdown' / 'jsonl' / 'gemini_md' / 'qwen_jsonl' / 'unknown'
         """
         name = file_path.name.lower()
-        if "memory.md" in name and "hermes" in str(file_path).lower():
+        path_lower = str(file_path).lower()
+        if "memory.md" in name and "hermes" in path_lower:
             return "hermes_section"
-        if "user.md" in name and "hermes" in str(file_path).lower():
+        if "user.md" in name and "hermes" in path_lower:
             return "hermes_user"
+        # v2.1: Gemini CLI GEMINI.md
+        if "gemini.md" in name:
+            return "gemini_md"
+        # v2.1: Qwen Code CLI JSONL
+        if name.endswith(".jsonl") and "qwen" in path_lower:
+            return "qwen_jsonl"
         if name.endswith(".jsonl"):
             return "jsonl"
         if name.endswith(".md"):
@@ -5936,9 +6278,16 @@ class LocalMemoryParser:
         elif fmt == "hermes_user":
             return self.parse_hermes_user(file_path)
         elif fmt == "markdown":
+            # v2.1: WorkBuddy 文件用专用解析器（过滤模板）
+            if "workbuddy" in str(file_path).lower():
+                return self.parse_workbuddy_md(file_path)
             return self.parse_markdown(file_path)
+        elif fmt == "gemini_md":
+            return self.parse_gemini_md(file_path)
         elif fmt == "jsonl":
             return self.parse_jsonl(file_path)
+        elif fmt == "qwen_jsonl":
+            return self.parse_qwen_jsonl(file_path)
         return []
 
     def parse_hermes_memory(self, file_path: Path) -> list:
@@ -6101,10 +6450,97 @@ class LocalMemoryParser:
             pass
         return entries
 
+    # v2.1 新增: Gemini CLI GEMINI.md 解析
+    def parse_gemini_md(self, file_path: Path) -> list:
+        """解析 Gemini CLI 的 GEMINI.md
+        定位 '## Gemini Added Memories' 段，按 '- ' 列表项切分。
+        """
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except (IOError, UnicodeDecodeError):
+            return []
+        entries = []
+        in_section = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## Gemini Added Memories"):
+                in_section = True
+                continue
+            elif stripped.startswith("## ") and in_section:
+                break  # 进入下一个 section
+            if in_section and stripped.startswith("- "):
+                content = stripped[2:]
+                if not content or len(content) <= 5:
+                    continue
+                content = _strip_sync_generated_sections(content)
+                if not content or _is_sync_generated_content(content):
+                    continue
+                entries.append({
+                    "content": content,
+                    "tags": ["gemini", "从markdown导入"],
+                    "confidence": "medium",
+                    "source_format": "gemini_section",
+                    "preview": content[:60],
+                })
+        return entries
 
-# ---------------------------------------------------------------------------
-# Extractor - v1.3 新增: 从本地记忆文件提取到 OneDrive 融合层
-# ---------------------------------------------------------------------------
+    # v2.1 新增: WorkBuddy MEMORY.md / SOUL.md 解析
+    def parse_workbuddy_md(self, file_path: Path) -> list:
+        """解析 WorkBuddy 的 MEMORY.md / SOUL.md / IDENTITY.md
+        这些文件可能是未初始化的模板（含 front matter 但无实际内容），
+        也可能有实际记忆。按 markdown 格式解析，过滤纯模板内容。
+        """
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except (IOError, UnicodeDecodeError):
+            return []
+        # 检测是否为未初始化模板
+        head = text[:500].lower()
+        if "template" in head or "uninitialized" in head or "workspace template" in head:
+            return []  # 模板文件，无实际记忆
+        return self.parse_markdown(file_path)
+
+    # v2.1 新增: Qwen Code CLI JSONL 解析
+    def parse_qwen_jsonl(self, file_path: Path) -> list:
+        """解析 Qwen Code CLI 的会话 JSONL
+        每行为一个 JSON 对象，提取有意义的对话内容作为记忆。
+        """
+        entries = []
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    # 提取有意义的对话内容
+                    content = None
+                    if isinstance(obj, dict):
+                        if "content" in obj and isinstance(obj["content"], str):
+                            content = obj["content"]
+                        elif "message" in obj and isinstance(obj["message"], str):
+                            content = obj["message"]
+                        elif "text" in obj and isinstance(obj["text"], str):
+                            content = obj["text"]
+                    if not content or len(content) <= 10:
+                        continue
+                    content = content[:500]  # 截断
+                    content = _strip_sync_generated_sections(content)
+                    if not content or _is_sync_generated_content(content):
+                        continue
+                    entries.append({
+                        "content": content,
+                        "tags": ["qwen", "从jsonl导入"],
+                        "confidence": "low",
+                        "source_format": "qwen_jsonl",
+                        "preview": content[:60],
+                    })
+        except (IOError, UnicodeDecodeError):
+            pass
+        return entries
 
 def extract_local_to_fused(agent_id: str, root: Path = None,
                             local_files: list = None,
@@ -6150,12 +6586,41 @@ def extract_local_to_fused(agent_id: str, root: Path = None,
     # 收集所有解析的条目
     all_entries = []
     for local_file in local_files:
-        local_file = Path(local_file)
+        local_file_str = str(local_file)
+        # v2.1.1: 处理 oversize 标记（Qoder MEMORY.md 145MB 等）
+        # 标记格式: /path/to/file.md?oversize=true
+        is_oversize = "?oversize=true" in local_file_str
+        if is_oversize:
+            local_file = Path(local_file_str.replace("?oversize=true", ""))
+        else:
+            local_file = Path(local_file)
         if not local_file.exists():
             result["skipped"] += 1
             continue
         try:
-            entries = parser.parse_file(local_file)
+            if is_oversize:
+                # 超大文件：只读最后 1MB 到临时文件再解析
+                on_progress("  处理超大文件 {} (仅读取最后 1MB)".format(local_file.name))
+                tail_text = _read_oversize_md_tail(local_file, max_bytes=1024 * 1024)
+                if not tail_text:
+                    result["skipped"] += 1
+                    continue
+                # 写到临时文件让 parser 处理
+                import tempfile
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".md", delete=False, encoding="utf-8"
+                ) as tmp:
+                    tmp.write(tail_text)
+                    tmp_path = Path(tmp.name)
+                try:
+                    entries = parser.parse_file(tmp_path)
+                finally:
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+            else:
+                entries = parser.parse_file(local_file)
             for entry in entries:
                 entry["_source_file"] = str(local_file)
             all_entries.extend(entries)
@@ -6167,21 +6632,34 @@ def extract_local_to_fused(agent_id: str, root: Path = None,
         return result
 
     # 确保融合层目录有 identity.json 和 device_config.json（write_memory 需要）
-    # 始终覆盖，确保路径正确（旧文件可能含硬编码路径）
+    # v2.0: 使用相对路径 + 从根 device_config.json 解析 source_device
+    # 这样 identity.json 可跨设备同步，无需每台机器改路径
     identity_path = fused_agent_dir / "identity.json"
     device_config_path = fused_agent_dir / "device_config.json"
+
+    # v2.0: 从根目录的 device_config.json 解析当前机器的 source_device
+    root_device_config = root / "device_config.json"
+    resolved_device = "unknown"
+    if root_device_config.exists():
+        try:
+            root_dc_raw = json.loads(root_device_config.read_text(encoding="utf-8"))
+            resolved_device = _resolve_source_device(root_dc_raw, root_device_config)
+        except Exception:
+            # _resolve_source_device 失败时回退到 unknown
+            pass
+
     identity_data = {
         "agent_id": agent_id,
         "display_name": agent_id,
         "primary_domain": "general",
-        "memory_root": str(fused_agent_dir),
-        "shared_root": str(root / "_shared"),
+        "memory_root": ".",
+        "shared_root": "../_shared",
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     identity_path.write_text(json.dumps(identity_data, indent=2, ensure_ascii=False), encoding="utf-8")
     if not device_config_path.exists():
         device_config_path.write_text(
-            json.dumps({"source_device": "extracted"}, indent=2, ensure_ascii=False),
+            json.dumps({"source_device": resolved_device}, indent=2, ensure_ascii=False),
             encoding="utf-8"
         )
 
@@ -6323,7 +6801,7 @@ def extract_local_to_fused(agent_id: str, root: Path = None,
             id=memory_id,
             agent_id=agent_id,
             timestamp=timestamp,
-            source_device="extracted",
+            source_device=resolved_device,
             domain="general",
             tags=tags,
             confidence=confidence,

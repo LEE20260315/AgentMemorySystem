@@ -118,6 +118,17 @@ class SyncState:
 
     def _load(self) -> dict:
         if not self.state_path.exists():
+            # v2.0: 尝试从 LOCALAPPDATA 备份路径加载
+            import os
+            local_appdata = os.environ.get("LOCALAPPDATA", "")
+            if local_appdata:
+                fallback_path = Path(local_appdata) / "AgentMemorySystem" / ".sync_state.json"
+                if fallback_path.exists():
+                    try:
+                        with open(fallback_path, "r", encoding="utf-8") as f:
+                            return json.load(f)
+                    except (json.JSONDecodeError, OSError):
+                        pass
             return {}
         try:
             with open(self.state_path, "r", encoding="utf-8") as f:
@@ -126,13 +137,31 @@ class SyncState:
             return {}
 
     def save(self):
+        """保存状态到磁盘。
+
+        v2.0 改进：使用 _safe_write_text 替代直接写入，
+        支持重试和原子替换，避免 OneDrive 文件锁导致静默失败。
+        """
+        import logging
+        logger = logging.getLogger(__name__)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(self.state_path, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, ensure_ascii=False, indent=2)
-        except PermissionError:
-            # 文件被其他进程锁定，静默跳过
-            pass
+            from safe_io import _safe_write_text
+            content = json.dumps(self.state, ensure_ascii=False, indent=2)
+            if not _safe_write_text(self.state_path, content):
+                # 主路径失败（OneDrive 锁？），尝试 LOCALAPPDATA 备份路径
+                import os
+                local_appdata = os.environ.get("LOCALAPPDATA", "")
+                if local_appdata:
+                    fallback_dir = Path(local_appdata) / "AgentMemorySystem"
+                    fallback_dir.mkdir(parents=True, exist_ok=True)
+                    fallback_path = fallback_dir / ".sync_state.json"
+                    _safe_write_text(fallback_path, content)
+                    logger.warning(
+                        "sync_state 主路径写入失败，已保存到备份路径: {}".format(fallback_path))
+        except Exception as e:
+            # 尽力而为，不让状态保存失败中断同步
+            logger.warning("sync_state 保存失败: {}".format(e))
 
     def is_duplicate(self, agent_id: str, content: str) -> bool:
         h = content_hash(content)
@@ -182,6 +211,18 @@ class SyncState:
 
         # 保守模式 2：只有 legacy marker 没有新 marker
         if legacy_count > 0 and not actual_hashes:
+            # v2.0 修复：legacy marker 超阈值时强制清除 SyncState 打破死锁
+            # 阈值设为 50：覆盖 codepilot(84)、codebuddy(72) 等中等污染场景
+            FORCE_CLEAR_THRESHOLD = 50
+            if legacy_count >= FORCE_CLEAR_THRESHOLD:
+                if agent_id in self.state:
+                    old_count = len(self.state[agent_id])
+                    self.state[agent_id] = {}
+                    result["removed"] = old_count
+                    result["kept"] = 0
+                    result["force_cleared"] = True
+                return result
+            # 少量 legacy 时保持保守
             result["conservative"] = True
             return result
 
@@ -311,7 +352,9 @@ class BaseMemoryWriter(ABC):
 
         # 默认实现走与 extract_hashes_via_sync_marker 同样的"h: 字段"策略
         hashes = self._parse_marker_hashes(text)
-        legacy = self._count_legacy_markers(text) - len(hashes)
+        # v2.0.2: _count_legacy_markers 现在只统计真正的 legacy（无 h: 字段）
+        # 不再需要减去 len(hashes)
+        legacy = self._count_legacy_markers(text)
         return {"hashes": hashes, "legacy": legacy, "file_present": True}
 
     def extract_hashes_in_target(
@@ -332,6 +375,192 @@ class BaseMemoryWriter(ABC):
                 "extract_hashes_in_target 失败({}): {}".format(type(self).__name__, e)
             )
             return set()
+
+    # ----------------------- helpers -----------------------
+    def _enforce_write_volume_limit(
+        self,
+        target_file: Path,
+        content: str,
+        agent_id: str,
+        preserve_tail: bool = True,
+    ) -> tuple:
+        """写回前体积保护（方案 0.5.6）。
+
+        在写入前检查 content 大小，若超限则从前面截断旧内容，
+        保留最新的条目（preserve_tail=True）。
+
+        适用于"追加模式"的 writer（Hermes MEMORY.md, Trae user_profile.md），
+        content 已包含旧内容 + 新追加的记忆。
+
+        Parameters
+        ----------
+        target_file : Path
+            要写入的目标文件（仅用于日志，不实际读取）
+        content : str
+            计划写入的完整内容（旧 + 新）
+        agent_id : str
+            Agent ID，用于日志
+        preserve_tail : bool
+            True: 超限时保留尾部（最新内容），截断头部（旧内容）
+            False: 超限时保留头部，截断尾部
+
+        Returns
+        -------
+        tuple (adjusted_content: str, was_truncated: bool, info: str)
+        """
+        # 读取体积策略
+        try:
+            from sync_engine import SyncEngine
+            engine = SyncEngine.__new__(SyncEngine)
+            engine.config = get_config()
+            engine.logger = get_logger()
+            engine.root = target_file.parent
+            policy = engine._load_volume_policy()
+            limits = policy.get("limits", {})
+            file_limits = limits.get("memory_private_md", {})
+            max_size_kb = file_limits.get("max_size_kb", 256)
+            max_lines = file_limits.get("max_lines", 3000)
+        except Exception:
+            max_size_kb = 256
+            max_lines = 3000
+
+        max_size_bytes = max_size_kb * 1024
+        content_bytes = content.encode("utf-8")
+        content_size = len(content_bytes)
+        content_lines = len(content.splitlines())
+
+        if content_size <= max_size_bytes and content_lines <= max_lines:
+            return (content, False, "未超限，无需截断")
+
+        # 超限：按 front matter 边界截断
+        if preserve_tail:
+            # 保留尾部：从前面删除旧内容
+            # 计算需要保留的最大字节数
+            target_bytes = int(max_size_bytes * 0.9)
+
+            # 从头部开始截断，找到 target_bytes 之后的内容
+            # 但要确保不切断 front matter 块
+            truncated = self._truncate_head_at_boundary(content, target_bytes)
+        else:
+            # 保留头部：从后面截断
+            truncated = self._truncate_at_boundary(content, target_bytes)
+
+        info = "体积保护: {}KB/{}行 → {}KB/{}行 (限 {}KB/{}行)".format(
+            content_size // 1024,
+            content_lines,
+            len(truncated.encode("utf-8")) // 1024,
+            len(truncated.splitlines()),
+            max_size_kb,
+            max_lines
+        )
+
+        self.logger.info("{} 体积保护触发: {}".format(agent_id, info))
+        return (truncated, True, info)
+
+    def _truncate_head_at_boundary(self, text: str, target_bytes: int) -> str:
+        """从头部截断文本，保留尾部 target_bytes 字节的内容。
+
+        策略：
+        1. 找到从头部开始需要丢弃的字节数 = total - target_bytes
+        2. 从该位置往后找最近的 front matter 开始标记（^---$ 行）
+        3. 从该 front matter 开始保留
+
+        如果没有 front matter，则按段落/行边界截断。
+        """
+        import re
+
+        encoded = text.encode("utf-8")
+        total_bytes = len(encoded)
+        if total_bytes <= target_bytes:
+            return text
+
+        # 需要丢弃的字节数
+        drop_bytes = total_bytes - target_bytes
+
+        # 安全解码 drop_bytes 位置
+        truncated_head = encoded[:drop_bytes]
+        try:
+            truncated_head.decode("utf-8")
+            # 找到 drop_bytes 之后的文本
+            remaining = encoded[drop_bytes:].decode("utf-8")
+        except UnicodeDecodeError:
+            # 回退到字符级处理
+            char_pos = 0
+            byte_pos = 0
+            for ch in text:
+                if byte_pos + len(ch.encode("utf-8")) > drop_bytes:
+                    break
+                byte_pos += len(ch.encode("utf-8"))
+                char_pos += 1
+            remaining = text[char_pos:]
+
+        # 从 remaining 开头找最近的 front matter 开始标记（^---$ 行）
+        # 如果 remaining 不是以 --- 开头，往后找第一个 --- 行
+        lines = remaining.splitlines()
+        start_line = 0
+        for i, line in enumerate(lines):
+            if re.match(r"^---\s*$", line):
+                start_line = i
+                break
+        else:
+            # 没有 front matter，按段落边界
+            # 找第一个空行后的内容
+            for i, line in enumerate(lines):
+                if not line.strip() and i > 0:
+                    start_line = i + 1
+                    break
+
+        result_lines = lines[start_line:]
+        return "\n".join(result_lines)
+
+    def _truncate_at_boundary(self, text: str, max_bytes: int) -> str:
+        """按 front matter 边界截断文本，不超过 max_bytes。
+
+        策略：
+        1. 按字节累积，找到不超过 max_bytes 的位置
+        2. 从该位置往前找最近的 front matter 结束标记（^---$ 行）
+        3. 截断到该边界，保证不切断 front matter 块
+
+        如果没有 front matter，则按行截断。
+        """
+        import re
+
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+
+        # 找到不超过 max_bytes 的字符位置（UTF-8 安全解码）
+        cut_pos = 0
+        for i, ch in enumerate(text):
+            if cut_pos + len(ch.encode("utf-8")) > max_bytes:
+                break
+            cut_pos += len(ch.encode("utf-8"))
+        # text[:cut_pos] 可能不准确，用字节切片再解码
+        truncated_bytes = encoded[:max_bytes]
+        # 安全解码（可能截断在多字节字符中间）
+        try:
+            truncated_text = truncated_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            # 回退一位直到能解码
+            for i in range(1, 4):
+                try:
+                    truncated_text = truncated_bytes[:-i].decode("utf-8")
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                truncated_text = truncated_bytes[:max_bytes // 2].decode("utf-8", errors="ignore")
+
+        # 从截断点往前找最近的 front matter 结束标记（^---$）
+        # 避免切断正在进行的 front matter 块
+        lines = truncated_text.splitlines()
+        cut_line = len(lines)
+        for i in range(len(lines) - 1, 0, -1):
+            if re.match(r"^---\s*$", lines[i]):
+                cut_line = i + 1  # 保留到这一行（包含 ---）
+                break
+
+        return "\n".join(lines[:cut_line]) + "\n"
 
     # ----------------------- helpers -----------------------
     def _read_target_text_safe(self, target_path: Path) -> tuple:
@@ -385,9 +614,18 @@ class BaseMemoryWriter(ABC):
         return hashes
 
     def _count_legacy_markers(self, text: str) -> int:
-        """统计所有 [sync:...] marker 总数（含已迁移为含 h: 的）。"""
+        """统计真正的 legacy marker 数量（无 h: 字段的 [sync:<id>] 格式）。
+
+        v2.0.2 修正：原实现统计所有 [sync:...] marker（含新格式），
+        导致 legacy 计数被高估，触发保守模式死锁。
+        正确语义：legacy = 仅含 [sync:<id>] 但无 |h: 字段的旧格式 marker。
+        """
         import re
-        return len(re.findall(r"\[sync:[^\]]+\]", text or ""))
+        if not text:
+            return 0
+        # 匹配 [sync:...] 但排除含 |h: 的（新格式）
+        # 用负向前瞻：[sync:XXX] 其中 XXX 不含 |h:
+        return len(re.findall(r"\[sync:(?![^\]]*\|h:)[^\]]+\]", text))
 
     # ------------------------------------------------------------------
     # 污染检测与自愈（通用）：防止回声污染雪崩
@@ -962,26 +1200,28 @@ class TraeMemoryWriter(BaseMemoryWriter):
                 content = self._repair_polluted_file(
                     profile_path, content,
                     clean_prefix="# Trae User Profile\n\nThis file is managed by Trae. "
-                                  "The ## Shared Knowledge section below is used by the "
-                                  "multi-agent memory sync system.",
+                                  "The section below is used by the multi-agent memory sync system.",
                     section_header=self.SECTION_HEADER,
                     sync_state=self.sync_state,
                     agent_id=agent_id,
                 )
 
             # ---- 段头去重：只保留首个 ## Shared Knowledge ----
-            # 防止历史污染遗留的多个段头导致解析混乱
-            section_count = content.count(self.SECTION_HEADER)
-            if section_count > 1:
+            # v2.0 修复：用行级正则匹配而非子串匹配，避免 clean_prefix 中的
+            # "## Shared Knowledge" 子串导致误切割
+            import re as _re
+            section_pattern = _re.compile(r"(?m)^##\s+Shared Knowledge\s*$")
+            section_matches = list(section_pattern.finditer(content))
+            if len(section_matches) > 1:
                 self.logger.warning(
-                    "Trae: 检测到 {} 个重复段头, 截断保留首个".format(section_count)
+                    "Trae: 检测到 {} 个重复段头, 截断保留首个".format(len(section_matches))
                 )
-                # 保留首个 SECTION_HEADER 之前的本体 + 首个段头之后到第二个段头之前的内容
-                parts = content.split(self.SECTION_HEADER, 2)
-                prefix = parts[0].rstrip()
-                first_section = parts[1] if len(parts) > 1 else ""
-                content = prefix + "\n\n" + self.SECTION_HEADER + first_section
-            elif self.SECTION_HEADER not in content:
+                # 保留首个段头之前 + 首个段头之后到第二个段头之前的内容
+                first_end = section_matches[0].end()
+                if len(section_matches) > 1:
+                    second_start = section_matches[1].start()
+                    content = content[:first_end] + content[first_end:second_start].rstrip() + "\n"
+            elif not section_matches:
                 content = content.rstrip() + "\n\n" + self.SECTION_HEADER + "\n"
 
             # 追加记忆
@@ -992,6 +1232,13 @@ class TraeMemoryWriter(BaseMemoryWriter):
                     marker, clean_content, mem.agent_id, mem.timestamp[:10]
                 )
                 content = content.rstrip() + entry
+
+            # v2.0.3: 写回前体积保护（方案 0.5.6）
+            content, was_truncated, vol_info = self._enforce_write_volume_limit(
+                profile_path, content, agent_id, preserve_tail=True
+            )
+            if was_truncated:
+                self.logger.info("Trae: {}".format(vol_info))
 
             # 写入（用 _safe_write_text 绕过文件锁）
             if not _safe_write_text(profile_path, content):
@@ -1054,19 +1301,24 @@ class TraeMemoryWriter(BaseMemoryWriter):
             self._repair_polluted_file(
                 profile_path, text,
                 clean_prefix="# Trae User Profile\n\nThis file is managed by Trae. "
-                              "The ## Shared Knowledge section below is used by the "
-                              "multi-agent memory sync system.",
+                              "The section below is used by the multi-agent memory sync system.",
                 section_header=self.SECTION_HEADER,
                 sync_state=self.sync_state,
                 agent_id=agent_id,
             )
             # 重建后文件无 sync marker,返回空集合让 reconciler 清理 orphan state
-            return {"hashes": set(), "legacy": 0, "file_present": True}
+            return {"hashes": set(), "legacy": 0, "file_present": True, "repaired": True}
 
         # ---- 只扫首个 SECTION_HEADER 段 ----
-        # 防止多个重复段头导致 legacy 数量爆炸
-        parts = text.split(self.SECTION_HEADER, 2)
-        tail = parts[1] if len(parts) > 1 else ""
+        # v2.0 修复：用行级正则匹配而非子串 split，避免 clean_prefix 中的
+        # "## Shared Knowledge" 子串导致错误切割
+        import re as _re
+        section_pattern = _re.compile(r"(?m)^##\s+Shared Knowledge\s*$")
+        section_match = section_pattern.search(text)
+        if section_match:
+            tail = text[section_match.end():]
+        else:
+            tail = ""
         for line in tail.splitlines():
             meta = parse_sync_marker(line)
             if not meta:
@@ -1200,6 +1452,13 @@ class HermesMemoryWriter(BaseMemoryWriter):
                     marker, clean_content, mem.agent_id, mem.timestamp[:10]
                 )
                 content = content.rstrip() + entry
+
+            # v2.0.3: 写回前体积保护（方案 0.5.6）
+            content, was_truncated, vol_info = self._enforce_write_volume_limit(
+                md_path, content, agent_id, preserve_tail=True
+            )
+            if was_truncated:
+                self.logger.info("Hermes: {}".format(vol_info))
 
             # 写入（用 _safe_write_text 绕过文件锁）
             if not _safe_write_text(md_path, content):
@@ -1384,6 +1643,13 @@ class GenericMarkdownWriter(BaseMemoryWriter):
                 )
                 content = content.rstrip() + entry
 
+            # v2.0.3: 写回前体积保护（方案 0.5.6）
+            content, was_truncated, vol_info = self._enforce_write_volume_limit(
+                md_path, content, agent_id, preserve_tail=True
+            )
+            if was_truncated:
+                self.logger.info("通用 Writer ({}): {}".format(agent_id, vol_info))
+
             # 用 _safe_write_text 写入（绕过文件锁）
             if not _safe_write_text(md_path, content):
                 result.errors.append("⚠ 通用 Writer 写入失败（含重试+原子替换）: {}".format(md_path))
@@ -1498,6 +1764,26 @@ WRITER_REGISTRY = {
     "pi-web": GenericMarkdownWriter,   # v1.3.7: pi-web 支持
     "pi": GenericMarkdownWriter,
     "clawdbot": GenericMarkdownWriter,
+    # v2.1 新增 Agent 写回映射
+    "workbuddy": GenericMarkdownWriter,       # WorkBuddy IDE
+    "workbuddy-appdata": GenericMarkdownWriter,
+    "qwen": GenericMarkdownWriter,            # Qwen Code CLI
+    "qwen-appdata": GenericMarkdownWriter,
+    "qoder": GenericMarkdownWriter,           # Qoder IDE
+    "qoder-appdata": GenericMarkdownWriter,
+    "qwenpaw": GenericMarkdownWriter,         # QwenPaw
+    "gemini-cli": GenericMarkdownWriter,      # Gemini CLI
+    "gemini": GenericMarkdownWriter,
+    "opencode": GenericMarkdownWriter,        # OpenCode
+    "codex": GenericMarkdownWriter,           # Codex CLI 2026
+    "cline": GenericMarkdownWriter,           # Cline
+    "cursor": GenericMarkdownWriter,          # Cursor
+    "windsurf": GenericMarkdownWriter,        # Windsurf
+    "aider": GenericMarkdownWriter,           # Aider
+    "roo-code": GenericMarkdownWriter,        # Roo Code
+    "continue": GenericMarkdownWriter,        # Continue
+    "alphaclaw": GenericMarkdownWriter,       # AlphaClaw
+    "copilot": GenericMarkdownWriter,         # GitHub Copilot
 }
 
 # v1.3.7: 凡是 generic- 开头的未知 agent，自动使用 GenericMarkdownWriter

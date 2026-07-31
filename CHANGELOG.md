@@ -7,6 +7,67 @@
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-07-31
+
+### Fixed
+
+- **圖示統一**：修復歷史遺留的多圖示分歧問題
+  - 托盤圖示路徑從獨立的 `tray_icon.png` 改為與視窗相同的 `app_icon.ico`（`_TRAY_ICON_PATH = _ICON_PATH`）
+  - `_create_default_icon()` fallback 不再生成藍色圓形 M 圖標（與 app_icon 內容差異 56.9%~61.9%），改為從 `app_icon.png` 加載並轉為 ICO
+  - 刪除冗餘圖示資源 `assets/tray_icon.png`、`assets/tray_icon_64.png`
+  - 保證視窗、任務欄、托盤三個場景圖示完全一致
+
+### Removed
+
+- **過程性文件清理**：
+  - 刪除 `DEVLOG.md`（開發日誌，內容已併入 CHANGELOG.md）
+  - 刪除 `test_memory.py`（舊測試套件，已由 `test_full.py` 取代）
+  - 刪除 `docs/multi_agent_memory_sync_design_v1.2.md`（過程性設計文檔）
+  - 刪除 `docs/assets/banner-prompt.md`（過程性提示詞文檔）
+  - 刪除 `tools/migrate_v13_to_v14.py`（一次性遷移腳本，已完成歷史使命）
+  - 刪除 `assets/tray_icon.png`、`assets/tray_icon_64.png`（冗餘圖示資源）
+
+## [2.0.3] - 2026-07-31
+
+### Added
+
+- **寫回前體積保護（方案 0.5.6）**：`sync_writers.py` 的 `BaseMemoryWriter` 新增 `_enforce_write_volume_limit()` 方法，在 Hermes/Trae/GenericMarkdown writer 的 `write()` 寫入前檢查 content 大小，超限時按 front matter 邊界從頭部截斷舊內容，保留最新條目
+  - 新增 `_truncate_head_at_boundary()` 和 `_truncate_at_boundary()` 兩個邊界感知截斷方法
+  - 體積策略從 `volume_policy.json` 動態讀取，預設 256KB / 3000 行
+
+### Changed
+
+- **`agent_runtime_manual.md` 移除不可執行規則**：原要求 Agent 調用 `write_memory()` Python 函數，但 Agent 只能讀寫文件。改為「直接編輯 memory_private.md，在文件末尾追加 front matter 格式條目」的可執行指南
+  - `id` 字段從「由系統生成, 不可手編」改為「Agent 自行生成 `mem_YYYYMMDD_HHMMSS_XXXXXX`」
+  - 路徑權限從「通過 write_memory API」改為「直接編輯文件，遵循 §3 格式」
+
+- **`data/prompt.md` 消除硬編碼路徑**：原文件包含 `C:\Users\MR.Dong\...` 絕對路徑，改為占位符 `<AgentMemorySystem 數據根目錄>` 和 `<AgentMemorySystem 安裝目錄>`，並添加路徑替換說明
+
+- **`shrink_memory_files.py` 排序邏輯簡化**：原 6 次 sort/reverse 調用簡化為單次 `sorted()` + `reverse=True`，利用 priority 和 conf_rank 取反技巧實現三維排序（永久優先 → confidence 降序 → 時間倒序）
+
+## [2.0.2] - 2026-07-31
+
+### Fixed
+
+- **徹底解決回聲污染問題**：`memory_shared.md` 中殘留的 `[sync:...]` 標記和嵌套「— 來自 xxx (date)」導致 sync 引擎寫回的內容被再次提取為新記憶，形成正反饋循環
+  - `agent_memory.py` `_is_sync_generated_content()` 新增 RAW_JSON_START/END 包裝檢測和 2+ 個 echo marker 嵌套檢測
+  - `sync_engine.py` 新增 `_purge_polluted_entries()` 在每次同步前清理 DB 和 .md 中的污染條目
+  - `sync_engine.py` 新增 `_clean_md_files()` 從 front matter 格式的 .md 文件中移除污染條目塊
+- **`extract_local_to_fused()` 硬編碼 `source_device="extracted"`**：歷史遺留問題導致同步報告設備名顯示為「extracted」
+  - 改為從根目錄 `device_config.json` 解析當前機器的 source_device
+- **`extract_local_to_fused()` 使用絕對路徑寫 identity.json**：多機同步時路徑不可移植
+  - 改為相對路徑（`memory_root: "."`, `shared_root: "../_shared"`）
+- **`_count_legacy_markers()` 語義錯誤**：統計所有 `[sync:...]` marker（含新格式），導致 legacy 計數被高估，觸發保守模式死鎖
+  - 改為只統計無 `|h:` 字段的真正 legacy marker
+- **`extract_target_info()` legacy 計算重複減法**：`legacy = count - len(hashes)` 在新 `_count_legacy_markers` 語義下重複扣減
+  - 改為直接使用 `_count_legacy_markers()` 結果
+
+### Changed
+
+- 所有 `data/agent_*/identity.json` 統一改為相對路徑，支援跨設備 OneDrive 同步
+- `sync_engine.py` 同步流程新增「②.5 污染清理」階段，在提取前確保 DB 和 .md 乾淨
+- 測試套件 `test_full.py` 修正 6 個因 v2.0 API 變更而失敗的用例
+
 ## [1.4.0] - 2026-07-23
 
 ### Fixed

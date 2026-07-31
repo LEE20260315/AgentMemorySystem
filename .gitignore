@@ -47,6 +47,7 @@ sync_report.log
 .trae/
 .vscode/
 .idea/
+.claude/worktrees/
 
 # OneDrive 冲突副本
 *-NZTZ_*

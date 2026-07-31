@@ -59,7 +59,8 @@ def _resource_path(relative: str) -> Path:
     return base / relative
 
 _ICON_PATH = _resource_path("assets/app_icon.ico")
-_TRAY_ICON_PATH = _resource_path("assets/tray_icon.png")
+# v2.0.4: 统一图标——托盘也使用 app_icon.ico，避免不同场景显示不同图标
+_TRAY_ICON_PATH = _ICON_PATH
 
 # 进程级单实例互斥锁句柄：必须常驻，不能只保存在局部变量里
 # 否则函数返回后句柄可能被释放，后续重复启动会误判为首实例。
@@ -277,19 +278,23 @@ if sys.platform == "win32":
         return None
 
     def _create_default_icon():
-        """创建默认蓝色圆形 M 图标"""
+        """创建 fallback 图标（统一使用 app_icon.png 生成）
+
+        v2.0.4: 不再生成蓝色圆形 M 图标（与 app_icon 不一致），
+        改为从 app_icon.png 加载并转为 ICO，保证图标统一。
+        若 app_icon.png 也不可用，才回退到系统默认图标。
+        """
         try:
-            from PIL import Image, ImageDraw
-            img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
-            draw.ellipse([2, 2, 30, 30], fill="#4A90D9")
-            draw.text((9, 7), "M", fill="white")
-            ico_buf = str(_data_dir() / "_tray_default.ico")
-            Path(ico_buf).parent.mkdir(parents=True, exist_ok=True)
-            img.save(ico_buf, format="ICO", sizes=[(16, 16), (32, 32)])
-            hIcon = _shell32.ExtractIconW(0, ico_buf, 0)
-            if hIcon and hIcon > 1:
-                return hIcon
+            from PIL import Image
+            app_png = _resource_path("assets/app_icon.png")
+            if app_png.exists():
+                img = Image.open(app_png)
+                ico_buf = str(_data_dir() / "_tray_default.ico")
+                Path(ico_buf).parent.mkdir(parents=True, exist_ok=True)
+                img.save(ico_buf, format="ICO", sizes=[(16, 16), (32, 32)])
+                hIcon = _shell32.ExtractIconW(0, ico_buf, 0)
+                if hIcon and hIcon > 1:
+                    return hIcon
         except Exception:
             pass
         # 最终兜底：系统默认应用图标
