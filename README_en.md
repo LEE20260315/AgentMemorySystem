@@ -134,6 +134,15 @@ Local Agent Memory Files (Claude / Hermes / Trae / ...)
 - **Orchestration** (`sync_engine.py`) — Discover → Extract → Merge → Write-back
 - **UI** (`memory_sync_app.py`) — GUI + System tray + CLI
 
+## How knowledge actually makes agents smarter (v2.1.0)
+
+Instead of stacking thousands of raw memory lines into `memory_shared.md`, v2.1.0 adds a **knowledge distillation layer**:
+
+1. **`knowledge_brief.md`** (per agent) — generated on every sync; keeps only high/medium confidence, non-template-noise, deduplicated key points; clustered by domain (top 15 each), hard-capped at ≤20KB
+2. **Automatic entry injection** (idempotent) — sync appends a `## Shared Knowledge (auto-synced)` section pointing to the brief's absolute path in each agent's entry file (`MEMORY.md` / `user_profile.md` etc.); the `<!-- agent-memory:knowledge-brief -->` marker prevents duplicate injection
+
+The full shared memory remains in `memory_shared.md` (front matter format for deep search); the brief is the lightweight priority entry — both complement each other.
+
 ## Configuration
 
 `config.json` supports the following main options:

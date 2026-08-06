@@ -132,6 +132,24 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 - **編排層** (`sync_engine.py`) — 發現 → 提取 → 融合 → 寫回
 - **交互層** (`memory_sync_app.py`) — GUI + 系統匣 + CLI
 
+## 知識如何真正讓 Agent 變聰明（v2.1.0）
+
+傳統做法是把所有共享記憶全文堆疊進 `memory_shared.md`，Agent 啟動時
+要讀數千行原始內容，上下文被撐爆且信息密度極低。v2.1.0 新增**知識提煉層**：
+
+1. **`knowledge_brief.md` 知識簡報**（每個 Agent 一份）
+   - 每次同步自動生成，只保留 high/medium 置信度、非模板噪音、去重後的**核心要點**
+   - 按領域聚類，每個領域保留 top 15 條，總大小硬限制 ≤20KB
+   - Agent 啟動時讀這個文件就能掌握跨 Agent 的關鍵知識，而非數千行原始記憶
+2. **入口自動注入**（冪等）
+   - 同步時自動在各 Agent 本地入口文件（`MEMORY.md` / `user_profile.md` 等）追加
+     `## Shared Knowledge (auto-synced)` 引導節，指向知識簡報的絕對路徑
+   - 已注入過的（有 `<!-- agent-memory:knowledge-brief -->` marker）不再重複追加
+   - 這樣 Agent 下次會話開始時就會**主動讀取**共享知識，形成真正的跨 Agent 記憶閉環
+
+> 完整共享記憶仍保留在 `memory_shared.md`（front matter 格式，供深度檢索）；
+> 知識簡報是**輕量優先級**入口，兩者互補。
+
 ## 配置
 
 `config.json` 統轄諸參數：
