@@ -1,0 +1,40 @@
+name: CI
+
+# 自动化测试门禁：任何发往 main 的 PR 与 push 都必须跑通测试套件。
+# 测试失败时（python test_full.py 退出码 1）本作业失败，从而阻断合并。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # GUI 导入测试（test_memory_sync_app_imports 等）需要 tkinter
+      - name: Install system deps (tk)
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml pystray Pillow
+
+      - name: Run test suite
+        # test_full.py 在失败时以退出码 1 结束，使本步骤失败
+        run: python test_full.py

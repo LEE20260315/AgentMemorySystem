@@ -5,7 +5,43 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [2.1.0] - 2026-08-06
+
+### Fixed（稳定性）
+
+- **统一数据根目录**：修复历史分裂——`SyncEngine` 曾硬编码 `<repo>/data`，而 GUI/SyncState/BAT 启动器使用 `AgentMemory/`（AGENT_MEMORY_DATA_DIR），导致同步引擎与状态/日志各写各的目录
+  - `SyncEngine.root`、`detect_agents` 缓存、`memory_cli --root` 默认值、日志目录全部改为 `get_data_root()` 统一解析
+  - 新增 `tools/unify_data_root.py` 一次性迁移脚本，将 `data/` 真实数据合并到 `AgentMemory/`
+- **心跳写本地磁盘**：心跳日志主写入 `%LOCALAPPDATA%\AgentMemorySystem\heartbeat.log`，避免 OneDrive 锁阻塞主线程；数据根副本仍保留供跨设备诊断
+- **崩溃日志双写**：CRASH/APP EXIT 同时写本地磁盘与数据根，OneDrive 锁时崩溃信息不再丢失
+- **重启计数持久化**：崩溃重启计数写入数据根 `.restart_count`，正常退出时清除
+- **FTS 索引孤儿修复（核心体积问题）**：
+  - `MemoryDatabase` 新增 `delete_memory()` / `delete_memories()`，所有删除操作同步清理 `memories_fts`（历史 90%+ 孤儿行的根因）
+  - 替换全部 10+ 处裸 `DELETE FROM memories` 调用点（含 sync_engine 的批量过期删除）
+  - 新增 `repair_fts_orphans()` + `_repair_fts_if_needed()`，同步前自动检测修复
+  - 新增 `tools/repair_fts.py`：10 个数据库已从 88.65MB 压缩至 4.86MB（回收 83.79MB）
+- **旧数据清理**：`~/.agent_memory/`（6.8GB 历史遗留）重命名为 `~/.agent_memory_legacy_20260806` 移出使用路径（可恢复）
+
+### Added（智能感）
+
+- **知识简报 `knowledge_brief.md`**：每次同步为每个 Agent 生成精简知识摘要（top 15/域、非模板噪音、去重、≤20KB），替代让 Agent 加载数千行原始记忆
+- **Agent 入口知识注入**：在 Agent 本地入口文件（`MEMORY.md` / `user_profile.md` 等）自动追加 `## Shared Knowledge (auto-synced)` 引导节，幂等（marker 去重），让 Agent 启动时真正主动加载共享知识
+- **写回修复**：数据根统一后 reconcile 与状态对齐，写回从“提取 0/写回 0”恢复为实际生效（实测 492 条写回）
+
+### Changed（UI/UX）
+
+- **屏幕自适应**：设置对话框尺寸按屏幕可用空间裁剪（修复小屏 500x600 溢出）
+- **DPI 感知**：启动时启用 Per-Monitor DPI Aware，修复高分屏模糊/错位
+- **窗口尺寸自动保存**：用户拖拽主窗口大小后自动保存 geometry（防抖 1 秒）
+- **新增“打开数据目录”按钮**：一键定位数据根
+- **日志轮转调优**：`max_log_files=2`，日志目录统一到数据根 `.logs/`，清理旧 9.8MB 轮转文件
+
+### Fixed（其他）
+
+- `detect_agents` 缓存路径统一到数据根（旧版硬编码 `~/.agent_memory`）
+- `memory_cli` 默认 root 从硬编码 `<repo>/data` 改为 `get_data_root()`
+
+---
 
 ## [2.0.4] - 2026-07-31
 

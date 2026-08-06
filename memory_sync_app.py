@@ -1001,6 +1001,21 @@ class SyncMainWindow:
         # ---- 居中窗口（提前到 __init__ 避免 run() 时闪烁）----
         self._center_window()
 
+        # v2.1.0: 用户拖拽窗口大小后自动保存 geometry（防抖 1 秒）
+        self._geo_save_after = None
+
+        def _on_configure(_evt):
+            if self.root.state() == "iconic":
+                return
+            if self._geo_save_after:
+                try:
+                    self.root.after_cancel(self._geo_save_after)
+                except Exception:
+                    pass
+            self._geo_save_after = self.root.after(1000, self._save_window_geometry)
+
+        self.root.bind("<Configure>", _on_configure)
+
         # 关闭按钮 → 最小化到托盘（而非退出）
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1010,24 +1025,57 @@ class SyncMainWindow:
         self._heartbeat()
 
     def _heartbeat(self):
-        """每 5 分钟向 tray_error.log 写入一次心跳，用于诊断进程静默崩溃。
+        """每 5 分钟记录一次心跳，用于诊断进程静默崩溃。
 
-        崩溃后心跳停止，下次启动时可据此判断上次进程的存活时间。
+        v2.1.0 改进：
+        - 主心跳写入 LOCALAPPDATA（本地磁盘，避免 OneDrive 锁阻塞主线程）
+        - 额外同步一份到数据根（供跨设备诊断），写入失败不阻塞
         """
         try:
             self._heartbeat_counter += 1
-            _tray_log = _data_dir() / "tray_error.log"
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("HEARTBEAT #{} {} tray_active={} syncing={}\n".format(
-                    self._heartbeat_counter,
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    self._tray_nid is not None,
-                    getattr(self, "is_syncing", False),
-                ))
+            line = "HEARTBEAT #{} {} tray_active={} syncing={}\n".format(
+                self._heartbeat_counter,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                self._tray_nid is not None,
+                getattr(self, "is_syncing", False),
+            )
+            # 主心跳：本地磁盘（LOCALAPPDATA），避免 OneDrive 锁阻塞
+            import os as _os
+            local_dir = Path(_os.environ.get("LOCALAPPDATA", _os.path.expanduser("~"))) / "AgentMemorySystem"
+            try:
+                local_dir.mkdir(parents=True, exist_ok=True)
+                with open(local_dir / "heartbeat.log", "a", encoding="utf-8") as f:
+                    f.write(line)
+            except Exception:
+                pass
+            # 辅助：数据根（OneDrive）——失败不影响主流程
+            try:
+                _tray_log = _data_dir() / "tray_error.log"
+                with open(_tray_log, "a", encoding="utf-8") as f:
+                    f.write(line)
+            except Exception:
+                pass
         except Exception:
             pass
         # 每 5 分钟一次
         self.root.after(300000, self._heartbeat)
+
+    def _save_window_geometry(self):
+        """v2.1.0: 保存当前窗口尺寸到设置（用户拖拽后生效）。"""
+        try:
+            geo = self.root.geometry()
+            # 形如 "880x620+100+50"，只保留尺寸部分
+            size_part = geo.split("+")[0]
+            if "x" in size_part:
+                w, h = size_part.split("x")
+                if w.isdigit() and h.isdigit():
+                    new_geo = "{}x{}".format(w, h)
+                    cur = load_settings()
+                    if cur.get("window_geometry") != new_geo:
+                        cur["window_geometry"] = new_geo
+                        save_settings(cur)
+        except Exception:
+            pass
 
     def _center_window(self):
         """将主窗口居中显示，并确保不超出屏幕工作区。"""
@@ -1260,7 +1308,28 @@ class SyncMainWindow:
         self.minimize_btn = ttk.Button(
             btn_box, text="最小化到托盘", style="Secondary.TButton", command=self._minimize_to_tray,
         )
-        self.minimize_btn.pack(fill=tk.X, ipady=4)
+        self.minimize_btn.pack(fill=tk.X, pady=(0, 8), ipady=4)
+
+        # v2.1.0: 新增"打开数据目录"按钮（用户常找不到数据在哪）
+        self.open_dir_btn = ttk.Button(
+            btn_box, text="打开数据目录", style="Secondary.TButton", command=self._open_data_dir,
+        )
+        self.open_dir_btn.pack(fill=tk.X, ipady=4)
+
+    def _open_data_dir(self):
+        """打开数据根目录（v2.1.0 新增）。"""
+        try:
+            import subprocess
+            data_dir = _data_dir()
+            data_dir.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", str(data_dir)], creationflags=0x08000000)
+            else:
+                import os
+                os.startfile(str(data_dir))
+            self._log("已打开数据目录: {}".format(data_dir))
+        except Exception as e:
+            self._log("打开数据目录失败: {}".format(e), level="error")
 
     def _make_status_dot_image(self, color: str, size: int = 16):
         """用 PIL 绘制带光晕的抗锯齿状态点。
@@ -2098,6 +2167,13 @@ class SyncMainWindow:
 
     def _quit(self, icon=None, item=None):
         """退出程序"""
+        # v2.1.0: 正常退出时清除重启计数，避免历史崩溃影响下次启动
+        try:
+            _rc = _data_dir() / ".restart_count"
+            if _rc.exists():
+                _rc.unlink()
+        except Exception:
+            pass
         self._remove_tray_icon()
         self.root.after(0, self.root.destroy)
 
@@ -2206,8 +2282,13 @@ class SettingsDialog:
 
         self.win = tk.Toplevel(parent)
         self.win.title("设置")
-        self.win.geometry("500x600")
-        self.win.minsize(480, 520)
+        # v2.1.0: 屏幕自适应 —— 根据可用屏幕空间裁剪尺寸，避免小屏溢出
+        _screen_w = parent.winfo_screenwidth()
+        _screen_h = parent.winfo_screenheight()
+        _w = min(500, max(440, _screen_w - 80))
+        _h = min(600, max(400, _screen_h - 140))
+        self.win.geometry("{}x{}".format(_w, _h))
+        self.win.minsize(min(440, _w), min(420, _h))
         self.win.transient(parent)
         self.win.grab_set()
         self.win.configure(bg=COLORS["bg"])
@@ -2765,16 +2846,33 @@ def _try_powershell_relocate(exe_path: Path):
 
 
 def _write_crash_log(exc_type, exc_value, exc_tb):
-    """将未捕获异常写入 tray_error.log，便于事后排查。"""
+    """将未捕获异常写入 tray_error.log，便于事后排查。
+
+    v2.1.0: 同时写本地磁盘（LOCALAPPDATA），避免 OneDrive 锁导致崩溃信息丢失。
+    """
+    import os as _os
+    lines = []
+    lines.append("\n=== CRASH {} ===\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    lines.append("Exception: {}:{}\n".format(exc_type.__name__ if exc_type else "Unknown", exc_value))
+    if exc_tb:
+        import io
+        buf = io.StringIO()
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=buf)
+        lines.append(buf.getvalue())
+    lines.append("=== END CRASH ===\n\n")
+    content = "".join(lines)
     try:
         _tray_log = _data_dir() / "tray_error.log"
         _tray_log.parent.mkdir(parents=True, exist_ok=True)
         with open(_tray_log, "a", encoding="utf-8") as f:
-            f.write("\n=== CRASH {} ===\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            f.write("Exception: {}:{}\n".format(exc_type.__name__ if exc_type else "Unknown", exc_value))
-            if exc_tb:
-                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
-            f.write("=== END CRASH ===\n\n")
+            f.write(content)
+    except Exception:
+        pass
+    try:
+        local_dir = Path(_os.environ.get("LOCALAPPDATA", _os.path.expanduser("~"))) / "AgentMemorySystem"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        with open(local_dir / "crash.log", "a", encoding="utf-8") as f:
+            f.write(content)
     except Exception:
         pass
 
@@ -2803,12 +2901,21 @@ def _setup_crash_handlers():
     if hasattr(threading, "excepthook"):
         threading.excepthook = _threading_excepthook
 
-    # atexit 记录正常退出
+    # atexit 记录正常退出（v2.1.0: 主记录到本地，避免 OneDrive 锁阻塞退出流程）
     def _on_exit():
+        import os as _os
+        line = "APP EXIT {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        try:
+            local_dir = Path(_os.environ.get("LOCALAPPDATA", _os.path.expanduser("~"))) / "AgentMemorySystem"
+            local_dir.mkdir(parents=True, exist_ok=True)
+            with open(local_dir / "heartbeat.log", "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
         try:
             _tray_log = _data_dir() / "tray_error.log"
             with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("APP EXIT {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                f.write(line)
         except Exception:
             pass
 
@@ -2816,6 +2923,16 @@ def _setup_crash_handlers():
 
 
 def main():
+    # v2.1.0: 启用 Per-Monitor DPI 感知，修复高分屏下窗口/字体模糊与布局错位
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
     # OneDrive 内运行会导致 Shell_NotifyIconW 拒绝访问，优先迁移到本地
     _ensure_local_install()
 
@@ -2837,7 +2954,7 @@ def main():
 
     # 启动诊断日志（文件可能被锁定，不能因此崩溃）
     _diag_lines = [
-        "APP STARTING v3-final\n",
+        "APP STARTING v2.1.0\n",
         f"  _safe_home() = {_home}\n",
         f"  _data_dir() = {_data_dir()}\n",
         f"  _original_home() = {_original_home()}\n",
@@ -2877,8 +2994,15 @@ def main():
         return
 
     # 用 try/except 包裹 mainloop，崩溃时记录日志后自动重启
+    # v2.1.0: 重启计数持久化到数据根，配合看门狗跨进程追踪
     _max_restarts = 3
     _restart_count = 0
+    _restart_file = _data_dir() / ".restart_count"
+    try:
+        if _restart_file.exists():
+            _restart_count = int(_restart_file.read_text(encoding="utf-8").strip() or "0")
+    except Exception:
+        _restart_count = 0
 
     while True:
         try:
@@ -2890,6 +3014,10 @@ def main():
         except Exception as e:
             _write_crash_log(type(e), e, sys.exc_info()[2])
             _restart_count += 1
+            try:
+                _restart_file.write_text(str(_restart_count), encoding="utf-8")
+            except Exception:
+                pass
             if _restart_count > _max_restarts:
                 # 超过重启上限，放弃并提示用户
                 try:

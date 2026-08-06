@@ -207,7 +207,13 @@ class LogManager:
             config = get_config()
 
         if log_dir is None:
-            log_dir = Path(__file__).parent / config.get("paths.log_dir", ".logs")
+            # v2.1.0: 日志统一到数据根目录（.logs），与 SyncState/DB 同根，
+            # 修复历史分裂：日志曾写在项目根 .logs/ 而数据在 AgentMemory/
+            try:
+                from safe_io import get_data_root
+                log_dir = get_data_root() / config.get("paths.log_dir", ".logs")
+            except Exception:
+                log_dir = Path(__file__).parent / config.get("paths.log_dir", ".logs")
 
         self.log_dir = log_dir
         self.log_dir.mkdir(exist_ok=True)
@@ -1455,6 +1461,90 @@ class MemoryDatabase:
         """单条插入（兼容旧接口；大批量请用 insert_memories_batch）"""
         return self.insert_memories_batch([entry]) > 0
 
+    def delete_memory(self, memory_id: str) -> bool:
+        """删除记忆（v2.1.0: 同步清理 FTS 索引，修复孤儿膨胀）。
+
+        历史 bug：代码中大量裸 `DELETE FROM memories`，从未同步删除
+        memories_fts，导致 FTS 索引只增不减（memories 53 行但 fts 1292+
+        行，90%+ 孤儿）。所有删除操作必须走此方法。
+        """
+        try:
+            # 顺序：先删 FTS，再删关联表，最后删主表
+            self.conn.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
+            self.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,))
+            cur = self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            self.conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            return False
+
+    def delete_memories(self, memory_ids) -> int:
+        """批量删除记忆（同步清理 FTS 索引）。返回删除条数。"""
+        ids = list(memory_ids)
+        if not ids:
+            return 0
+        try:
+            self.conn.executemany(
+                "DELETE FROM memories_fts WHERE id = ?", [(i,) for i in ids])
+            self.conn.executemany(
+                "DELETE FROM memory_tags WHERE memory_id = ?", [(i,) for i in ids])
+            cur = self.conn.executemany(
+                "DELETE FROM memories WHERE id = ?", [(i,) for i in ids])
+            self.conn.commit()
+            return cur.rowcount if cur.rowcount is not None else len(ids)
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            return 0
+
+    def repair_fts_orphans(self) -> dict:
+        """修复 FTS 索引孤儿条目（v2.1.0）。
+
+        删除 memories_fts 中 id 不存在于 memories 的行，并重建索引去碎片。
+        返回 {removed, remaining, size_before, size_after}。
+        """
+        result = {"removed": 0, "remaining": 0}
+        try:
+            import os
+            if self.db_path.exists():
+                result["size_before"] = os.path.getsize(self.db_path)
+            # 删除孤儿 FTS 行（外部内容表会自动清理对应分片）
+            cur = self.conn.execute("""
+                DELETE FROM memories_fts
+                WHERE id IN (SELECT id FROM memories_fts WHERE id NOT IN (SELECT id FROM memories))
+            """)
+            result["removed"] = cur.rowcount
+            self.conn.commit()
+            # 剩余 FTS 行
+            cur = self.conn.execute("SELECT COUNT(*) FROM memories_fts")
+            result["remaining"] = cur.fetchone()[0]
+            # 重建索引整理碎片
+            try:
+                self.conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
+                self.conn.commit()
+            except Exception:
+                pass
+            # VACUUM 回收空间
+            try:
+                self.conn.execute("VACUUM")
+            except Exception:
+                pass
+            if self.db_path.exists():
+                result["size_after"] = os.path.getsize(self.db_path)
+            return result
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            return result
+
     def search_by_keyword(
         self,
         query: str,
@@ -2451,9 +2541,8 @@ class MemoryMerger:
         new_memory : MemoryEntry
             新记忆
         """
-        # 删除旧记忆
-        shared_db.conn.execute("DELETE FROM memories WHERE id = ?", (old_id,))
-        shared_db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (old_id,))
+        # 删除旧记忆（v2.1.0: 同步清理 FTS 索引）
+        shared_db.delete_memory(old_id)
 
         # 插入新记忆
         shared_db.insert_memory(new_memory)
@@ -2596,12 +2685,10 @@ class DeduplicationService:
 
                 seen_contents.add(memory.content)
 
-            # 执行删除
+            # 执行删除（v2.1.0: 同步清理 FTS 索引）
             if not dry_run:
                 for memory_id in to_remove:
-                    db.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-                    db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,))
-                db.conn.commit()
+                    db.delete_memory(memory_id)
                 stats["removed"] = len(to_remove)
             else:
                 stats["removed"] = 0
@@ -3650,8 +3737,7 @@ class MemoryOptimizer:
 
                     if not dry_run:
                         for mem in remove:
-                            db.conn.execute("DELETE FROM memories WHERE id = ?", (mem.id,))
-                            db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (mem.id,))
+                            db.delete_memory(mem.id)
 
                     stats["merged"] += len(memories) - 1
                     stats["removed"] += len(memories) - 1
@@ -3688,8 +3774,7 @@ class MemoryOptimizer:
             for memory in all_memories:
                 if memory.timestamp < cutoff_date:
                     if not dry_run:
-                        db.conn.execute("DELETE FROM memories WHERE id = ?", (memory.id,))
-                        db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory.id,))
+                        db.delete_memory(memory.id)
                     stats["removed"] += 1
                 else:
                     stats["kept"] += 1
@@ -4263,11 +4348,9 @@ class TieredStorageManager:
         with open(archive_file, "a", encoding="utf-8") as f:
             f.write(entry_text + "\n")
 
-        # 从主数据库删除
+        # 从主数据库删除（v2.1.0: 同步清理 FTS 索引）
         with MemoryDatabase(self.db_path) as db:
-            db.conn.execute("DELETE FROM memories WHERE id = ?", (memory.id,))
-            db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory.id,))
-            db.conn.commit()
+            db.delete_memory(memory.id)
 
     def get_storage_stats(self) -> dict:
         """
@@ -4395,8 +4478,7 @@ class SmartCompressor:
 
             if not dry_run:
                 for memory_id in to_remove:
-                    db.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-                    db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,))
+                    db.delete_memory(memory_id)
 
             # 第二步：合并相似内容（如果目标数量指定）
             if target_count and stats["total"] - stats["duplicates_removed"] > target_count:
@@ -4434,8 +4516,7 @@ class SmartCompressor:
 
                 if not dry_run:
                     for memory_id in merged_ids:
-                        db.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-                        db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,))
+                        db.delete_memory(memory_id)
 
             # 第三步：删除低分记忆（如果还需要进一步压缩）
             if target_count:
@@ -4451,8 +4532,7 @@ class SmartCompressor:
                     for memory, score in remaining:
                         if score < min_score:
                             if not dry_run:
-                                db.conn.execute("DELETE FROM memories WHERE id = ?", (memory.id,))
-                                db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory.id,))
+                                db.delete_memory(memory.id)
                             stats["low_score_removed"] += 1
 
                             current_count = stats["total"] - stats["duplicates_removed"] - stats["similar_merged"] - stats["low_score_removed"]
@@ -4798,9 +4878,8 @@ def expire_old_memories(memory_root: Path = None, dry_run: bool = False) -> dict
                 for memory in memories:
                     existing_content = append_memory_entry(existing_content, memory)
 
-                    # 从活动数据库中删除
-                    db.conn.execute("DELETE FROM memories WHERE id = ?", (memory.id,))
-                    db.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory.id,))
+                    # 从活动数据库中删除（v2.1.0: 同步清理 FTS 索引）
+                    db.delete_memory(memory.id)
 
                     result["archived"] += 1
 
@@ -4909,7 +4988,9 @@ def detect_agents(
             pass
 
     # 检查缓存
-    cache_path = Path.home() / ".agent_memory" / ".detected_agents.json"
+    # v2.1.0: 缓存路径统一到数据根目录（与 SyncState/引擎一致）
+    # 修复：旧版本硬编码 ~/.agent_memory，与 get_data_root() 分裂导致跨设备缓存失效
+    cache_path = get_data_root() / ".detected_agents.json"
     cache_ttl_hours = config.get("sync_tool.cache_ttl_hours", 24)
 
     if not force_redetect and cache_path.exists():

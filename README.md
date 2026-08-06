@@ -163,6 +163,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v2.1.0** | 2026-08 | **稳定性根治 + 智能感提升**：数据根目录统一（`data/` → `AgentMemory/`，修复 SyncEngine/GUI/状态三处分裂）；**FTS 索引孤儿清理**（删除操作统一走 `delete_memory()`，`tools/repair_fts.py` 实测回收 83.79MB：88.65MB→4.86MB）；写回策略修复（reconcile 与状态对齐，写回恢复实际生效）；**知识简报层**（`knowledge_brief.md` 精简摘要 + Agent 入口自动注入 `## Shared Knowledge` 引导，幂等）；心跳写本地磁盘、崩溃日志双写、重启计数持久化；`~/.agent_memory/` 6.8GB 历史遗留移出使用路径；UI 屏幕自适应 + Per-Monitor DPI + 窗口尺寸自动保存 + “打开数据目录”按钮；日志轮转调优 |
 | **v2.0.4** | 2026-07 | **圖示統一**（托盤/任務欄/視窗均使用 `app_icon.ico`，消除歷史遺留的多圖示分歧）；過程性文件清理（刪除 DEVLOG.md、test_memory.py、設計文檔、一次性遷移腳本、冗餘圖示資源，保留版本演變路徑） |
 | **v2.0.3** | 2026-07 | 寫回前體積保護（`_enforce_write_volume_limit`，超限按 front matter 邊界截斷舊內容）；`agent_runtime_manual.md` 重構（移除不可執行的 `write_memory()` API 規則，改為直接編輯 `memory_private.md`）；`prompt.md` 消除硬編碼路徑；`shrink_memory_files.py` 排序邏輯簡化（6 次 sort → 單次 sorted） |
 | **v2.0.2** | 2026-07 | **徹底根治回聲污染**：`_is_sync_generated_content` 新增 RAW_JSON/嵌套 echo marker 檢測；`_purge_polluted_entries` 同步前自動清理 DB 和 .md 污染條目；`_count_legacy_markers` 語義修正；所有 `identity.json` 改為相對路徑（多機可移植）；`extract_local_to_fused` 從 `device_config.json` 解析 source_device |
@@ -205,6 +206,7 @@ AgentMemorySystem/
 ├── safe_io.py                # 安全讀寫與資料目錄解析
 ├── memory_sync_app.py        # GUI + 系統匣 + CLI
 ├── memory_cli.py             # CLI 入口
+├── watchdog.py               # 看門狗（崩溃自动重启，v2.1.0）
 ├── build.py                  # 封裝腳本（python build.py → EXE）
 ├── AgentMemorySync.bat       # 跨裝置啟動器（由 build.py 生成）
 ├── config.json               # 配置檔
@@ -212,7 +214,8 @@ AgentMemorySystem/
 ├── pyproject.toml            # 包元資訊
 ├── assets/                   # 圖示資源（app_icon.ico/png）
 ├── docs/                     # 文檔（USAGE_EXAMPLE.md + 螢幕截圖）
-├── tools/                    # 工具（shrink_memory_files.py、clean_legacy_markers.py）
+├── tools/                    # 工具（shrink_memory_files.py、repair_fts.py、unify_data_root.py）
+├── AgentMemory/              # 統一數據根目錄（agent_*/shared.db/同步狀態）
 ├── CHANGELOG.md              # 變更日誌
 ├── LICENSE                   # MIT 許可證
 └── test_full.py              # 測試套件

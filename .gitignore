@@ -62,3 +62,14 @@ nul
 
 # 用户上传（CodePilot）
 .codepilot-uploads/
+
+# 看门狗运行日志（本地）
+heartbeat.log
+crash.log
+watchdog.log
+
+# 本地工具运行数据（WorkBuddy 记忆等）
+.workbuddy/
+
+# Web 设计原型（未定稿）
+agent-memory-redesign/

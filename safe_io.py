@@ -11,11 +11,12 @@ from typing import Optional
 def get_data_root() -> Path:
     """获取数据根目录（用于同步数据、设置、备份等）。
 
-    解析优先级（v1.3.4 调整，简化为项目根优先）：
+    解析优先级（v2.1.0 修复打包模式路径分裂）：
     1. 环境变量 AGENT_MEMORY_DATA_DIR（启动器注入，含 BAT 启动器或 OneDrive 迁移）
     2. 项目根目录下的 AgentMemory/（跨设备同步靠 OneDrive 本身，
        项目文件夹在 OneDrive 下即可同步，无需独立探测 OneDrive 根）
-    3. 打包模式 fallback（frozen）：EXE 所在目录下的 data/
+    3. 打包模式 fallback（frozen）：从 EXE 所在目录向上回溯查找项目根 AgentMemory/，
+       或回退到 EXE 同级 data/（避免解析到 PyInstaller _internal/ 导致数据分裂）
     4. 开发模式 fallback：脚本所在目录下的 data/
     5. LOCALAPPDATA 标准位置（仅作为最后兜底）
 
@@ -45,35 +46,55 @@ def get_data_root() -> Path:
     # 2. 项目根目录下的 AgentMemory/（v1.3.4 改为优先项）
     # 项目文件夹本身在 OneDrive 下即可跨设备同步，无需独立探测 OneDrive 根
     project_root = Path(__file__).resolve().parent
-    project_data = project_root / "AgentMemory"
-    try:
-        project_data.mkdir(parents=True, exist_ok=True)
-        test = project_data / ".writable_test"
-        test.write_text("ok", encoding="utf-8")
-        test.unlink()
-        return project_data
-    except OSError:
-        pass
-
-    # 3. 打包模式 fallback：EXE 同级目录
     if getattr(sys, "frozen", False):
-        root = Path(sys.executable).parent / "data"
+        # v2.1.0: PyInstaller 下 __file__ 指向 _internal/，需从 EXE 位置向上回溯
+        # 到项目根（AgentMemorySync.bat 所在目录），避免数据写到 _internal/ 内
+        exe_dir = Path(sys.executable).resolve().parent
+        # 情形 A: EXE 位于项目根或 TEMP 本地副本，向上回溯寻找项目根特征
+        for candidate_root in (exe_dir, exe_dir.parent, exe_dir.parent.parent):
+            cand = candidate_root / "AgentMemory"
+            if cand.is_dir() and (cand / "sync_settings.json").exists():
+                project_root = candidate_root
+                break
+        else:
+            # 情形 B: 找不到项目根（例如 EXE 在 %TEMP% 下直接运行）
+            # → 不再 fallback 到 exe 同级 data/（TEMP 会被清理导致数据丢失），
+            #   而是直接跳过此级，交给 LOCALAPPDATA 兜底
+            project_root = None
+    project_data = None
+    if project_root is not None:
+        project_data = project_root / "AgentMemory"
+        try:
+            project_data.mkdir(parents=True, exist_ok=True)
+            test = project_data / ".writable_test"
+            test.write_text("ok", encoding="utf-8")
+            test.unlink()
+            return project_data
+        except OSError:
+            pass
+
+    # 3. 打包模式 fallback：EXE 同级目录（仅当能找到项目根时使用，
+    #    否则直接跳过，避免在 TEMP 下创建数据目录）
+    if getattr(sys, "frozen", False):
+        root = None  # 数据根应由 BAT 注入的环境变量决定；此处留空走兜底
     else:
         # 4. 开发模式 fallback：脚本所在目录
         root = Path(__file__).resolve().parent / "data"
 
     # 5. 最后兜底 LOCALAPPDATA
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        test = root / ".writable_test"
-        test.write_text("ok", encoding="utf-8")
-        test.unlink()
-        return root
-    except OSError:
-        local_appdata = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        fallback = local_appdata / "AgentMemorySystem"
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+    if root is not None:
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            test = root / ".writable_test"
+            test.write_text("ok", encoding="utf-8")
+            test.unlink()
+            return root
+        except OSError:
+            pass
+    local_appdata = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    fallback = local_appdata / "AgentMemorySystem"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 def _pending_path(target: Path) -> Path:

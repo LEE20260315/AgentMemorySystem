@@ -147,11 +147,15 @@ class SyncEngine:
         self.dry_run = dry_run
 
         # 确定 OneDrive 融合层根目录
+        # v2.1.0: 统一数据根解析 —— 与 GUI/SyncState/detect_agents 一致走 get_data_root()
+        # 修复历史分裂：引擎曾硬编码 <repo>/data，而 GUI/状态用 AgentMemory/（BAT 注入
+        # AGENT_MEMORY_DATA_DIR），导致同步引擎与状态/日志各写各的目录。
         memory_root = self.config.get("paths.memory_root", None)
         if memory_root and memory_root != "auto":
             self.root = Path(memory_root)
         else:
-            self.root = Path(__file__).parent / "data"
+            from safe_io import get_data_root
+            self.root = get_data_root()
         self.root.mkdir(parents=True, exist_ok=True)
 
         # 备份目录
@@ -262,6 +266,14 @@ class SyncEngine:
                         purge_result["purged"], purge_result["dbs_scanned"]))
                     if purge_result["purged"] >= 10:
                         self._emit("  ⚠ 检测到大量污染条目，建议运行 'python tools/shrink_memory_files.py' 清理 .md 文件")
+
+            # ②.6 v2.1.0: 修复 FTS 索引孤儿（历史膨胀），低频执行
+            # 只在同步开始时检查一次，孤儿超过阈值才重建，避免每次同步都 VACUUM
+            if not self.dry_run:
+                fts_result = self._repair_fts_if_needed()
+                if fts_result and fts_result.get("repaired", 0) > 0:
+                    self._emit("🧹 修复 FTS 索引孤儿: {} 条 (回收 {:.2f}MB)".format(
+                        fts_result["repaired"], fts_result.get("saved_mb", 0.0)))
 
             # ③ 提取各 Agent 记忆到融合层
             self._emit("融合层目录: {}".format(self.root))
@@ -403,6 +415,10 @@ class SyncEngine:
                 # 注意：即使无新记忆，也重建以修复可能的格式损坏。
                 if not self.dry_run:
                     self._write_shared_md(extract_id)
+                    # v2.1.0: 生成精简知识简报，供 Agent 轻量加载
+                    self._write_knowledge_brief(extract_id)
+                    # v2.1.0: 在 Agent 本地入口注入知识引用（幂等）
+                    self._inject_brief_pointer(extract_id)
 
             # ⑥ 保存去重状态
             self.sync_state.save()
@@ -424,6 +440,75 @@ class SyncEngine:
 
         self._emit("同步完成, 耗时 {:.1f} 秒".format(report.duration_seconds))
         return report
+
+    def _repair_fts_if_needed(self) -> dict:
+        """检查并修复数据根下所有 DB 的 FTS 孤儿索引（v2.1.0）。
+
+        历史 bug 导致 memories_fts 中堆积大量孤儿行（id 不在 memories 表），
+        数据库可膨胀到 13MB+ 而有效记忆仅 50 条。此方法在同步前检查，
+        孤儿比例超过阈值时执行修复 + VACUUM。
+
+        Returns
+        -------
+        dict
+            {"repaired": int, "saved_mb": float}；无孤儿返回 {"repaired": 0}
+        """
+        try:
+            import os as _os
+            dbs = list(self.root.glob("*.db")) + list(self.root.glob("agent_*/memories.db"))
+            total_repaired = 0
+            total_saved = 0.0
+            for db_path in dbs:
+                try:
+                    with MemoryDatabase(db_path) as db:
+                        # 表存在性检查
+                        has_fts = db.conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE name='memories_fts'"
+                        ).fetchone()
+                        has_mem = db.conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE name='memories'"
+                        ).fetchone()
+                        if not has_fts or not has_mem:
+                            continue
+                        fts_count = db.conn.execute(
+                            "SELECT COUNT(*) FROM memories_fts").fetchone()[0]
+                        mem_count = db.conn.execute(
+                            "SELECT COUNT(*) FROM memories").fetchone()[0]
+                        if fts_count <= max(mem_count, 1) * 2:
+                            continue  # 正常比例，无需修复
+                        size_before = db_path.stat().st_size if db_path.exists() else 0
+                        # 删除孤儿行
+                        cur = db.conn.execute(
+                            """DELETE FROM memories_fts
+                               WHERE id NOT IN (SELECT id FROM memories)"""
+                        )
+                        orphans = cur.rowcount
+                        db.conn.commit()
+                        if orphans > 0:
+                            try:
+                                db.conn.execute(
+                                    "INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
+                                db.conn.commit()
+                            except Exception:
+                                pass
+                            db.conn.close()
+                            # VACUUM 需独立连接（事务外）
+                            try:
+                                import sqlite3
+                                conn2 = sqlite3.connect(str(db_path), timeout=60)
+                                conn2.execute("VACUUM")
+                                conn2.close()
+                            except Exception:
+                                pass
+                            size_after = db_path.stat().st_size if db_path.exists() else 0
+                            total_repaired += orphans
+                            total_saved += (size_before - size_after) / 1024 / 1024
+                except Exception as e:
+                    self.logger.warning("FTS 修复失败 {}: {}".format(db_path, e))
+            return {"repaired": total_repaired, "saved_mb": total_saved}
+        except Exception as e:
+            self.logger.warning("FTS 修复扫描失败: {}".format(e))
+            return {"repaired": 0, "saved_mb": 0.0}
 
     def _load_shared_memories(self, agent_id: str, force_refresh: bool = False) -> list:
         """从融合层读取指定 Agent 的共享记忆
@@ -559,6 +644,231 @@ class SyncEngine:
         except Exception as e:
             self.logger.warning("写入 memory_shared.md 失败({}): {}".format(agent_id, e))
 
+    # ------------------------------------------------------------------
+    # v2.1.0: knowledge_brief.md 知识提炼层
+    # ------------------------------------------------------------------
+    _TEMPLATE_NOISE_MARKERS = (
+        "BOOTSTRAP.md", "IDENTITY.md", "USER.md", "SOUL.md",
+        "_Time to pin down who you are._", "Fill this in during your first conversation",
+        "This isn't just metadata", "Save this",
+    )
+
+    def _is_template_noise(self, content: str) -> bool:
+        """判断记忆是否属于 Agent 模板噪音（无实际知识价值）。"""
+        if not content:
+            return True
+        c = content[:200]
+        if any(m in c for m in self._TEMPLATE_NOISE_MARKERS):
+            return True
+        # front matter 模板
+        if c.startswith("---") and ("summary:" in c[:300] or "read_when:" in c[:300]):
+            return True
+        return False
+
+    def _write_knowledge_brief(self, agent_id: str):
+        """生成 <agent_dir>/knowledge_brief.md —— 精简知识摘要。
+
+        设计目标：让 Agent 启动时加载**少量高质量**知识而非数千行原始记忆。
+        - 只保留 high/medium confidence、非模板噪音的记忆
+        - 按 domain 聚类，每个 domain 保留 top K 条
+        - 每条只保留 1-2 句核心要点（首行 + 关键句）
+        - 总大小硬限制 ~20KB，保证 Agent 一次加载不爆上下文
+
+        这是 "knowledge_brief.md" 的写入端；Agent 端通过各自入口
+        （CLAUDE.md / MEMORY.md / user_profile.md）引入此文件。
+        """
+        agent_dir = self.root / ("agent_" + agent_id)
+        if not agent_dir.exists():
+            return
+
+        brief_path = agent_dir / "knowledge_brief.md"
+
+        # 加载全部共享记忆（含本 agent 自己写的——知识库里应包含全量知识）
+        shared_db = self.root / "shared.db"
+        if not shared_db.exists():
+            return
+
+        memories = []
+        try:
+            with MemoryDatabase(shared_db) as db:
+                cursor = db.conn.execute(
+                    "SELECT * FROM memories ORDER BY timestamp DESC LIMIT 500")
+                for row in cursor.fetchall():
+                    memories.append(db._row_to_entry(row))
+        except Exception as e:
+            self.logger.warning("读取共享记忆(简报)失败: {}".format(e))
+            return
+
+        if not memories:
+            return
+
+        # 过滤：非模板噪音 + 非低置信度 + 去重
+        from sync_writers import strip_sync_markers
+        useful = []
+        seen_brief = set()
+        for m in memories:
+            if m.confidence == "low":
+                continue
+            content = strip_sync_markers(m.content or "").strip()
+            if not content or self._is_template_noise(content):
+                continue
+            # 按首行去重（同一知识反复提取只留最新）
+            first_key = content.splitlines()[0][:100] if content.splitlines() else content[:100]
+            if first_key in seen_brief:
+                continue
+            seen_brief.add(first_key)
+            useful.append((m, content))
+
+        if not useful:
+            return
+
+        # 按 domain 聚类
+        from collections import defaultdict
+        by_domain = defaultdict(list)
+        for m, content in useful:
+            by_domain[m.domain or "general"].append((m, content))
+
+        # 每个 domain 保留 top K 条（按 confidence 排序）
+        conf_rank = {"high": 3, "medium": 2, "low": 1}
+        MAX_PER_DOMAIN = 15
+        MAX_TOTAL = 60
+        selected = []
+        for domain, items in by_domain.items():
+            items.sort(key=lambda x: (conf_rank.get(x[0].confidence, 1), x[0].timestamp), reverse=True)
+            selected.extend(items[:MAX_PER_DOMAIN])
+        # 全局截断
+        selected.sort(key=lambda x: (conf_rank.get(x[0].confidence, 1), x[0].timestamp), reverse=True)
+        selected = selected[:MAX_TOTAL]
+
+        # 提取要点：首行 + 去重 + 压缩空白
+        def _first_key_line(text: str) -> str:
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            for ln in lines:
+                if ln.startswith("#"):
+                    continue
+                # 跳过 front matter
+                if ln in ("---",):
+                    continue
+                return ln[:120]
+            return ""
+
+        lines = [
+            "# 知识简报 (Knowledge Brief)",
+            "",
+            "> 自动生成于 {}，来源: 各 Agent 共享记忆融合层".format(
+                datetime.now().strftime("%Y-%m-%d %H:%M")),
+            "> 精简提取 top {} 条（按置信度），完整记录见 memory_shared.md".format(len(selected)),
+            "",
+        ]
+
+        by_domain_out = defaultdict(list)
+        for m, content in selected:
+            by_domain_out[m.domain or "general"].append((m, content))
+
+        for domain in sorted(by_domain_out.keys()):
+            items = by_domain_out[domain]
+            lines.append("## {}".format(domain))
+            for m, content in items:
+                key = _first_key_line(content)
+                if not key:
+                    continue
+                src = m.agent_id
+                lines.append("- [{}] {}".format(src, key))
+            lines.append("")
+
+        brief_text = "\n".join(lines).rstrip() + "\n"
+
+        # 体积硬限制 20KB
+        if len(brief_text.encode("utf-8")) > 20 * 1024:
+            brief_text = brief_text[: 20 * 1024].rsplit("\n", 1)[0] + "\n"
+
+        try:
+            from safe_io import _safe_write_text
+            if _safe_write_text(brief_path, brief_text):
+                self._emit("  knowledge_brief.md({}): 生成 {} 条知识要点 ({:.1f}KB)".format(
+                    agent_id, len(selected), len(brief_text.encode("utf-8")) / 1024))
+        except Exception as e:
+            self.logger.warning("写入 knowledge_brief.md 失败({}): {}".format(agent_id, e))
+
+    def _inject_brief_pointer(self, agent_id: str):
+        """在 Agent 本地入口文件中注入 knowledge_brief.md 引用（v2.1.0）。
+
+        目标：让 Agent 启动时**主动加载**知识简报（而非依赖人肉配置）。
+        对每个已检测到的 Agent 本地记忆文件，追加一小节引导说明：
+
+            ## Shared Knowledge (auto-synced)
+            ... 读取 {data_root}/agent_{id}/knowledge_brief.md ...
+
+        幂等：已存在同标记则跳过，避免重复追加。
+        """
+        try:
+            from safe_io import _safe_read_text, _safe_write_text
+            from safe_io import get_data_root
+            brief_rel = "agent_{}/knowledge_brief.md".format(agent_id)
+            brief_abs = self.root / brief_rel
+            if not brief_abs.exists():
+                return
+
+            # 找到该 agent 的本地记忆文件（复用 detect_agents 的路径信息）
+            detected = detect_agents(self.config, force_redetect=False)
+            info = detected.get(agent_id) or detected.get(agent_id.replace("-appdata", ""))
+            if not info:
+                return
+
+            target_dir = Path(info["path"])
+            if not target_dir.exists():
+                return
+
+            # 候选入口文件
+            candidates = []
+            if info.get("memory_files"):
+                candidates = [Path(f) for f in info["memory_files"] if f.endswith(".md")]
+            if not candidates:
+                candidates = [
+                    target_dir / "MEMORY.md",
+                    target_dir / "user_profile.md",
+                    target_dir / "memory" / "MEMORY.md",
+                ]
+            # 只处理存在的文件，且避免把引用写进超大文件（>2MB 跳过）
+            entry_file = None
+            for cand in candidates:
+                try:
+                    if cand.exists() and cand.stat().st_size < 2 * 1024 * 1024:
+                        entry_file = cand
+                        break
+                except OSError:
+                    continue
+            if entry_file is None:
+                return
+
+            marker = "<!-- agent-memory:knowledge-brief -->"
+            existing = _safe_read_text(entry_file, default="")
+            if marker in existing:
+                return  # 已注入，跳过
+
+            brief_ref = """
+
+## Shared Knowledge (auto-synced)
+
+<!-- agent-memory:knowledge-brief -->
+系统已自动为你生成本机各 Agent 的共享知识简报。
+请在每次会话开始时读取以下文件获取最新跨 Agent 记忆要点：
+
+- 精简知识简报（推荐，约 3KB）: {abs}
+- 完整共享记忆（约 60-80KB）: {md}
+
+格式：front matter + Markdown，可由解析器直接读取。
+""".format(
+                abs=Path(get_data_root()) / brief_rel,
+                md=Path(get_data_root()) / ("agent_{}/memory_shared.md".format(agent_id)),
+            )
+
+            new_content = existing.rstrip() + brief_ref
+            if _safe_write_text(entry_file, new_content):
+                self._emit("  📌 已注入共享知识引用 -> {}".format(entry_file))
+        except Exception as e:
+            self.logger.warning("注入知识引用失败({}): {}".format(agent_id, e))
+
     def _load_all_shared_memories(self, agent_id: str) -> list:
         """从 shared.db 加载指定 Agent 的所有共享记忆（排除自己的）。
 
@@ -646,15 +956,10 @@ class SyncEngine:
                             ids_to_delete.append(mem_id)
 
                     if ids_to_delete:
-                        # 分批删除，每批 100 条
+                        # 分批删除，每批 100 条（v2.1.0: 同步清理 FTS 索引）
                         for i in range(0, len(ids_to_delete), 100):
                             batch = ids_to_delete[i:i + 100]
-                            placeholders = ",".join("?" * len(batch))
-                            db.conn.execute(
-                                "DELETE FROM memories WHERE id IN ({})".format(placeholders),
-                                batch
-                            )
-                        db.conn.commit()
+                            db.delete_memories(batch)
                         purged_in_db = len(ids_to_delete)
 
                 if purged_in_db > 0:
@@ -879,28 +1184,33 @@ class SyncEngine:
 
                 if total > max_entries:
                     # 阶段 1: 过期 low confidence 旧条目
+                    # v2.1.0: 同步清理 FTS 索引（memories_fts 是独立表，需按 id 同步删）
                     ttl_low = exp_config.get("low_confidence_ttl_days", 90)
-                    cursor = db.conn.execute(
-                        """DELETE FROM memories
+                    expired_ids = db.conn.execute(
+                        """SELECT id FROM memories
                            WHERE confidence = 'low'
                              AND timestamp < datetime('now', '-' || ? || ' days')""",
                         (ttl_low,)
-                    )
-                    result["expired"] += cursor.rowcount
+                    ).fetchall()
+                    ids1 = [r[0] for r in expired_ids]
+                    if ids1:
+                        db.delete_memories(ids1)
+                    result["expired"] += len(ids1)
 
                     # 阶段 2: 仍超限 → 过期 medium + low 超过 default_ttl
                     remaining = total - result["expired"]
                     if remaining > max_entries:
                         ttl_default = exp_config.get("default_ttl_days", 180)
-                        cursor2 = db.conn.execute(
-                            """DELETE FROM memories
+                        expired_ids2 = db.conn.execute(
+                            """SELECT id FROM memories
                                WHERE confidence IN ('low', 'medium')
                                  AND timestamp < datetime('now', '-' || ? || ' days')""",
                             (ttl_default,)
-                        )
-                        result["expired"] += cursor2.rowcount
-
-                    db.conn.commit()
+                        ).fetchall()
+                        ids2 = [r[0] for r in expired_ids2]
+                        if ids2:
+                            db.delete_memories(ids2)
+                        result["expired"] += len(ids2)
 
                 # VACUUM 回收空间（必须在事务外执行）
                 try:

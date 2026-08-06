@@ -2,6 +2,17 @@
 
 > 本文件記錄 AgentMemorySystem 未來可能改進的方向，按優先級排序。
 
+## 已完成（v2.1.0，2026-08-06）
+
+- [x] 数据根目录统一（data/ → AgentMemory/，含迁移工具 tools/unify_data_root.py）
+- [x] FTS 索引孤儿清理（tools/repair_fts.py，回收 83.79MB，删除操作统一走 delete_memory()）
+- [x] 写回策略修复（reconcile 与状态对齐，写回恢复实际生效）
+- [x] 知识简报层（knowledge_brief.md + Agent 入口注入）
+- [x] 稳定性加固（心跳写本地、崩溃日志双写、重启计数持久化）
+- [x] 旧数据清理（~/.agent_memory/ 6.8GB 移出使用路径）
+- [x] UI 屏幕自适应 + DPI 感知 + 窗口尺寸自动保存 + “打开数据目录”按钮
+- [x] 日志轮转调优（统一到数据根 .logs/）
+
 ## 高優先級
 
 ### 1. 預編譯 EXE 發布

@@ -32,7 +32,7 @@ def find_agent_dir(root: Path, agent_id: str) -> Path:
 
 def cmd_write(args):
     """写入记忆"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     # 智能兜底: device_config.json 缺失时自动创建
@@ -96,7 +96,7 @@ def cmd_write(args):
 
 def cmd_search(args):
     """搜索记忆"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     # 启动
@@ -129,7 +129,7 @@ def cmd_search(args):
 
 def cmd_list(args):
     """列出记忆"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     # 启动
@@ -156,7 +156,7 @@ def cmd_list(args):
 
 def cmd_sync(args):
     """同步记忆到 SQLite"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     # 启动
@@ -170,7 +170,7 @@ def cmd_sync(args):
 
 def cmd_merge(args):
     """融合记忆"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
     other_agent = args.with_agent
     other_dir = find_agent_dir(root, other_agent)
@@ -197,7 +197,7 @@ def cmd_merge(args):
 
 def cmd_full_merge(args):
     """完整融合（所有Agent）"""
-    root = Path(args.root)
+    root = _resolve_root(args)
 
     # 查找所有 Agent 目录
     agent_dirs = {}
@@ -227,7 +227,7 @@ def cmd_full_merge(args):
 
 def cmd_import_trae(args):
     """导入 Trae 记忆"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     # 启动
@@ -248,7 +248,7 @@ def cmd_import_trae(args):
 
 def cmd_safe_write(args):
     """安全写入（带并发控制）"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     # 启动
@@ -274,7 +274,7 @@ def cmd_safe_write(args):
 
 def cmd_devices(args):
     """查看所有设备的记忆文件"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     # 获取所有设备记忆文件
@@ -294,7 +294,7 @@ def cmd_devices(args):
 
 def cmd_backup(args):
     """备份所有数据"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     results = am.backup_all(agent_dir)
@@ -311,7 +311,7 @@ def cmd_backup(args):
 
 def cmd_check(args):
     """检查数据完整性"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     results = am.check_integrity(agent_dir)
@@ -341,7 +341,7 @@ def cmd_check(args):
 
 def cmd_optimize(args):
     """优化记忆"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     results = am.optimize_memories(memory_root=agent_dir)
@@ -353,7 +353,7 @@ def cmd_optimize(args):
 
 def cmd_report(args):
     """生成统计报告"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     report = am.get_memory_report(memory_root=agent_dir)
@@ -390,7 +390,7 @@ def cmd_report(args):
 
 def cmd_smart_compress(args):
     """智能压缩记忆"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     results = am.smart_compress(
@@ -411,7 +411,7 @@ def cmd_smart_compress(args):
 
 def cmd_archive(args):
     """归档冷数据"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     results = am.archive_cold_memories(
@@ -427,7 +427,7 @@ def cmd_archive(args):
 
 def cmd_scores(args):
     """查看记忆重要性分数"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     scored = am.get_importance_scores(memory_root=agent_dir)
@@ -444,7 +444,7 @@ def cmd_scores(args):
 
 def cmd_health(args):
     """健康检查"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     result = am.health_check(memory_root=agent_dir)
@@ -469,7 +469,7 @@ def cmd_health(args):
 
 def cmd_expire(args):
     """清理过期记忆"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     result = am.expire_old_memories(memory_root=agent_dir, dry_run=args.dry_run)
@@ -488,7 +488,7 @@ def cmd_expire(args):
 
 def cmd_migrate(args):
     """数据库迁移"""
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
     db_path = agent_dir / "memories.db"
 
@@ -506,9 +506,20 @@ def cmd_migrate(args):
             print(f"  ✓ {m}")
 
 
+def _resolve_root(args) -> Path:
+    """解析数据根目录：--root 未指定时使用 get_data_root()（与 GUI/引擎一致）。
+
+    v2.1.0: 修复 CLI 默认硬编码 <project>/data，与引擎/GUI 数据目录分裂。
+    """
+    if getattr(args, "root", None):
+        return Path(args.root)
+    from safe_io import get_data_root
+    return get_data_root()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent 记忆系统命令行工具")
-    parser.add_argument("--root", default=str(Path(__file__).parent / "data"), help="数据根目录")
+    parser.add_argument("--root", default=None, help="数据根目录（默认：自动解析 get_data_root）")
     parser.add_argument("--agent", default="claude", help="Agent ID")
 
     subparsers = parser.add_subparsers(dest="command", help="命令")
@@ -708,7 +719,7 @@ def cmd_discover(args):
     扫描 AgentRegistry.LOCAL_PATTERNS 列表 (~\\.<agent>),
     将每个 Agent 的安装路径 + 本地记忆文件登记到 Registry。
     """
-    root = Path(args.root)
+    root = _resolve_root(args)
     registry = am.AgentRegistry(root=root)
 
     if getattr(args, "scan_root", False):
@@ -772,7 +783,7 @@ def cmd_dashboard(args):
     """
     v1.3 Dashboard: 双层视图 (本地安装层 + OneDrive 融合层)
     """
-    root = Path(args.root)
+    root = _resolve_root(args)
     registry = am.AgentRegistry(root=root)
     registry.update_local_stats()
     registry.update_memory_counts()
@@ -841,7 +852,7 @@ def cmd_extract(args):
       2. 写入 OneDrive\\AgentMemory\\agent_<id>\\memory_private.md
       3. 追加 front matter, 标注 source_format / source_device
     """
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_id = args.agent
     dry_run = args.dry_run
 
@@ -911,7 +922,7 @@ def cmd_flush(args):
     """
     批量落盘 SessionFlusher buffer 中的待写条目
     """
-    root = Path(args.root)
+    root = _resolve_root(args)
     agent_dir = find_agent_dir(root, args.agent)
 
     flusher = am.SessionFlusher(memory_root=agent_dir)
@@ -1050,11 +1061,11 @@ def cmd_register_device(args):
 
     # 确定要注册的 device_config.json 路径列表
     # args.root 默认是 <project>/data 目录
-    root = Path(args.root)
+    root = _resolve_root(args)
     targets = []
 
     if getattr(args, "all_agents", False):
-        # args.root 可能是 data/ 也可能是 project 根
+        # v2.1.0: 数据根已统一（AgentMemory/ 或 --root），兼容旧 data/ 布局
         # 先找 agent_*/device_config.json
         if root.name == "data":
             data_dir = root
