@@ -133,7 +133,6 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 - **交互層** (`memory_sync_app.py`) — GUI + 系統匣 + CLI
 
 ## 知識如何真正讓 Agent 變聰明（v2.1.0）
-
 傳統做法是把所有共享記憶全文堆疊進 `memory_shared.md`，Agent 啟動時
 要讀數千行原始內容，上下文被撐爆且信息密度極低。v2.1.0 新增**知識提煉層**：
 
@@ -149,6 +148,17 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 > 完整共享記憶仍保留在 `memory_shared.md`（front matter 格式，供深度檢索）；
 > 知識簡報是**輕量優先級**入口，兩者互補。
+
+## 數據根註冊點（v2.1.1，徹底杜絕數據分裂）
+
+本專案採用**單一事實來源**（Single Source of Truth）機制管理數據根：
+
+1. 首次運行時，程序把解析到的數據根寫入註冊文件 `%LOCALAPPDATA%\AgentMemorySystem\data_root.txt`
+2. 此後**任何入口**（GUI / CLI / watchdog / 直接雙擊任意 EXE 副本 / 開發模式）啟動時都只讀這個註冊文件，不再各自推導路徑
+3. BAT 啟動器注入的環境變量是**最高權威**：每次通過 BAT 啟動都會以它為準並同步註冊點，自動糾正任何被錯誤入口帶偏的情況
+4. watchdog 崩潰重啟時同樣注入註冊點數據根
+
+> 效果：無論你從桌面快捷方式、開始菜單、BAT 啟動器、還是誤雙擊了某個 EXE 副本啟動，程序永遠使用**同一個**數據根目錄（OneDrive 項目根下的 `AgentMemory/`），徹底杜絕多目錄分裂導致的「同步了但 Agent 變不聰明」問題。
 
 ## 配置
 
@@ -181,6 +191,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v2.1.1** | 2026-08 | **数据分裂根治**：数据根注册点（`%LOCALAPPDATA%\AgentMemorySystem\data_root.txt`）成为唯一事实来源，所有入口（GUI/CLI/watchdog/任意 EXE 副本/开发模式）只读注册点；BAT 注入的环境变量为最高权威，每次启动自动纠正注册；watchdog 重启注入同一数据根；实测直接双击任意 EXE 均收敛到项目根 `AgentMemory/` |
 | **v2.1.0** | 2026-08 | **稳定性根治 + 智能感提升**：数据根目录统一（`data/` → `AgentMemory/`，修复 SyncEngine/GUI/状态三处分裂）；**FTS 索引孤儿清理**（删除操作统一走 `delete_memory()`，`tools/repair_fts.py` 实测回收 83.79MB：88.65MB→4.86MB）；写回策略修复（reconcile 与状态对齐，写回恢复实际生效）；**知识简报层**（`knowledge_brief.md` 精简摘要 + Agent 入口自动注入 `## Shared Knowledge` 引导，幂等）；心跳写本地磁盘、崩溃日志双写、重启计数持久化；`~/.agent_memory/` 6.8GB 历史遗留移出使用路径；UI 屏幕自适应 + Per-Monitor DPI + 窗口尺寸自动保存 + “打开数据目录”按钮；日志轮转调优 |
 | **v2.0.4** | 2026-07 | **圖示統一**（托盤/任務欄/視窗均使用 `app_icon.ico`，消除歷史遺留的多圖示分歧）；過程性文件清理（刪除 DEVLOG.md、test_memory.py、設計文檔、一次性遷移腳本、冗餘圖示資源，保留版本演變路徑） |
 | **v2.0.3** | 2026-07 | 寫回前體積保護（`_enforce_write_volume_limit`，超限按 front matter 邊界截斷舊內容）；`agent_runtime_manual.md` 重構（移除不可執行的 `write_memory()` API 規則，改為直接編輯 `memory_private.md`）；`prompt.md` 消除硬編碼路徑；`shrink_memory_files.py` 排序邏輯簡化（6 次 sort → 單次 sorted） |

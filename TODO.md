@@ -2,6 +2,14 @@
 
 > 本文件記錄 AgentMemorySystem 未來可能改進的方向，按優先級排序。
 
+## 已完成（v2.1.1，2026-08-06）
+
+- [x] 数据根注册点（Single Source of Truth）：%LOCALAPPDATA%\AgentMemorySystem\data_root.txt 唯一事实来源
+- [x] BAT 环境变量为最高权威，每次启动自动纠正注册点
+- [x] watchdog 重启注入同一数据根
+- [x] 直接双击任意 EXE 副本均收敛到项目根（实测验证）
+- [x] 移除 LOCALAPPDATA 历史遗留入口（App.legacy_20260806）
+
 ## 已完成（v2.1.0，2026-08-06）
 
 - [x] 数据根目录统一（data/ → AgentMemory/，含迁移工具 tools/unify_data_root.py）

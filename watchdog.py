@@ -48,6 +48,21 @@ def _find_exe() -> Path:
     return None
 
 
+def _inject_data_root_env() -> None:
+    """从注册点读取数据根并注入环境变量（v2.1.1）。
+
+    watchdog 直接 Popen 主程序时无 BAT 环境变量，显式注入注册点数据根，
+    保证重启后的进程与当前所有进程使用同一数据根（单一事实来源）。
+    """
+    try:
+        from safe_io import _read_registry
+        reg = _read_registry()
+        if reg is not None:
+            os.environ["AGENT_MEMORY_DATA_DIR"] = str(reg)
+    except Exception:
+        pass
+
+
 def _is_running(proc_name: str = "AgentMemorySync.exe") -> bool:
     """通过 tasklist 检查进程是否存活。"""
     try:
@@ -62,6 +77,9 @@ def _is_running(proc_name: str = "AgentMemorySync.exe") -> bool:
 
 def main():
     _log("看门狗启动 (PID {})".format(os.getpid()))
+    # 注入数据根（与主程序保持一致，根治分裂）
+    _inject_data_root_env()
+    _log("数据根: {}".format(os.environ.get("AGENT_MEMORY_DATA_DIR", "(未注册)")))
     # 允许的最大连续重启次数
     max_restarts = 5
     restart_count = 0

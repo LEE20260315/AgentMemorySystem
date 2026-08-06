@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.1] - 2026-08-06
+
+### Fixed（数据分裂根治）
+
+- **数据根注册点（Single Source of Truth）**：彻底根治多入口数据分裂
+  - 新增持久化注册文件 `%LOCALAPPDATA%\AgentMemorySystem\data_root.txt`，数据根的唯一事实来源
+  - 所有入口（GUI / CLI / watchdog / 直接双击任意 EXE 副本 / 开发模式）启动时都只读注册点，仅首次运行才做路径推导并落盘
+  - 环境变量 `AGENT_MEMORY_DATA_DIR`（BAT 启动器注入）成为**最高权威**：BAT 每次启动都以其为准并同步注册点，自动纠正被错误入口带偏的注册
+  - watchdog 重启时显式注入注册点数据根，保证崩溃重启后仍指向同一位置
+  - 实测：直接双击 OneDrive 分发包 EXE（无 BAT）也能正确解析到项目根 `AgentMemory/`，不再分裂到 LOCALAPPDATA
+- **清理历史遗留入口**：移除 LOCALAPPDATA 旧安装副本（App.legacy_20260806），防止误双击启动错误版本
+
 ## [2.1.0] - 2026-08-06
 
 ### Fixed（稳定性）

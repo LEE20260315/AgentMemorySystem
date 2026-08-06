@@ -2954,7 +2954,7 @@ def main():
 
     # 启动诊断日志（文件可能被锁定，不能因此崩溃）
     _diag_lines = [
-        "APP STARTING v2.1.0\n",
+        "APP STARTING v2.1.1\n",
         f"  _safe_home() = {_home}\n",
         f"  _data_dir() = {_data_dir()}\n",
         f"  _original_home() = {_original_home()}\n",
