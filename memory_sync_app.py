@@ -2249,6 +2249,23 @@ class SyncMainWindow:
         if self._start_minimized:
             self.root.after(500, self._minimize_to_tray)
 
+        # v2.1.1 诊断：--tray-test 自动触发最小化到托盘并记录结果
+        if "--tray-test" in sys.argv:
+            def _auto_tray_diag():
+                self._log("[tray-test] 自动触发最小化到托盘...")
+                self._minimize_to_tray()
+                # 把结果写到独立诊断文件
+                try:
+                    diag = _data_dir() / "tray_test_result.txt"
+                    diag.write_text(
+                        "tray_nid={}\nhwnd={}\nhicon={}\n".format(
+                            self._tray_nid is not None, self._tray_hwnd, self._tray_hicon),
+                        encoding="utf-8")
+                    self._log("[tray-test] 结果已写入 tray_test_result.txt")
+                except Exception as e:
+                    self._log("[tray-test] 写入结果失败: {}".format(e))
+            self.root.after(1500, _auto_tray_diag)
+
         # 正常显示窗口启动时，不预创建托盘图标；仅在最小化到托盘时再创建。
 
         # 定时自动同步调度器（每 60 秒检查一次）
@@ -2954,7 +2971,7 @@ def main():
 
     # 启动诊断日志（文件可能被锁定，不能因此崩溃）
     _diag_lines = [
-        "APP STARTING v2.1.1\n",
+        "APP STARTING v2.1.2\n",
         f"  _safe_home() = {_home}\n",
         f"  _data_dir() = {_data_dir()}\n",
         f"  _original_home() = {_original_home()}\n",
@@ -2989,6 +3006,10 @@ def main():
     if "--cli" in sys.argv:
         run_cli()
         return
+
+    # v2.1.1 诊断：--tray-test 自动触发最小化到托盘（不阻塞主循环），
+    # 用于验证 Shell_NotifyIconW 在打包环境下的真实行为
+    _auto_tray_test = "--tray-test" in sys.argv
 
     if not _check_single_instance():
         return

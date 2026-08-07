@@ -191,6 +191,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v2.1.2** | 2026-08 | **图标与托盘修复**：`app_icon.ico` 重制为紫色记忆图标（原为白底灰图形，视觉上像羽毛）；新增 `--tray-test` 诊断参数实测托盘创建成功（`Shell_NotifyIconW add=1`）；删除 LOCALAPPDATA 残留副本 |
 | **v2.1.1** | 2026-08 | **数据分裂根治**：数据根注册点（`%LOCALAPPDATA%\AgentMemorySystem\data_root.txt`）成为唯一事实来源，所有入口（GUI/CLI/watchdog/任意 EXE 副本/开发模式）只读注册点；BAT 注入的环境变量为最高权威，每次启动自动纠正注册；watchdog 重启注入同一数据根；实测直接双击任意 EXE 均收敛到项目根 `AgentMemory/` |
 | **v2.1.0** | 2026-08 | **稳定性根治 + 智能感提升**：数据根目录统一（`data/` → `AgentMemory/`，修复 SyncEngine/GUI/状态三处分裂）；**FTS 索引孤儿清理**（删除操作统一走 `delete_memory()`，`tools/repair_fts.py` 实测回收 83.79MB：88.65MB→4.86MB）；写回策略修复（reconcile 与状态对齐，写回恢复实际生效）；**知识简报层**（`knowledge_brief.md` 精简摘要 + Agent 入口自动注入 `## Shared Knowledge` 引导，幂等）；心跳写本地磁盘、崩溃日志双写、重启计数持久化；`~/.agent_memory/` 6.8GB 历史遗留移出使用路径；UI 屏幕自适应 + Per-Monitor DPI + 窗口尺寸自动保存 + “打开数据目录”按钮；日志轮转调优 |
 | **v2.0.4** | 2026-07 | **圖示統一**（托盤/任務欄/視窗均使用 `app_icon.ico`，消除歷史遺留的多圖示分歧）；過程性文件清理（刪除 DEVLOG.md、test_memory.py、設計文檔、一次性遷移腳本、冗餘圖示資源，保留版本演變路徑） |

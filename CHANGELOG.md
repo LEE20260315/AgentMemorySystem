@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.2] - 2026-08-07
+
+### Fixed（图标与托盘）
+
+- **图标变成“羽毛”根治**：`assets/app_icon.ico` 是早期遗留的白底灰色图形（视觉上像羽毛），与 `app_icon.png`（紫色记忆图标）不一致。用 PNG 重新生成 ICO（16~256 全尺寸、深紫背景），EXE/任务栏/托盘图标统一为紫色图标。旧 ICO 备份为 `assets/app_icon.ico.bak_fly`
+- **托盘验证与加固**：新增 `--tray-test` 诊断参数，打包环境下自动触发最小化到托盘并记录结果；实测 `Shell_NotifyIconW add=1`、`OK: tray created`，托盘功能在 PyInstaller 打包环境正常
+- **清理分裂残留**：删除 LOCALAPPDATA\AgentMemorySystem\App（昨晚 relocate 产生的副本，无心跳、疑似导致旧提示）；该副本已被删除，防止用户误双击启动旧版本
+
 ## [2.1.1] - 2026-08-06
 
 ### Fixed（数据分裂根治）
