@@ -1321,36 +1321,52 @@ def test_build_py_smoke_check():
 
 
 def test_get_local_home_prefers_localappdata():
-    """v2.2.0: 跨机 home 错位场景，LOCALAPPDATA 推断优先生效"""
+    """v2.2.0: 跨机 home 错位场景，SHGetKnownFolderPath（进程 token）优先生效，
+    即使 USERPROFILE/LOCALAPPDATA/HOME + Path.home 全部残留，仍返回真实用户目录。"""
     r.set_module("safe_io")
 
     import safe_io
 
+    # 正常环境下的真实 home（SHGetKnownFolderPath 结果）
+    real_home = str(safe_io.get_local_home()).lower()
+
+    old = {k: os.environ.get(k) for k in ("USERPROFILE", "LOCALAPPDATA", "HOME", "HOMEDRIVE", "HOMEPATH")}
+    try:
+        # 模拟那台电脑的残留：所有环境变量 + Path.home 都指向旧账户
+        os.environ["USERPROFILE"] = r"C:\Users\MR.Dong_FAKE"
+        os.environ["LOCALAPPDATA"] = r"C:\Users\MR.Dong_FAKE\AppData\Local"
+        os.environ["HOME"] = r"C:\Users\MR.Dong_FAKE"
+        os.environ["HOMEDRIVE"] = "C:"
+        os.environ["HOMEPATH"] = r"\Users\MR.Dong_FAKE"
+        with patch("pathlib.Path.home", return_value=Path(r"C:\Users\MR.Dong_FAKE")):
+            h = safe_io.get_local_home()
+        r.assert_true(
+            "polluted env still returns real home",
+            "FAKE" not in str(h) and str(h).lower() == real_home,
+        )
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # 回退链：LOCALAPPDATA 标准形态推断仍有效（非 Windows 或 SHGetKnownFolderPath 失败时）
     fake_root = Path(tempfile.mkdtemp())
     users = fake_root / "Users"
-    # 当前登录用户 Dong（LOCALAPPDATA 正确）
     (users / "Dong" / "AppData" / "Local").mkdir(parents=True)
-    # 残留旧账户 MR.Dong（Path.home/expanduser 会指向它）
     (users / "MR.Dong").mkdir(parents=True, exist_ok=True)
-
     old_la = os.environ.get("LOCALAPPDATA")
     try:
         os.environ["LOCALAPPDATA"] = str(users / "Dong" / "AppData" / "Local")
-        # 模拟残留：Path.home() 返回 MR.Dong
         class FakePath(type(Path())):
             @classmethod
             def home(cls):
                 return users / "MR.Dong"
-        with patch("pathlib.Path.home", FakePath.home):
-            h = safe_io.get_local_home()
-        r.assert_true("uses localappdata user", str(h).replace("\\", "/").endswith("Users/Dong"))
-
-        # 正常环境：LOCALAPPDATA 与 Path.home 一致 → 结果不变
-        (users / "MR.Dong" / "AppData" / "Local").mkdir(parents=True, exist_ok=True)
-        os.environ["LOCALAPPDATA"] = str(users / "MR.Dong" / "AppData" / "Local")
-        with patch("pathlib.Path.home", FakePath.home):
+        with patch("safe_io._known_folder_profile", return_value=None), \
+             patch("pathlib.Path.home", FakePath.home):
             h2 = safe_io.get_local_home()
-        r.assert_true("normal env unchanged", str(h2).replace("\\", "/").endswith("Users/MR.Dong"))
+        r.assert_true("localappdata fallback works", str(h2).replace("\\", "/").endswith("Users/Dong"))
     finally:
         if old_la is None:
             os.environ.pop("LOCALAPPDATA", None)

@@ -243,6 +243,21 @@ class SyncEngine:
             # ① 发现 Agent
             self._emit("正在检测本地 Agent...")
             detected = detect_agents(self.config, force_redetect=False)
+            # v2.2.0: 统一过滤——detected 中不属于本机真实用户的条目（跨机缓存
+            # 污染/环境残留）全部丢弃，防止提取/写回指向他人家目录（WinError 5）。
+            # 真实用户用 SHGetKnownFolderPath 按进程 token 查，不受环境变量污染。
+            # override（用户手动指定）不在此过滤范围内。
+            try:
+                from safe_io import get_local_home
+                _lh = str(get_local_home()).lower().rstrip("\\/")
+                detected = {
+                    aid: info for aid, info in detected.items()
+                    if info.get("source") == "override"
+                    or not str(info.get("path", "")).lower().rstrip("\\/")
+                    or str(info.get("path", "")).lower().rstrip("\\/").startswith(_lh)
+                }
+            except Exception:
+                pass
             report.agents_detected = detected
 
             if not detected:
@@ -362,6 +377,23 @@ class SyncEngine:
             for agent_id, agent_info in detected.items():
                 extract_id = agent_id.replace("-appdata", "")
                 target_path = Path(agent_info["path"])
+
+                # v2.2.0: 写回自愈——目标路径不属于本机真实用户（跨机缓存/
+                # 环境残留导致）则跳过该 Agent 的写回，避免 WinError 5 拒绝
+                # 访问刷屏。本机真实用户用 SHGetKnownFolderPath 按进程 token 查。
+                _skip_writeback = False
+                try:
+                    from safe_io import get_local_home
+                    _local_home = str(get_local_home()).lower().rstrip("\\/")
+                    _tp = str(target_path).lower().rstrip("\\/")
+                    if _tp and not _tp.startswith(_local_home):
+                        _skip_writeback = True
+                except Exception:
+                    pass
+                if _skip_writeback:
+                    self._emit("  ⚠ {}: 目标路径 {} 不属于本机用户，跳过写回".format(
+                        agent_id, target_path))
+                    continue
 
                 # ★ v2.0 修复：reconcile 移到 _load_shared_memories 之前
                 # 先对齐 SyncState 与目标文件，再用干净的 state 过滤共享记忆

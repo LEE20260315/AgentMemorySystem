@@ -8,6 +8,50 @@ from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
+# 用户主目录权威解析（v2.2.0，根治跨机路径错位）
+# ---------------------------------------------------------------------------
+#
+# 背景：某些机器的 USERPROFILE / LOCALAPPDATA / HOME 环境变量会残留指向
+# 旧账户（如 C:\Users\MR.Dong），导致 expanduser / Path.home() 解析到他人
+# 家目录，提取/写回被拒（WinError 5）。
+#
+# 根治：优先用 SHGetKnownFolderPath(FOLDERID_Profile)——它按**当前进程 token**
+# 查真实登录用户目录，不读任何环境变量，跨机残留场景依然返回正确结果。
+#
+if sys.platform == "win32":
+    import ctypes
+
+    class _GUID(ctypes.Structure):
+        _fields_ = [
+            ("d1", ctypes.c_uint),
+            ("d2", ctypes.c_ushort),
+            ("d3", ctypes.c_ushort),
+            ("d4", ctypes.c_ubyte * 8),
+        ]
+
+    # FOLDERID_Profile = {5E6C858F-0E22-4760-9AFE-EA3317B67173}
+    _FOLDERID_PROFILE = _GUID(
+        0x5E6C858F, 0x0E22, 0x4760,
+        (ctypes.c_ubyte * 8)(0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73),
+    )
+
+    def _known_folder_profile() -> Optional[Path]:
+        """SHGetKnownFolderPath(FOLDERID_Profile)：按进程 token 查真实用户目录。"""
+        try:
+            ptr = ctypes.c_wchar_p()
+            ok = ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(_FOLDERID_PROFILE), 0, None, ctypes.byref(ptr)
+            )
+            if ok == 0 and ptr.value:
+                return Path(ptr.value)
+        except Exception:
+            pass
+        return None
+else:
+    def _known_folder_profile() -> Optional[Path]:
+        return None
+
+# ---------------------------------------------------------------------------
 # 数据根注册点（v2.1.1，根治数据分裂）
 #
 # 原理：数据根（Data Root）的唯一事实来源是一个**持久化注册文件**：
@@ -31,16 +75,24 @@ def get_local_home() -> Path:
     问题背景：某些机器 USERPROFILE / Path.home() / expanduser 返回的路径
     与实际登录用户不一致（环境变量残留、旧账户目录并存），导致跨机运行
     时提取/写回路径指向他人家目录（WinError 5 拒绝访问）。
-    而 LOCALAPPDATA 已被数据根注册点证明是“当前真实用户”（注册点
-    %LOCALAPPDATA%/AgentMemorySystem/data_root.txt 能正确定位数据根）。
 
-    优先级：
-    1. LOCALAPPDATA 标准形态推断（C:/Users/<user>/AppData/Local → C:/Users/<user>）
-    2. Path.home()（存在时）
-    3. USERPROFILE / HOME 环境变量（存在时）
-    4. Path.home() 兜底
+    优先级（从权威到兜底）：
+    1. SHGetKnownFolderPath(FOLDERID_Profile)：按进程 token 查真实用户目录，
+       不读任何环境变量（跨机残留的根治方案）
+    2. LOCALAPPDATA 标准形态推断（C:/Users/<user>/AppData/Local → C:/Users/<user>）
+    3. Path.home()（存在时）
+    4. USERPROFILE / HOME 环境变量（存在时）
+    5. Path.home() 兜底
     """
-    # 1) LOCALAPPDATA 推断（与数据根注册点同源，跨机最可信）
+    # 1) SHGetKnownFolderPath（Windows 权威，进程 token，不受环境变量污染）
+    kfp = _known_folder_profile()
+    if kfp is not None:
+        try:
+            if kfp.exists():
+                return kfp
+        except Exception:
+            pass
+    # 2) LOCALAPPDATA 推断（与数据根注册点同源，跨机最可信）
     la = os.environ.get("LOCALAPPDATA")
     if la:
         try:
@@ -53,14 +105,14 @@ def get_local_home() -> Path:
                     return cand
         except Exception:
             pass
-    # 2) Path.home()
+    # 3) Path.home()
     try:
         h = Path.home()
         if h.exists():
             return h
     except Exception:
         pass
-    # 3) 环境变量
+    # 4) 环境变量
     for var in ("USERPROFILE", "HOME", "HOMEPATH"):
         val = os.environ.get(var)
         if val:
@@ -70,7 +122,7 @@ def get_local_home() -> Path:
                     return p
             except Exception:
                 pass
-    # 4) 兜底
+    # 5) 兜底
     return Path.home()
 
 
