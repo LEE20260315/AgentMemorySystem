@@ -43,7 +43,11 @@
 """
 from __future__ import annotations
 
-import argparse
+# v2.2.0: argparse 惰性导入（移入 main()）——PyInstaller 6.20 + Python 3.14 下
+# 顶层 import argparse 无法被收集（--hidden-import 也无效），导致打包后
+# sync_engine 静态导入 shrink_file 时 ImportError，体积控制降级兜底。
+# 本模块作为库（shrink_file/parse_memory_entries/format_entry）使用时
+# 不需要 argparse，仅在 CLI 入口（main）需要。
 import re
 import shutil
 import sys
@@ -405,6 +409,8 @@ def find_target_files(root: Path, agents: list = None) -> list:
 
 
 def main():
+    import argparse  # v2.2.0: 惰性导入（见模块顶部注释）
+
     parser = argparse.ArgumentParser(
         description="一次性体积治理：压缩/截断超大的 memory_*.md 文件"
     )

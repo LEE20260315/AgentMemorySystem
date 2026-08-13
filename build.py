@@ -14,6 +14,14 @@ import shutil
 import time
 from pathlib import Path
 
+# v2.2.0: Windows 控制台默认 GBK，无法输出 ✓ 等字符（冒烟检查会崩），强制 UTF-8
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def _get_shortcut_paths():
     """获取当前用户的桌面和开始菜单路径（兼容中英文 Windows）"""
@@ -325,6 +333,7 @@ def build():
         "--paths", str(here / "tools"),
         "--hidden-import", "tools.shrink_memory_files",
         "--hidden-import", "shrink_memory_files",
+        # v2.2.0: shrink_memory_files 的 argparse 已惰性化（移入 main()），不再需要显式收集
         # 排除不需要的大型模块
         "--exclude-module", "matplotlib",
         "--exclude-module", "numpy",
@@ -398,26 +407,44 @@ def build():
             print("=" * 60)
             print()
             # v2.1.2: 冒烟检查——验证关键模块已打进打包产物（防止静默失效）
+            # v2.2.0: PYZ 嵌入 EXE 内部（PyInstaller 6.x onedir），原检查 _internal/*.zip 永远查不到；
+            # 改为读取 EXE 归档中的 PYZ.pyz，校验 shrink_memory_files 与其依赖 argparse
+            def _pyz_module_names(pyz_bytes):
+                """纯标准库解析 PYZ（magic + 绝对 toc_offset + marshal TOC）。"""
+                import struct, marshal, io as _io
+                buf = _io.BytesIO(pyz_bytes)
+                if buf.read(4) != b'PYZ\0':
+                    return set()
+                buf.read(4)  # python bytecode magic
+                (toc_offset,) = struct.unpack('!i', buf.read(4))
+                buf.seek(toc_offset)  # toc_offset 为绝对偏移（PyInstaller 6.x 行为）
+                try:
+                    toc = marshal.load(buf)
+                    # PyInstaller 6.20: TOC 为 [(name, (typecode, offset, length)), ...] 列表
+                    if isinstance(toc, list):
+                        return {t[0] for t in toc}
+                    if isinstance(toc, dict):
+                        return set(toc.keys())
+                    return set()
+                except Exception:
+                    return set()
+
+            smoke_ok = False
             try:
-                import zipfile
-                _internal_dir = source_dir / "_internal"
-                smoke_ok = False
-                if _internal_dir.exists():
-                    for pyz in _internal_dir.glob("*.zip"):
-                        try:
-                            with zipfile.ZipFile(pyz) as zf:
-                                names = zf.namelist()
-                                if any("shrink_memory_files" in n for n in names):
-                                    smoke_ok = True
-                                    break
-                        except Exception:
-                            continue
-                if smoke_ok:
+                from PyInstaller.archive.readers import CArchiveReader
+                arc = CArchiveReader(str(exe_path))
+                names = set()
+                if 'PYZ.pyz' in arc.toc:
+                    names = _pyz_module_names(arc.extract('PYZ.pyz'))
+                need = {'shrink_memory_files', 'tools.shrink_memory_files'}
+                missing = need - names
+                if not missing:
+                    smoke_ok = True
                     print("[冒烟] shrink_memory_files 已包含在打包产物中 ✓")
                 else:
-                    print("[警告] 未在打包产物中发现 shrink_memory_files，体积控制将失效！")
+                    print(f"[警告] 打包产物缺少模块 {sorted(missing)}，体积控制将失效！")
             except Exception as e:
-                print(f"[警告] 冒烟检查失败: {e}")
+                print(f"[警告] 冒烟检查失败（{e}），请手动验证 EXE --cli 日志无体积控制警告")
             # 1) 把完整 OneDrive 分发包同步回项目根目录（供跨设备分发）
             try:
                 bundle_dir = _sync_repo_bundle(source_dir, here, dist_name)
