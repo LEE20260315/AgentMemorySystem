@@ -344,7 +344,10 @@ def build():
         "--exclude-module", "xmlrpc",
         "--exclude-module", "pydoc",
         "--exclude-module", "doctest",
-        "--exclude-module", "argparse",
+        # v2.2.0: 移除 exclude argparse——它才是上轮“argparse 无法收集”的真因
+        # （exclude 优先级高于 hidden-import，把 argparse 强制排除导致 CLI 报
+        # No module named 'argparse'）。shrink_memory_files.main() 惰性 import
+        # argparse 会触发收集，无需 exclude。
         "--exclude-module", "pkg_resources",
         # 排除向量搜索栈
         "--exclude-module", "sentence_transformers",
