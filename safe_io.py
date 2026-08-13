@@ -25,6 +25,55 @@ _registry_path: Optional[Path] = None  # 进程内缓存，避免每次磁盘读
 _last_registry_warn: float = 0.0
 
 
+def get_local_home() -> Path:
+    """跨机稳定的用户主目录解析（v2.2.0）。
+
+    问题背景：某些机器 USERPROFILE / Path.home() / expanduser 返回的路径
+    与实际登录用户不一致（环境变量残留、旧账户目录并存），导致跨机运行
+    时提取/写回路径指向他人家目录（WinError 5 拒绝访问）。
+    而 LOCALAPPDATA 已被数据根注册点证明是“当前真实用户”（注册点
+    %LOCALAPPDATA%/AgentMemorySystem/data_root.txt 能正确定位数据根）。
+
+    优先级：
+    1. LOCALAPPDATA 标准形态推断（C:/Users/<user>/AppData/Local → C:/Users/<user>）
+    2. Path.home()（存在时）
+    3. USERPROFILE / HOME 环境变量（存在时）
+    4. Path.home() 兜底
+    """
+    # 1) LOCALAPPDATA 推断（与数据根注册点同源，跨机最可信）
+    la = os.environ.get("LOCALAPPDATA")
+    if la:
+        try:
+            p = Path(la)
+            parts = p.parts
+            # 标准形态: <root>/<user>/AppData/Local（最后两层固定 AppData/Local）
+            if len(parts) >= 4 and parts[-1] == "Local" and parts[-2] == "AppData":
+                cand = p.parents[1]  # 去掉 AppData/Local 两层 → 用户目录
+                if cand.exists():
+                    return cand
+        except Exception:
+            pass
+    # 2) Path.home()
+    try:
+        h = Path.home()
+        if h.exists():
+            return h
+    except Exception:
+        pass
+    # 3) 环境变量
+    for var in ("USERPROFILE", "HOME", "HOMEPATH"):
+        val = os.environ.get(var)
+        if val:
+            try:
+                p = Path(val)
+                if p.exists():
+                    return p
+            except Exception:
+                pass
+    # 4) 兜底
+    return Path.home()
+
+
 def _registry_file() -> Path:
     """注册文件路径（LOCALAPPDATA 下，本机稳定、不随项目移动）。"""
     global _registry_path

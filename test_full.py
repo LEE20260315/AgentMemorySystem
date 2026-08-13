@@ -1320,6 +1320,103 @@ def test_build_py_smoke_check():
     r.assert_true("has smoke check", "冒烟" in content and "shrink_memory_files" in content)
 
 
+def test_get_local_home_prefers_localappdata():
+    """v2.2.0: 跨机 home 错位场景，LOCALAPPDATA 推断优先生效"""
+    r.set_module("safe_io")
+
+    import safe_io
+
+    fake_root = Path(tempfile.mkdtemp())
+    users = fake_root / "Users"
+    # 当前登录用户 Dong（LOCALAPPDATA 正确）
+    (users / "Dong" / "AppData" / "Local").mkdir(parents=True)
+    # 残留旧账户 MR.Dong（Path.home/expanduser 会指向它）
+    (users / "MR.Dong").mkdir(parents=True, exist_ok=True)
+
+    old_la = os.environ.get("LOCALAPPDATA")
+    try:
+        os.environ["LOCALAPPDATA"] = str(users / "Dong" / "AppData" / "Local")
+        # 模拟残留：Path.home() 返回 MR.Dong
+        class FakePath(type(Path())):
+            @classmethod
+            def home(cls):
+                return users / "MR.Dong"
+        with patch("pathlib.Path.home", FakePath.home):
+            h = safe_io.get_local_home()
+        r.assert_true("uses localappdata user", str(h).replace("\\", "/").endswith("Users/Dong"))
+
+        # 正常环境：LOCALAPPDATA 与 Path.home 一致 → 结果不变
+        (users / "MR.Dong" / "AppData" / "Local").mkdir(parents=True, exist_ok=True)
+        os.environ["LOCALAPPDATA"] = str(users / "MR.Dong" / "AppData" / "Local")
+        with patch("pathlib.Path.home", FakePath.home):
+            h2 = safe_io.get_local_home()
+        r.assert_true("normal env unchanged", str(h2).replace("\\", "/").endswith("Users/MR.Dong"))
+    finally:
+        if old_la is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = old_la
+        shutil.rmtree(fake_root, ignore_errors=True)
+
+
+def test_expand_agent_home_path_tilde():
+    """v2.2.0: ~ 候选路径统一用 home 展开（防 USERPROFILE 残留错位）"""
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    home = Path("C:/Users/Dong")
+    def _s(p):
+        return str(p).replace("\\", "/")
+    r.assert_eq("tilde dir", _s(am._expand_agent_home_path("~/.trae-cn/memory", home)), "C:/Users/Dong/.trae-cn/memory")
+    r.assert_eq("tilde appdata", _s(am._expand_agent_home_path("~/AppData/Roaming/Trae/memory", home)), "C:/Users/Dong/AppData/Roaming/Trae/memory")
+    r.assert_eq("tilde only", _s(am._expand_agent_home_path("~", home)), "C:/Users/Dong")
+    r.assert_eq("absolute passthrough", _s(am._expand_agent_home_path("D:/x/memory", home)), "D:/x/memory")
+
+
+def test_detect_agents_cache_cross_device_invalidated():
+    """v2.2.0: .detected_agents.json 跨机缓存（含原机绝对路径）被过滤"""
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    data_root = tmp / "data"
+    (data_root / "_shared").mkdir(parents=True)
+    other_home = tmp / "Users" / "MR.Dong"
+    other_home.mkdir(parents=True)
+    cache = {
+        "detected_at": "2026-08-13T00:00:00+00:00",
+        "agents": {
+            "trae": {"path": str(other_home / ".trae-cn" / "memory"), "memory_files": [], "source": "auto"},
+            "pi": {"path": str(other_home / ".pi"), "memory_files": [], "source": "auto"},
+        },
+    }
+    (data_root / ".detected_agents.json").write_text(json.dumps(cache), encoding="utf-8")
+
+    config = am.ConfigManager(config_path=tmp / "config.json")
+    config.config["agent_detection"] = {"hermes": {"candidate_paths": [str(tmp / "hermes")]}}
+    config.config["agent_overrides"] = {}
+    config.config["sync_tool"] = {"cache_ttl_hours": 24}
+
+    old_la = os.environ.get("LOCALAPPDATA")
+    try:
+        # 本机 home 为 Dong（缓存里是 MR.Dong 路径 → 全部失效）
+        local_user = tmp / "Users" / "Dong"
+        (local_user / "AppData" / "Local").mkdir(parents=True)
+        os.environ["LOCALAPPDATA"] = str(local_user / "AppData" / "Local")
+        # 缓存 TTL 内命中分支需要 _candidate_env/get_data_root 能解析 data_root：直接 patch 数据根
+        with patch("agent_memory.get_data_root", return_value=data_root):
+            detected = am.detect_agents(config, force_redetect=False, write_cache=False)
+        r.assert_true("cross-device cache filtered", "trae" not in detected and "pi" not in detected)
+    finally:
+        if old_la is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = old_la
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -1393,6 +1490,10 @@ ALL_TESTS = [
     test_tools_package_importable,
     test_build_py_paths_tools,
     test_build_py_smoke_check,
+    # v2.2.0: 跨机 home 解析（LOCALAPPDATA 优先 + 缓存跨机失效）
+    test_get_local_home_prefers_localappdata,
+    test_expand_agent_home_path_tilde,
+    test_detect_agents_cache_cross_device_invalidated,
     # v2.2.0: shared.db 本机化 + 增量同步
     test_get_local_data_dir_under_localappdata,
     test_get_shared_db_path_not_in_data_root,

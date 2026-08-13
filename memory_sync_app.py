@@ -306,7 +306,16 @@ if sys.platform == "win32":
 # ---------------------------------------------------------------------------
 
 def _safe_home() -> Path:
-    """获取用户主目录（PyInstaller --windowed 模式下 Path.home() 可能返回异常路径）"""
+    """获取用户主目录（PyInstaller --windowed 模式下 Path.home() 可能返回异常路径）。
+
+    v2.2.0: 委托给 safe_io.get_local_home()——优先从 LOCALAPPDATA 推断，
+    避免环境残留（USERPROFILE 指向旧账户）导致跨机提取/写回路径错位。
+    """
+    from safe_io import get_local_home
+    try:
+        return get_local_home()
+    except Exception:
+        pass
     try:
         h = Path.home()
         if h.exists():

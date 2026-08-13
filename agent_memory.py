@@ -5031,6 +5031,18 @@ def _verify_agent_signature(path: Path, profile: dict) -> bool:
     return path.exists()
 
 
+def _expand_agent_home_path(pattern: str, home: Path) -> Path:
+    """展开 agent 候选路径（v2.2.0: 统一用 get_local_home 的 home 展开，
+    替代 os.path.expanduser——后者依赖 USERPROFILE，在环境残留场景
+    （USERPROFILE 指向旧账户）会解析到他人家目录）。"""
+    p = pattern.strip()
+    if p == "~":
+        return Path(home)
+    if p.startswith("~/") or p.startswith("~\\"):
+        return Path(home) / p[2:].replace("\\", "/")
+    return Path(os.path.expanduser(p))
+
+
 def detect_agents(
     config: ConfigManager = None,
     force_redetect: bool = False,
@@ -5101,6 +5113,19 @@ def detect_agents(
             age_hours = (datetime.now(timezone.utc) - detected_at).total_seconds() / 3600
             if age_hours < cache_ttl_hours:
                 result = cache.get("agents", {})
+                # v2.2.0: 跨机缓存失效——.detected_agents.json 位于数据根
+                # （OneDrive 同步），缓存的是原机的本机绝对路径；本机 home
+                # 不同则必须重检测，否则会提取/写回他人家目录（WinError 5）。
+                try:
+                    from safe_io import get_local_home
+                    local_home = str(get_local_home()).lower().rstrip("\\/")
+                    result = {
+                        aid: info for aid, info in result.items()
+                        if info.get("source") == "override"
+                        or str(info.get("path", "")).lower().rstrip("\\/").startswith(local_home)
+                    }
+                except Exception:
+                    pass
                 # 清除已失效的 override（配置中已移除的覆盖）
                 stale_overrides = [
                     aid for aid, info in result.items()
@@ -5117,8 +5142,11 @@ def detect_agents(
                             "detected_at": detected_at.isoformat(),
                             "source": "override"
                         }
-                logger.info("使用缓存的 Agent 检测结果 (age={:.1f}h)".format(age_hours))
-                return result
+                if not result:
+                    logger.info("缓存的 Agent 检测结果均不属于本机，强制重检测")
+                else:
+                    logger.info("使用缓存的 Agent 检测结果 (age={:.1f}h)".format(age_hours))
+                    return result
         except (json.JSONDecodeError, OSError, ValueError):
             pass
 
@@ -5130,7 +5158,17 @@ def detect_agents(
         return _detect_agents_legacy(config)
 
     found = {}
-    home = Path.home()
+    # v2.2.0: 统一用 safe_io.get_local_home()（LOCALAPPDATA 推断），
+    # 不用 Path.home()/expanduser（依赖 USERPROFILE，环境残留时会错位）
+    try:
+        from safe_io import get_local_home
+        home = get_local_home()
+    except Exception:
+        home = Path.home()
+
+    def _expand_agent_path(pattern: str) -> Path:
+        """展开 agent 候选路径（统一用 home，替代 os.path.expanduser）。"""
+        return _expand_agent_home_path(pattern, home)
 
     for agent_id, profile in profiles.items():
         # 手动覆盖优先
@@ -5148,7 +5186,7 @@ def detect_agents(
 
         # 遍历候选路径
         for pattern in profile.get("candidate_paths", []):
-            path = Path(os.path.expanduser(pattern))
+            path = _expand_agent_path(pattern)
             if _verify_agent_signature(path, profile):
                 memory_files = []
 
@@ -5282,7 +5320,11 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
     detected_paths = {info["path"] for info in found.values()}
 
     for pattern, source in generic_candidates:
-        base = Path(pattern).expanduser()
+        # v2.2.0: 统一用 home 展开（防 USERPROFILE 残留错位）
+        if pattern.startswith("~/") or pattern.startswith("~\\"):
+            base = home / pattern[2:].replace("\\", "/")
+        else:
+            base = Path(pattern).expanduser()
         if not base.exists():
             continue
         try:
@@ -5997,8 +6039,12 @@ class AgentRegistry:
     ]
 
     def _build_local_patterns(self) -> list:
-        """动态构建本机路径（不硬编码用户名）"""
-        home = Path.home()
+        """动态构建本机路径（不硬编码用户名；v2.2.0: 用 get_local_home 防跨机错位）"""
+        try:
+            from safe_io import get_local_home
+            home = get_local_home()
+        except Exception:
+            home = Path.home()
         patterns = []
         for agent_id, subdir, mem_name in self._AGENT_SUBDIRS:
             patterns.append((agent_id, str(home / subdir), mem_name))
@@ -6104,6 +6150,24 @@ class AgentRegistry:
             新发现的 Agent ID 列表
         """
         new_agents = []
+
+        # v2.2.0: 清理跨机污染的 registry 条目（agent_registry.json 位于数据根、
+        # 随 OneDrive 同步，会把原机的本机绝对路径带过来，导致新机器提取/
+        # 写回指向他人家目录）。凡 installation_path 不属于本机 home 的条目删除。
+        try:
+            from safe_io import get_local_home
+            local_home = str(get_local_home()).lower().rstrip("\\/")
+            stale = [
+                aid for aid, info in self.agents.items()
+                if str(info.get("installation_path", "")).lower().rstrip("\\/")
+                and not str(info.get("installation_path", "")).lower().rstrip("\\/").startswith(local_home)
+            ]
+            for aid in stale:
+                del self.agents[aid]
+            if stale:
+                self._save()
+        except Exception:
+            pass
 
         for agent_id, install_root, mem_subdir in self.LOCAL_PATTERNS:
             install_path = Path(install_root)
