@@ -29,6 +29,7 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 - **跨裝置同步** — 藉 OneDrive 或任意同步目錄，多機共享
 - **即裝即用** — 單檔發佈，免 Python 環境
 - **安全可靠** — 自動備份、衝突檢測、敏感詞過濾、一鍵回溯
+- **跨機可靠（v2.2.0）** — SQLite 只存本機（`%LOCALAPPDATA%`），跨機只交換可 diff 的 `memory_shared.md`，OneDrive 雙向同步不再損壞資料庫；記憶文件增量更新，無寫放大
 
 ## 特性
 
@@ -36,7 +37,7 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 |------|------|
 | **自動發現 Agent** | 候選路徑 + 特徵校驗，不依賴硬編碼路徑 |
 | **原生格式寫回** | Claude 子檔案、Trae 章節、Hermes § 分隔、通用 Markdown |
-| **融合去重** | 基於內容哈希之 SQLite 融合索引 |
+| **融合去重** | 基於內容哈希之 SQLite 融合索引（本機緩存，從 memory_shared.md 可重建） |
 | **分層儲存** | 熱 / 溫 / 冷三級資料，自動歸檔 |
 | **安全機制** | 自動備份、檔案鎖、OneDrive 衝突檢測、敏感詞過濾 |
 | **GUI + CLI** | 系統匣常駐程式 + 命令列工具 |
@@ -191,6 +192,7 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v2.2.0** | 2026-08 | **架构升级：SQLite 本机化 + 增量同步**：`shared.db` 移出 OneDrive（改为 `%LOCALAPPDATA%` 本机查询缓存，跨机事实源为 `memory_shared.md`）；`memory_shared.md` 增量追加（不再每次全量重写，消除写放大/冲突）；缓存缺失自动从 .md 重建、旧库自动迁移；**体积控制打包失效根治**（tools 变正式包 + 静态导入 + build.py 冒烟检查 + 内置兜底截断）；回滚功能重写（backup_log.json 驱动）；跨机设备解析禁止静默冒名（自动注册当前机器）；FileLock/备份名/时区过期清理/VACUUM 低频化/多语言冲突检测/跨机相对路径注入/日志轮转 等 20 项修复；新增 22 个回归测试 |
 | **v2.1.2** | 2026-08 | **图标与托盘修复**：`app_icon.ico` 重制为紫色记忆图标（原为白底灰图形，视觉上像羽毛）；新增 `--tray-test` 诊断参数实测托盘创建成功（`Shell_NotifyIconW add=1`）；删除 LOCALAPPDATA 残留副本 |
 | **v2.1.1** | 2026-08 | **数据分裂根治**：数据根注册点（`%LOCALAPPDATA%\AgentMemorySystem\data_root.txt`）成为唯一事实来源，所有入口（GUI/CLI/watchdog/任意 EXE 副本/开发模式）只读注册点；BAT 注入的环境变量为最高权威，每次启动自动纠正注册；watchdog 重启注入同一数据根；实测直接双击任意 EXE 均收敛到项目根 `AgentMemory/` |
 | **v2.1.0** | 2026-08 | **稳定性根治 + 智能感提升**：数据根目录统一（`data/` → `AgentMemory/`，修复 SyncEngine/GUI/状态三处分裂）；**FTS 索引孤儿清理**（删除操作统一走 `delete_memory()`，`tools/repair_fts.py` 实测回收 83.79MB：88.65MB→4.86MB）；写回策略修复（reconcile 与状态对齐，写回恢复实际生效）；**知识简报层**（`knowledge_brief.md` 精简摘要 + Agent 入口自动注入 `## Shared Knowledge` 引导，幂等）；心跳写本地磁盘、崩溃日志双写、重启计数持久化；`~/.agent_memory/` 6.8GB 历史遗留移出使用路径；UI 屏幕自适应 + Per-Monitor DPI + 窗口尺寸自动保存 + “打开数据目录”按钮；日志轮转调优 |

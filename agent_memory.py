@@ -2864,6 +2864,81 @@ class MemoryDecayService:
 # 便捷函数 - Phase 2 & 3 新增
 # ---------------------------------------------------------------------------
 
+def get_shared_db_path() -> Path:
+    """共享记忆数据库本机化路径（v2.2.0 方案 A）。
+
+    跨机事实源是 memory_shared.md（OneDrive 同步、可 diff、无锁冲突）；
+    shared.db 只是本机查询缓存，必须放 LOCALAPPDATA，避免 SQLite 在
+    OneDrive 双向同步下损坏/冲突。
+
+    Returns
+    -------
+    Path
+        本机 shared.db 缓存路径（父目录已确保存在）
+    """
+    from safe_io import get_local_data_dir
+    return get_local_data_dir() / "shared.db"
+
+
+def rebuild_shared_cache_from_md(md_files: list, db_path: Path = None) -> int:
+    """从 memory_shared.md 重建本机 shared.db 缓存（v2.2.0 方案 A）。
+
+    跨机同步只交换 .md（事实源）；本机缓存 DB 在缺失/损坏时从这里重建。
+
+    Parameters
+    ----------
+    md_files : list
+        memory_shared.md 文件路径列表
+    db_path : Path, optional
+        目标 DB 路径；默认 get_shared_db_path()
+
+    Returns
+    -------
+    int
+        写入的条目数（已有 id 去重）
+    """
+    import sqlite3 as _sqlite3
+    from tools.shrink_memory_files import parse_memory_entries
+    if db_path is None:
+        db_path = get_shared_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    seen_ids = set()
+    entries = []
+    for md in md_files:
+        if not md.exists():
+            continue
+        try:
+            text = md.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for fm, body in parse_memory_entries(text):
+            mid = fm.get("id") or fm.get("memory_id")
+            if not mid or mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            entries.append((fm, body))
+    if not entries:
+        return 0
+    # 直接 SQL 批量写入（绕过 MemoryDatabase 的向量/索引开销）
+    with MemoryDatabase(db_path) as db:
+        for fm, body in entries:
+            try:
+                db.insert_memory(MemoryEntry(
+                    id=str(fm.get("id")),
+                    agent_id=str(fm.get("agent_id", "unknown")),
+                    timestamp=str(fm.get("timestamp", "")),
+                    source_device=str(fm.get("source_device", "unknown")),
+                    domain=str(fm.get("domain", "general") or "general"),
+                    tags=list(fm.get("tags") or []),
+                    confidence=str(fm.get("confidence", "medium") or "medium"),
+                    conflict_with=None,
+                    content=body,
+                ))
+            except Exception:
+                continue
+    return len(entries)
+
+
 def create_merger(
     shared_db_path: Path,
     agent_configs: dict = None,

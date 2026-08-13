@@ -2,6 +2,26 @@
 
 > 本文件記錄 AgentMemorySystem 未來可能改進的方向，按優先級排序。
 
+## 已完成（v2.2.0，2026-08-13）
+
+- [x] **SQLite 本機化（方案 A）**：shared.db 移出 OneDrive → `%LOCALAPPDATA%\AgentMemorySystem\shared.db` 本機查詢緩存；跨機事實源為 memory_shared.md；緩存缺失自動從 .md 重建；舊 OneDrive shared.db 自動遷移並標記 .migrated
+- [x] **增量同步**：memory_shared.md 增量追加（僅追加新條目 id），文件缺失/格式損壞/超限降級全量重建；實測連續同步第 2、3 次零寫入
+- [x] **條目解析加固**：頭部定位法解析 id，正文含 --- 不再錯位
+- [x] **體積控制打包失效根治**：tools 變正式包 + 靜態導入 + build.py `--paths`/`--hidden-import` + 冒煙檢查 + `_shrink_md_fallback` 內置兜底
+- [x] **FileLock UnboundLocalError 修復**
+- [x] **回滾功能重寫**（backup_log.json 驅動，原引用不存在的 self.report 恒失效）
+- [x] **備份名加 agent_id 前綴**（跨 Agent 同名文件不再互相覆蓋）
+- [x] **跨機靜默冒名禁止**（無匹配即報錯，自動註冊當前機器；`load_identity`/`extract_local_to_fused`/`_resolve_device_name` 全路徑）
+- [x] **刪除根目錄 stale device_config.json**（load_identity/SessionFlusher/memory_cli 統一指向數據根）
+- [x] **DB 過期清理時區/格式偏差修復**（substr 日期前綴比較）
+- [x] **VACUUM 低頻化**（僅實際刪除時執行）
+- [x] **OneDrive 衝突檢測多語言**（中文/繁體/法語/德語）
+- [x] **_inject_brief_pointer 相對路徑注入**
+- [x] **_safe_read_text 死代碼修復**（MemoryError/OSError 分流）
+- [x] **.sync_state.json 文件鎖 + 磁盤合併**
+- [x] **心跳/托盤日誌 1MB 輪轉**
+- [x] **新增 22 個回歸測試**（全量 174 斷言全綠）
+
 ## 已完成（v2.1.1，2026-08-06）
 
 - [x] 数据根注册点（Single Source of Truth）：%LOCALAPPDATA%\AgentMemorySystem\data_root.txt 唯一事实来源

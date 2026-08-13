@@ -1079,6 +1079,148 @@ def test_safe_read_text_memory_error():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# v2.2.0: shared.db 本机化 + 增量同步
+# ---------------------------------------------------------------------------
+
+def test_get_local_data_dir_under_localappdata():
+    """本机私有目录应在 LOCALAPPDATA 下，不在 OneDrive 数据根。"""
+    import os
+    from safe_io import get_local_data_dir, get_data_root
+    local = get_local_data_dir()
+    assert local.is_dir()
+    assert "AgentMemorySystem" in str(local)
+    root = str(get_data_root()).lower()
+    assert str(local).lower() != root
+
+
+def test_get_shared_db_path_not_in_data_root():
+    """shared.db 本机化：不再位于 OneDrive 数据根。"""
+    from agent_memory import get_shared_db_path
+    from safe_io import get_data_root
+    p = get_shared_db_path()
+    assert p.name == "shared.db"
+    assert str(p).lower() != str(get_data_root() / "shared.db").lower()
+
+
+def test_rebuild_shared_cache_from_md():
+    """从 memory_shared.md 重建本机缓存（跨机事实源）。"""
+    import tempfile, shutil
+    from pathlib import Path
+    from agent_memory import rebuild_shared_cache_from_md, MemoryDatabase
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        md = tmp / "memory_shared.md"
+        md.write_text(
+            "# x 共享记忆\n\n"
+            "---\nid: m1\nagent_id: a\nsource_device: dev1\ndomain: general\n"
+            "confidence: high\nconflict_with: null\n---\n第一条\n\n"
+            "---\nid: m2\nagent_id: b\nsource_device: dev1\ndomain: general\n"
+            "confidence: medium\nconflict_with: null\n---\n第二条\n\n",
+            encoding="utf-8",
+        )
+        db = tmp / "shared.db"
+        n = rebuild_shared_cache_from_md([md], db)
+        assert n == 2
+        with MemoryDatabase(db) as mdb:
+            rows = mdb.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            assert rows == 2
+            assert mdb.conn.execute(
+                "SELECT content FROM memories WHERE id='m1'").fetchone()[0] == "第一条"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_parse_md_entry_ids_robust_to_separators():
+    """头部定位法：正文含 --- 分隔线时不漏解析。"""
+    import tempfile, shutil
+    from pathlib import Path
+    from sync_engine import SyncEngine
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        md = tmp / "memory_shared.md"
+        md.write_text(
+            "# t 共享记忆\n\n"
+            "---\nid: a1\nagent_id: x\n---\n正文一\n---\n另一段\n\n"
+            "---\nid: b2\nagent_id: y\n---\n正文二\n\n",
+            encoding="utf-8",
+        )
+        engine = SyncEngine()
+        ids = engine._parse_md_entry_ids(md)
+        assert ids == {"a1", "b2"}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_write_shared_md_incremental_no_rewrite():
+    """增量同步：md 已含全部条目时第二次调用不写文件（无写放大）。"""
+    import tempfile, shutil
+    from pathlib import Path
+    from sync_engine import SyncEngine
+    from agent_memory import MemoryDatabase, MemoryEntry
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "agent_pi").mkdir()
+        md = tmp / "agent_pi" / "memory_shared.md"
+        md.write_text("# pi 共享记忆\n\n", encoding="utf-8")
+        engine = SyncEngine()
+        engine.root = tmp
+        engine._shared_db = tmp / "shared.db"
+        with MemoryDatabase(engine._shared_db) as db:
+            db.insert_memory(MemoryEntry(
+                id="m1", agent_id="alpha", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[], confidence="high",
+                conflict_with=None, content="记忆一"))
+            db.insert_memory(MemoryEntry(
+                id="m2", agent_id="beta", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[], confidence="high",
+                conflict_with=None, content="记忆二"))
+        engine._write_shared_md("pi")
+        c1 = md.read_text(encoding="utf-8")
+        assert "id: m1" in c1 and "id: m2" in c1
+        mtime1 = md.stat().st_mtime_ns
+        import time; time.sleep(0.05)
+        engine._write_shared_md("pi")
+        assert md.stat().st_mtime_ns == mtime1, "无新增时应不写文件"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_ensure_shared_cache_migrates_legacy():
+    """迁移：OneDrive 旧 shared.db → 本机缓存 + 标记 .migrated。"""
+    import tempfile, os, sqlite3, shutil
+    from pathlib import Path
+    from sync_engine import SyncEngine
+    old_local = os.environ.get("LOCALAPPDATA")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        root = tmp / "root"; root.mkdir()
+        legacy = root / "shared.db"
+        conn = sqlite3.connect(str(legacy))
+        conn.execute("CREATE TABLE t (x)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit(); conn.close()
+        os.environ["LOCALAPPDATA"] = str(tmp / "local")
+        engine = SyncEngine()
+        engine.root = root
+        engine._shared_db = Path(os.environ["LOCALAPPDATA"]) / "AgentMemorySystem" / "shared.db"
+        p = engine._ensure_shared_cache()
+        assert p is not None and p.exists()
+        assert (root / "shared.db.migrated").exists(), "旧库应被标记"
+        assert not (root / "shared.db").exists()
+    finally:
+        if old_local is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = old_local
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ===========================================================================
+# 主入口
+# ===========================================================================
+
+
 def test_shrink_md_fallback_truncates():
     """体积控制兜底：超限文件被截断"""
     r.set_module("sync_engine")
@@ -1178,10 +1320,6 @@ def test_build_py_smoke_check():
     r.assert_true("has smoke check", "冒烟" in content and "shrink_memory_files" in content)
 
 
-# ===========================================================================
-# 主入口
-# ===========================================================================
-
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -1255,9 +1393,14 @@ ALL_TESTS = [
     test_tools_package_importable,
     test_build_py_paths_tools,
     test_build_py_smoke_check,
+    # v2.2.0: shared.db 本机化 + 增量同步
+    test_get_local_data_dir_under_localappdata,
+    test_get_shared_db_path_not_in_data_root,
+    test_rebuild_shared_cache_from_md,
+    test_parse_md_entry_ids_robust_to_separators,
+    test_write_shared_md_incremental_no_rewrite,
+    test_ensure_shared_cache_migrates_legacy,
 ]
-
-
 def main():
     print("=" * 60)
     print("AgentMemorySystem 完整测试套件 v2.0")

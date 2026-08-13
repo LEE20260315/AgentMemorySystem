@@ -153,6 +153,27 @@ def _resolve_and_register() -> Path:
     return fallback
 
 
+def get_local_data_dir() -> Path:
+    """获取本机私有数据目录（LOCALAPPDATA/AgentMemorySystem）。
+
+    v2.2.0 引入：跨机共享数据（memory_*.md、device_config.json 等）放数据根
+    （get_data_root()，通常为 OneDrive）；本机私有数据（SQLite 缓存、日志）
+    必须放这里，避免 SQLite 在 OneDrive 双向同步下损坏/冲突。
+
+    Returns
+    -------
+    Path
+        本机私有数据目录（已确保存在）
+    """
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+    d = Path(base) / "AgentMemorySystem"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
 def get_data_root() -> Path:
     """获取数据根目录（唯一事实来源，根治数据分裂）。
 

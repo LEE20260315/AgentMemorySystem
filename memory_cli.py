@@ -170,9 +170,9 @@ def cmd_merge(args):
     other_agent = args.with_agent
     other_dir = find_agent_dir(root, other_agent)
 
-    # 创建融合器
+    # 创建融合器（v2.2.0: shared.db 为本机缓存，不再放 OneDrive）
     merger = am.create_merger(
-        shared_db_path=root / "shared.db",
+        shared_db_path=am.get_shared_db_path(),
         agent_configs={
             args.agent: agent_dir / "memories.db",
             other_agent: other_dir / "memories.db"
@@ -207,9 +207,9 @@ def cmd_full_merge(args):
 
     print(f"发现 {len(agent_dirs)} 个Agent: {list(agent_dirs.keys())}")
 
-    # 创建融合器
+    # 创建融合器（v2.2.0: shared.db 为本机缓存）
     merger = am.create_merger(
-        shared_db_path=root / "shared.db",
+        shared_db_path=am.get_shared_db_path(),
         agent_configs=agent_dirs
     )
 

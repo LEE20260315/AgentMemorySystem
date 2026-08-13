@@ -24,6 +24,7 @@ from agent_memory import (
     detect_agents, extract_local_to_fused, get_config, get_logger,
     get_loaded_context, load_private_memories, register_current_device,
     startup, _resolve_source_device,
+    get_shared_db_path, rebuild_shared_cache_from_md,
 )
 from sync_writers import (
     SyncState, WriteBackResult, backup_file, get_writer,
@@ -158,6 +159,10 @@ class SyncEngine:
             from safe_io import get_data_root
             self.root = get_data_root()
         self.root.mkdir(parents=True, exist_ok=True)
+
+        # v2.2.0 方案 A：shared.db 本机化（LOCALAPPDATA），跨机只交换 memory_shared.md
+        # 共享记忆数据库是本机查询缓存，绝不放 OneDrive（SQLite 双向同步=反模式）
+        self._shared_db = get_shared_db_path()
 
         # 备份目录
         self.backup_dir = self.root / ".sync_backups" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -320,7 +325,9 @@ class SyncEngine:
 
             # ④ 跨 Agent 融合
             self._emit("开始跨 Agent 融合...")
-            self._emit("共享数据库: {}".format(self.root / "shared.db"))
+            # v2.2.0: shared.db 为本机缓存，融合前确保可用（迁移/重建）
+            shared_db_path = self._ensure_shared_cache()
+            self._emit("共享数据库(本机缓存): {}".format(shared_db_path))
             agent_dbs = {}
             for agent_id in detected:
                 extract_id = agent_id.replace("-appdata", "")
@@ -331,7 +338,7 @@ class SyncEngine:
 
             if len(agent_dbs) >= 2:
                 merger = create_merger(
-                    shared_db_path=self.root / "shared.db",
+                    shared_db_path=shared_db_path,
                     agent_configs=agent_dbs,
                 )
                 merge_results = merger.full_sync()
@@ -449,6 +456,71 @@ class SyncEngine:
         self._emit("同步完成, 耗时 {:.1f} 秒".format(report.duration_seconds))
         return report
 
+    # ------------------------------------------------------------------
+    # v2.2.0 方案 A：本机 shared.db 缓存管理
+    # 跨机事实源 = memory_shared.md（OneDrive 同步）；
+    # 本机 shared.db = 查询缓存（LOCALAPPDATA），缺失/损坏时可重建。
+    # ------------------------------------------------------------------
+    def _ensure_shared_cache(self) -> Path:
+        """确保本机 shared.db 缓存可用；缺失时迁移旧库或从 .md 重建。
+
+        Returns
+        -------
+        Path
+            本机缓存路径；重建失败时返回 None
+        """
+        if self._shared_db.exists():
+            return self._shared_db
+        try:
+            # 1) 迁移历史数据：旧 OneDrive shared.db（存在且尚未迁移过）
+            legacy = self.root / "shared.db"
+            if legacy.exists():
+                migrated = self.root / "shared.db.migrated"
+                if not migrated.exists():
+                    import shutil
+                    self._shared_db.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(legacy), str(self._shared_db))
+                    # 旧文件重命名标记（保留可恢复，不删除）
+                    try:
+                        legacy.replace(migrated)
+                    except OSError:
+                        pass
+                    self._emit("  迁移: OneDrive shared.db → 本机缓存 (旧文件已标记 shared.db.migrated)")
+                    return self._shared_db
+                # 已迁移过：旧文件仍在但本地缓存丢了，走 .md 重建
+            # 2) 从 memory_shared.md 重建（事实源）
+            count = self._rebuild_cache_from_md()
+            if count > 0:
+                self._emit("  重建: 本机 shared.db 缓存从 memory_shared.md 恢复 {} 条".format(count))
+                return self._shared_db
+            # 3) 完全无可重建数据：创建空库（保证后续读取不报错）
+            self._shared_db.parent.mkdir(parents=True, exist_ok=True)
+            with MemoryDatabase(self._shared_db):
+                pass
+            return self._shared_db
+        except Exception as e:
+            self.logger.warning("初始化本机 shared.db 缓存失败: {}".format(e))
+            return None
+
+    def _rebuild_cache_from_md(self) -> int:
+        """扫描所有 agent_*/memory_shared.md 重建本机缓存。
+
+        Returns
+        -------
+        int
+            写入条目数
+        """
+        md_files = []
+        if self.root.exists():
+            for sub in self.root.iterdir():
+                if sub.is_dir() and sub.name.startswith("agent_"):
+                    md = sub / "memory_shared.md"
+                    if md.exists():
+                        md_files.append(md)
+        if not md_files:
+            return 0
+        return rebuild_shared_cache_from_md(md_files, self._shared_db)
+
     def _repair_fts_if_needed(self) -> dict:
         """检查并修复数据根下所有 DB 的 FTS 孤儿索引（v2.1.0）。
 
@@ -463,7 +535,11 @@ class SyncEngine:
         """
         try:
             import os as _os
-            dbs = list(self.root.glob("*.db")) + list(self.root.glob("agent_*/memories.db"))
+            dbs = [p for p in self.root.glob("*.db")
+                   if p.name not in ("shared.db", "shared.db.migrated")]
+            dbs += list(self.root.glob("agent_*/memories.db"))
+            if self._shared_db.exists():
+                dbs.append(self._shared_db)
             total_repaired = 0
             total_saved = 0.0
             for db_path in dbs:
@@ -525,8 +601,8 @@ class SyncEngine:
         v2.0.1: LIMIT 200，防止目标文件无限膨胀触发污染循环。
                200 条足够覆盖最新记忆，writer 的 dedup 会跳过已写入的。
         """
-        shared_db = self.root / "shared.db"
-        if not shared_db.exists():
+        shared_db = self._ensure_shared_cache()
+        if not shared_db or not shared_db.exists():
             return []
 
         memories = []
@@ -553,13 +629,13 @@ class SyncEngine:
     # v2.0: memory_shared.md 写入（完全重建模式）
     # ------------------------------------------------------------------
     def _write_shared_md(self, agent_id: str, shared_memories: list = None):
-        """完全重建 <agent_dir>/memory_shared.md，从 shared.db 取最新 N 条共享记忆。
+        """增量更新 <agent_dir>/memory_shared.md（v2.2.0 方案 A + P3-13 增量同步）。
 
-        v2.0 设计要点：
-        - **完全重建**（非追加）：每次同步都从 shared.db 重新生成，确保一致性
+        v2.2.0 相比 v2.0 完全重建的改进：
+        - **增量追加**：解析现有 md 的条目 id，只追加库中新增的条目，
+          避免每次同步全量重写大文件（OneDrive 全量重写 = 写放大/冲突）。
+        - 文件缺失 / 格式损坏 / 体积超限 / 增量写入失败时降级为全量重建（修复能力保留）。
         - 跳过本 Agent 自己写的记忆（agent_id 匹配）
-        - 按 timestamp DESC 排序，取前 N 条（受 volume_policy 软限制）
-        - 每条记忆以 front matter + 正文格式写入
         - 剥离 sync 标记防止污染
 
         Parameters
@@ -567,8 +643,7 @@ class SyncEngine:
         agent_id : str
             当前 Agent ID
         shared_memories : list, optional
-            共享记忆列表。若为 None，则从 shared.db 完整加载。
-            传入此参数可避免重复加载（如调用方已有列表）。
+            共享记忆列表。若为 None，则从共享库完整加载。
         """
         agent_dir = self.root / ("agent_" + agent_id)
         if not agent_dir.exists():
@@ -576,22 +651,20 @@ class SyncEngine:
 
         shared_md_path = agent_dir / "memory_shared.md"
 
-        # 加载共享记忆：优先用传入的列表，否则从 shared.db 加载全部
+        # 加载共享记忆：优先用传入的列表，否则从共享库加载全部
         if shared_memories is None:
             shared_memories = self._load_all_shared_memories(agent_id)
 
         # 过滤掉本 Agent 自己的记忆
         entries = [m for m in shared_memories if m.agent_id != agent_id]
         if not entries:
-            # 无共享记忆：写空文件头
+            # 无共享记忆：写空文件头（仅当缺失或过小）
             if not shared_md_path.exists() or shared_md_path.stat().st_size < 50:
-                shared_md_path.write_text(
-                    "# {} 共享记忆\n\n".format(agent_id),
-                    encoding="utf-8",
-                )
+                from safe_io import _safe_write_text
+                _safe_write_text(shared_md_path, "# {} 共享记忆\n\n".format(agent_id))
             return
 
-        # v2.0 软限制：构建时动态检查体积，超限即停
+        # 体积软限制
         try:
             policy = self._load_volume_policy()
             limits = policy["limits"]["memory_shared_md"]
@@ -601,16 +674,9 @@ class SyncEngine:
             max_lines = 2000
             max_size_bytes = 128 * 1024
 
-        # 构造文件内容（完全重建，动态检查体积）
         from sync_writers import strip_sync_markers
 
-        lines = ["# {} 共享记忆".format(agent_id), ""]
-        current_size = len("\n".join(lines).encode("utf-8"))
-        written_count = 0
-        total_available = len(entries)
-
-        for mem in entries:
-            # 构建单条条目
+        def _build_entry_block(mem) -> list:
             tags_str = ", ".join('"{}"'.format(t) for t in (mem.tags or []))
             entry_lines = [
                 "---",
@@ -625,32 +691,85 @@ class SyncEngine:
                 "---",
             ]
             content = strip_sync_markers(mem.content or "")
+            # v2.2.0: 正文中独立的 --- 行（markdown 分隔线）会干扰条目边界解析，
+            # 写入时替换为 - - -，读取端无感知
+            import re as _re2
+            content = _re2.sub(r"(?m)^---\s*$", "- - -", content)
             entry_lines.append(content)
             entry_lines.append("")
+            return entry_lines
 
-            # 检查加入此条目后是否超限
+        # ---- 增量路径（文件存在且可解析）----
+        if shared_md_path.exists() and shared_md_path.stat().st_size >= 50:
+            existing_ids = self._parse_md_entry_ids(shared_md_path)
+            if existing_ids:
+                new_entries = [m for m in entries if m.id not in existing_ids]
+                if not new_entries:
+                    # 无新增：不写（避免 OneDrive 写放大）
+                    return
+                from safe_io import _safe_read_text, _safe_write_text
+                current = _safe_read_text(
+                    shared_md_path, default="# {} 共享记忆\n\n".format(agent_id))
+                # 预估：现有内容 + 全部新条目是否超限。超限 → 降级全量重建，
+                # 避免"增量追加 → 体积控制截断"的写放大循环。
+                est_lines = len(current.splitlines())
+                est_size = len(current.encode("utf-8"))
+                for mem in new_entries:
+                    blk = _build_entry_block(mem)
+                    est_lines += len(blk)
+                    est_size += len(("\n".join(blk) + "\n").encode("utf-8"))
+                if est_lines <= max_lines and est_size <= max_size_bytes:
+                    # 能完整容纳全部新条目：直接增量追加（最小写放大）
+                    blocks = []
+                    for mem in new_entries:
+                        blocks.extend(_build_entry_block(mem))
+                    new_text = current.rstrip() + "\n\n" + "\n".join(blocks).rstrip() + "\n"
+                    if _safe_write_text(shared_md_path, new_text):
+                        self._emit("  memory_shared.md({}): 增量追加 {} 条（库中共 {} 条）".format(
+                            agent_id, len(new_entries), len(entries)))
+                        return
+                    self._emit("  memory_shared.md({}): 增量写入失败，降级全量重建".format(agent_id))
+                # 超限 / 写入失败：降级全量重建
+
+        # ---- 全量重建路径（文件缺失 / 格式损坏 / 超限降级）----
+        lines = ["# {} 共享记忆".format(agent_id), ""]
+        current_size = len("\n".join(lines).encode("utf-8"))
+        written_count = 0
+        for mem in entries:
+            entry_lines = _build_entry_block(mem)
             new_lines_count = len(lines) + len(entry_lines)
             new_size = current_size + len(("\n".join(entry_lines) + "\n").encode("utf-8"))
-
             if new_lines_count > max_lines or new_size > max_size_bytes:
-                break  # 超限，停止添加
-
+                break
             lines.extend(entry_lines)
             current_size = new_size
             written_count += 1
 
         new_text = "\n".join(lines).rstrip() + "\n"
-
-        # 写入
         try:
             from safe_io import _safe_write_text
             if _safe_write_text(shared_md_path, new_text):
                 self._emit("  memory_shared.md({}): 重建完成，{} 条（库中共 {} 条）".format(
-                    agent_id, written_count, total_available))
+                    agent_id, written_count, len(entries)))
             else:
                 self._emit("  memory_shared.md({}): 写入失败（权限？）".format(agent_id))
         except Exception as e:
             self.logger.warning("写入 memory_shared.md 失败({}): {}".format(agent_id, e))
+
+    def _parse_md_entry_ids(self, md_path: Path) -> set:
+        """解析 memory_shared.md 中已存在的条目 id 集合（供增量判断）。
+
+        v2.2.0: 改用"头部定位法"——只认 `---` 后紧跟 `id:` 的条目头，
+        不受正文中独立 `---`（markdown 分隔线）干扰。原 FRONT_MATTER_RE
+        遇到正文含 `---` 的条目会错位，导致解析漏掉大部分条目。
+        """
+        try:
+            text = md_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return set()
+        import re as _re
+        pat = _re.compile(r"^---\s*$\nid:\s*(\S+)", _re.MULTILINE)
+        return set(pat.findall(text))
 
     # ------------------------------------------------------------------
     # v2.1.0: knowledge_brief.md 知识提炼层
@@ -692,8 +811,8 @@ class SyncEngine:
         brief_path = agent_dir / "knowledge_brief.md"
 
         # 加载全部共享记忆（含本 agent 自己写的——知识库里应包含全量知识）
-        shared_db = self.root / "shared.db"
-        if not shared_db.exists():
+        shared_db = self._ensure_shared_cache()
+        if not shared_db or not shared_db.exists():
             return
 
         memories = []
@@ -903,8 +1022,8 @@ class SyncEngine:
         list
             按 timestamp DESC 排序的 MemoryEntry 列表
         """
-        shared_db = self.root / "shared.db"
-        if not shared_db.exists():
+        shared_db = self._ensure_shared_cache()
+        if not shared_db or not shared_db.exists():
             return []
 
         memories = []
@@ -946,13 +1065,13 @@ class SyncEngine:
 
         result = {"purged": 0, "dbs_scanned": 0, "md_cleaned": 0, "details": {}}
 
-        # 扫描所有 agent_*/memories.db 和 shared.db
+        # 扫描所有 agent_*/memories.db 和本机 shared.db（v2.2.0: shared.db 已本机化）
         db_paths = []
         agent_dirs = []
         if self.root.exists():
-            shared_db = self.root / "shared.db"
+            shared_db = self._shared_db
             if shared_db.exists():
-                db_paths.append(("shared.db", shared_db))
+                db_paths.append(("shared.db(本机)", shared_db))
             for sub in self.root.iterdir():
                 if sub.is_dir() and sub.name.startswith("agent_"):
                     agent_dirs.append(sub)
@@ -1171,8 +1290,8 @@ class SyncEngine:
                     ))
                 # action == "ok" / "skipped_no_entries" 不打印
 
-        # 2. shared.db 过期清理 + VACUUM
-        shared_db_path = self.root / "shared.db"
+        # 2. shared.db 过期清理 + VACUUM（v2.2.0: 本机缓存）
+        shared_db_path = self._shared_db
         if shared_db_path.exists():
             try:
                 db_result = self._enforce_db_limit(shared_db_path, policy)

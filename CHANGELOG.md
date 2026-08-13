@@ -5,6 +5,35 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.2.0] - 2026-08-13
+
+### Changed（架构：shared.db 本机化，方案 A）
+
+- **SQLite 彻底移出 OneDrive**：`shared.db` 从数据根（OneDrive 同步目录）迁至 `%LOCALAPPDATA%\AgentMemorySystem\shared.db`，作为**本机查询缓存**；跨机事实源改为 `memory_shared.md`（可 diff、无锁冲突），OneDrive 双向同步 SQLite 的反模式终结
+- **缓存可重建**：本机缓存缺失/损坏时自动从 `agent_*/memory_shared.md` 重建（`rebuild_shared_cache_from_md`）；旧 OneDrive `shared.db` 首次同步自动迁移到本地并标记 `shared.db.migrated`（可恢复、不删除）
+- **增量同步（P3-13）**：`memory_shared.md` 从"每次全量重建"改为"增量追加"——解析现有条目 id，只追加库中新增条目；文件缺失/格式损坏/超限时降级全量重建，消除 OneDrive 写放大与冲突风险；实测连续 3 次同步后第 2、3 次零写入
+- **条目解析加固**：`_parse_md_entry_ids` 改用"头部定位法"（只认 `---` 后紧跟 `id:`），正文含 `---`（markdown 分隔线）不再导致解析错位；写入正文时将独立 `---` 行替换为 `- - -`
+
+### Fixed（本阶段修复的既有问题）
+
+- **体积控制打包失效（本轮核心 bug）**：`tools/shrink_memory_files.py` 未被 PyInstaller 收集（动态 `sys.path` + 裸 import），`_enforce_volume_control` 在 except 中整体 return，导致体积控制静默失效。修复：tools 变正式包（新增 `__init__.py`）、静态导入、`build.py` 加 `--paths tools` + `--hidden-import` + 打包后冒烟检查；新增 `_shrink_md_fallback` 内置兜底，即使再漏包也不会整体失效
+- **FileLock UnboundLocalError**：`lock_acquired` 未提前初始化，抛 LockError 时 finally 引用未定义变量掩盖原始异常
+- **回滚功能完全失效**：`SyncEngine.rollback()` 引用不存在的 `self.report`，回滚恒无效果；重写为 `backup_log.json` 驱动（备份名 → 目标路径映射）
+- **备份名冲突**：`backup_file` 备份名仅用原文件名，跨 Agent 同名文件（MEMORY.md/user_profile.md）互相覆盖；加入 `agent_id` 前缀
+- **跨机静默冒名**：`_resolve_source_device` / `_resolve_device_name` 匹配失败时回退 `default_device`，新机器记忆被错误标记为其他设备；改为无匹配即报错，调用方自动注册当前机器（hostname），注册失败回退真实 hostname，绝不冒名
+- **陈旧 device_config.json 分裂**：删除根目录遗留 `device_config.json`（office_pc，非真实设备），`load_identity`/`SessionFlusher`/`memory_cli` 统一指向数据根
+- **DB 过期清理时区/格式偏差**：时间戳为 T 分隔+小数秒格式，与 `datetime('now')` 空格格式字符串比较有边界偏差；改用 `substr(timestamp,1,10) < date('now',...)` 按天比较
+- **VACUUM 高频执行**：每次同步无条件 VACUUM 整个 DB；改为仅实际删除条目时执行
+- **OneDrive 冲突检测仅支持英文**：`(conflicted copy)` 之外的（冲突副本）/（衝突副本）/法语/德语命名漏检；改为单次遍历 + 多语言正则
+- **跨机路径注入失效**：`_inject_brief_pointer` 注入绝对路径，OneDrive 同步的入口文件在另一台机器失效；改为相对路径 + 查找提示
+- **`_safe_read_text` 死代码**：`isinstance(OSError, MemoryError)` 恒为 False；拆分为 MemoryError 直接返回默认值 + OSError 重试
+- **日志无限增长**：`heartbeat.log` / `tray_error.log` 超 1MB 自动滚动为 .old
+
+### Added
+
+- 新增 22 个回归测试（体积控制兜底/回滚/备份命名/设备解析/缓存重建/增量同步/迁移/中文冲突/SQL/build.py 等），全量测试 174 断言全绿
+- `.sync_state.json` 写入加文件锁 + 磁盘状态合并（同机多进程/跨机并发不互覆盖）
+
 ## [2.1.2] - 2026-08-07
 
 ### Fixed（图标与托盘）
