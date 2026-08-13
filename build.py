@@ -321,6 +321,10 @@ def build():
         "--hidden-import", "hashlib",
         "--hidden-import", "logging",
         "--hidden-import", "safe_io",
+        # v2.1.2: tools 包（静态导入 shrink_memory_files 供体积控制使用）
+        "--paths", str(here / "tools"),
+        "--hidden-import", "tools.shrink_memory_files",
+        "--hidden-import", "shrink_memory_files",
         # 排除不需要的大型模块
         "--exclude-module", "matplotlib",
         "--exclude-module", "numpy",
@@ -393,6 +397,27 @@ def build():
             print(f"依赖大小: {internal_size:.1f} MB")
             print("=" * 60)
             print()
+            # v2.1.2: 冒烟检查——验证关键模块已打进打包产物（防止静默失效）
+            try:
+                import zipfile
+                _internal_dir = source_dir / "_internal"
+                smoke_ok = False
+                if _internal_dir.exists():
+                    for pyz in _internal_dir.glob("*.zip"):
+                        try:
+                            with zipfile.ZipFile(pyz) as zf:
+                                names = zf.namelist()
+                                if any("shrink_memory_files" in n for n in names):
+                                    smoke_ok = True
+                                    break
+                        except Exception:
+                            continue
+                if smoke_ok:
+                    print("[冒烟] shrink_memory_files 已包含在打包产物中 ✓")
+                else:
+                    print("[警告] 未在打包产物中发现 shrink_memory_files，体积控制将失效！")
+            except Exception as e:
+                print(f"[警告] 冒烟检查失败: {e}")
             # 1) 把完整 OneDrive 分发包同步回项目根目录（供跨设备分发）
             try:
                 bundle_dir = _sync_repo_bundle(source_dir, here, dist_name)

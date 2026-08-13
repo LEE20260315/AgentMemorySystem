@@ -382,6 +382,17 @@ def _data_dir() -> Path:
     return get_data_root()
 
 
+def _append_rotated(log_path: Path, line: str, max_bytes: int = 1 * 1024 * 1024):
+    """追加一行日志；文件超过 max_bytes 时滚动为 .old（v2.1.2: 防止无限增长）。"""
+    try:
+        if log_path.exists() and log_path.stat().st_size > max_bytes:
+            log_path.replace(Path(str(log_path) + ".old"))
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 def _migrate_old_data():
     """把旧版本数据迁移到新目录。
 
@@ -1044,15 +1055,12 @@ class SyncMainWindow:
             local_dir = Path(_os.environ.get("LOCALAPPDATA", _os.path.expanduser("~"))) / "AgentMemorySystem"
             try:
                 local_dir.mkdir(parents=True, exist_ok=True)
-                with open(local_dir / "heartbeat.log", "a", encoding="utf-8") as f:
-                    f.write(line)
+                _append_rotated(local_dir / "heartbeat.log", line)
             except Exception:
                 pass
             # 辅助：数据根（OneDrive）——失败不影响主流程
             try:
-                _tray_log = _data_dir() / "tray_error.log"
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    f.write(line)
+                _append_rotated(_data_dir() / "tray_error.log", line)
             except Exception:
                 pass
         except Exception:

@@ -22,7 +22,8 @@ from agent_memory import (
     AgentRegistry, ConfigManager, MemoryDatabase, MemoryEntry,
     MemoryMerger, check_onedrive_conflicts, content_hash, create_merger,
     detect_agents, extract_local_to_fused, get_config, get_logger,
-    get_loaded_context, load_private_memories, startup,
+    get_loaded_context, load_private_memories, register_current_device,
+    startup, _resolve_source_device,
 )
 from sync_writers import (
     SyncState, WriteBackResult, backup_file, get_writer,
@@ -200,16 +201,23 @@ class SyncEngine:
                     if info.get("user_home", "") and Path(info["user_home"]).resolve() == Path(current_home).resolve():
                         return name
 
-                # default_device
-                if dc.get("default_device"):
-                    return dc["default_device"]
-                if dc.get("source_device"):
-                    return dc["source_device"]
+                # v2.1.2: 不再静默使用 default_device/source_device 冒充其他机器。
+                # 匹配失败时自动注册当前机器（hostname），或返回真实 hostname。
+                self.logger.warning(
+                    "device_config.json 中无设备匹配当前机器 (hostname={}, user_home={})，"
+                    "尝试自动注册".format(current_hostname, current_home))
+                try:
+                    register_current_device(dc_path)
+                    dc = json.loads(dc_path.read_text(encoding="utf-8"))
+                    return _resolve_source_device(dc, dc_path)
+                except Exception as e2:
+                    self.logger.warning("自动注册设备失败: {}".format(e2))
+                    return socket.gethostname().lower().replace("-", "_")
             except Exception as e:
                 self.logger.warning("读取 device_config.json 失败: {}".format(e))
 
-        # 回退
-        return self.config.get("device_name") or socket.gethostname()
+        # 回退：真实 hostname（绝不冒充其他已注册设备）
+        return self.config.get("device_name") or socket.gethostname().lower().replace("-", "_")
 
     def run(self) -> SyncReport:
         """
@@ -846,6 +854,18 @@ class SyncEngine:
             if marker in existing:
                 return  # 已注入，跳过
 
+            # v2.1.2: 注入相对路径（相对 Agent 入口文件所在目录）而非绝对路径。
+            # 绝对路径在另一台机器上必然失效（尤其入口文件本身在 OneDrive 同步树内）；
+            # 相对路径在 OneDrive 目录结构一致的场景下可跨机移植。
+            import os as _os
+            shared_md_abs = self.root / ("agent_{}/memory_shared.md".format(agent_id))
+            try:
+                rel_abs = _os.path.relpath(str(brief_abs), str(target_dir))
+                rel_md = _os.path.relpath(str(shared_md_abs), str(target_dir))
+            except Exception:
+                rel_abs = brief_rel
+                rel_md = "agent_{}/memory_shared.md".format(agent_id)
+
             brief_ref = """
 
 ## Shared Knowledge (auto-synced)
@@ -858,9 +878,12 @@ class SyncEngine:
 - 完整共享记忆（约 60-80KB）: {md}
 
 格式：front matter + Markdown，可由解析器直接读取。
+如果上述相对路径无法解析，请在数据根目录（data root）下
+搜索 agent_{agent}/knowledge_brief.md 与 agent_{agent}/memory_shared.md。
 """.format(
-                abs=Path(get_data_root()) / brief_rel,
-                md=Path(get_data_root()) / ("agent_{}/memory_shared.md".format(agent_id)),
+                abs=rel_abs,
+                md=rel_md,
+                agent=agent_id,
             )
 
             new_content = existing.rstrip() + brief_ref
@@ -994,15 +1017,11 @@ class SyncEngine:
             清理的条目总数
         """
         import re
-        import sys as _sys
         from agent_memory import _is_sync_generated_content
 
-        # 复用 shrink_memory_files 的解析函数
-        tools_dir = Path(__file__).parent / "tools"
-        if str(tools_dir) not in _sys.path:
-            _sys.path.insert(0, str(tools_dir))
+        # v2.1.2: 静态导入（tools 为正式包，可被 PyInstaller 静态收集）
         try:
-            from shrink_memory_files import parse_memory_entries, format_entry
+            from tools.shrink_memory_files import parse_memory_entries, format_entry
         except ImportError:
             self.logger.warning("无法导入 shrink_memory_files 解析函数，跳过 .md 清理")
             return 0
@@ -1105,16 +1124,13 @@ class SyncEngine:
         self._emit("\n📦 体积控制:")
 
         # 1. memory_private.md / memory_shared.md 体积控制
-        # 复用 tools/shrink_memory_files.py 的 shrink_file 函数
+        # 复用 tools/shrink_memory_files.py 的 shrink_file 函数（静态导入）
         try:
-            import sys as _sys
-            tools_dir = Path(__file__).parent / "tools"
-            if str(tools_dir) not in _sys.path:
-                _sys.path.insert(0, str(tools_dir))
-            from shrink_memory_files import shrink_file
+            from tools.shrink_memory_files import shrink_file
         except ImportError as e:
-            self._emit("  ⚠ 无法导入 shrink_file: {}".format(e))
-            return
+            # 兜底：shrink_file 不可用时用内置最小截断，绝不静默失效
+            self._emit("  ⚠ 无法导入 shrink_file: {}，使用内置兜底截断".format(e))
+            shrink_file = self._shrink_md_fallback
 
         limits_private = policy["limits"]["memory_private_md"]
         limits_shared = policy["limits"]["memory_shared_md"]
@@ -1168,6 +1184,54 @@ class SyncEngine:
             except Exception as e:
                 self._emit("  shared.db 体积控制失败: {}".format(e))
 
+    def _shrink_md_fallback(self, fp: Path, max_lines: int = 3000,
+                            max_size_kb: int = 256, dry_run: bool = False) -> dict:
+        """体积控制兜底：shrink_memory_files 不可用时的最小截断实现。
+
+        返回结构与 shrink_file 兼容：{action, before_lines, after_lines,
+        before_size_kb, after_size_kb, error}。保守策略：保留 front matter
+        头部 + 前 max_lines 行，绝不静默失效。
+        """
+        if not fp.exists():
+            return {"action": "skipped_no_entries", "before_lines": 0,
+                    "after_lines": 0, "before_size_kb": 0, "after_size_kb": 0}
+        try:
+            text = fp.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            return {"action": "error", "error": "读取失败: {}".format(e)}
+        before_lines = len(text.splitlines())
+        before_size = len(text.encode("utf-8"))
+
+        if before_lines <= max_lines and before_size <= max_size_kb * 1024:
+            return {"action": "ok", "before_lines": before_lines,
+                    "after_lines": before_lines,
+                    "before_size_kb": round(before_size / 1024, 1),
+                    "after_size_kb": round(before_size / 1024, 1)}
+
+        lines = text.splitlines()
+        header_end = 0
+        for i, ln in enumerate(lines):
+            if ln.strip() == "---":
+                header_end = i + 1
+                break
+        kept = lines[:header_end] + lines[header_end:max_lines]
+        new_text = "\n".join(kept).rstrip() + "\n"
+        if dry_run:
+            return {"action": "force_truncated", "before_lines": before_lines,
+                    "after_lines": len(kept),
+                    "before_size_kb": round(before_size / 1024, 1),
+                    "after_size_kb": round(len(new_text.encode("utf-8")) / 1024, 1)}
+        try:
+            from safe_io import _safe_write_text
+            if not _safe_write_text(fp, new_text):
+                return {"action": "error", "error": "写入失败（权限？）"}
+        except Exception as e:
+            return {"action": "error", "error": str(e)}
+        return {"action": "force_truncated", "before_lines": before_lines,
+                "after_lines": len(kept),
+                "before_size_kb": round(before_size / 1024, 1),
+                "after_size_kb": round(len(new_text.encode("utf-8")) / 1024, 1)}
+
     def _enforce_db_limit(self, db_path: Path, policy: dict) -> dict:
         """对 shared.db 执行过期清理和 VACUUM 回收。"""
         result = {"expired": 0, "vacuumed": False}
@@ -1186,10 +1250,13 @@ class SyncEngine:
                     # 阶段 1: 过期 low confidence 旧条目
                     # v2.1.0: 同步清理 FTS 索引（memories_fts 是独立表，需按 id 同步删）
                     ttl_low = exp_config.get("low_confidence_ttl_days", 90)
+                    # v2.1.2: 时间戳可能含 T 分隔符 / Z 后缀 / 小数秒，与
+                    # datetime('now') 的空格格式直接字符串比较存在边界偏差。
+                    # 改用日期前缀比较（substr 取前 10 位），按天过期、确定性。
                     expired_ids = db.conn.execute(
                         """SELECT id FROM memories
                            WHERE confidence = 'low'
-                             AND timestamp < datetime('now', '-' || ? || ' days')""",
+                             AND substr(timestamp, 1, 10) < date('now', '-' || ? || ' days')""",
                         (ttl_low,)
                     ).fetchall()
                     ids1 = [r[0] for r in expired_ids]
@@ -1204,7 +1271,7 @@ class SyncEngine:
                         expired_ids2 = db.conn.execute(
                             """SELECT id FROM memories
                                WHERE confidence IN ('low', 'medium')
-                                 AND timestamp < datetime('now', '-' || ? || ' days')""",
+                                 AND substr(timestamp, 1, 10) < date('now', '-' || ? || ' days')""",
                             (ttl_default,)
                         ).fetchall()
                         ids2 = [r[0] for r in expired_ids2]
@@ -1212,12 +1279,14 @@ class SyncEngine:
                             db.delete_memories(ids2)
                         result["expired"] += len(ids2)
 
-                # VACUUM 回收空间（必须在事务外执行）
-                try:
-                    db.conn.execute("VACUUM")
-                    result["vacuumed"] = True
-                except Exception as e:
-                    self.logger.warning("VACUUM 失败: {}".format(e))
+                # VACUUM 回收空间（v2.1.2: 低频化——仅当实际删除了条目时才执行，
+                # 避免每次同步都重写整个 DB，放大 OneDrive 同步冲突概率）
+                if result["expired"] > 0:
+                    try:
+                        db.conn.execute("VACUUM")
+                        result["vacuumed"] = True
+                    except Exception as e:
+                        self.logger.warning("VACUUM 失败: {}".format(e))
 
         except Exception as e:
             self.logger.warning("shared.db 体积控制失败: {}".format(e))
@@ -1249,37 +1318,43 @@ class SyncEngine:
 
         self._emit("回滚备份: {}".format(self.backup_dir))
 
-        # 构建 {备份文件名: 目标路径} 映射
-        target_files = {}
-        for bak_file in self.backup_dir.glob("*.bak"):
-            # 文件名格式: agent_id__filename.bak
-            name = bak_file.stem  # 去掉 .bak
-            # 尝试从写回结果中找到原始路径
-            for agent_id, wb in self.report.writeback_results.items() if hasattr(self, 'report') else []:
-                if name.replace("__", "_").startswith(agent_id):
-                    target_files[bak_file.name] = Path(wb.target_path) / name.split("__", 1)[-1]
+        # v2.1.2: 回滚完全由 backup_log.json 驱动（备份名 → 目标路径 映射），
+        # 不再依赖 run() 的 report（原实现引用不存在的 self.report，回滚恒失效）。
+        log_file = self.backup_dir / "backup_log.json"
+        if not log_file.exists():
+            self._emit("备份目录中没有 backup_log.json，无法定位目标文件")
+            return 0
 
-        # 简单回滚：直接复制所有 .bak 文件回去
-        import shutil
+        import json as _json
+        import shutil as _shutil
+        try:
+            log_data = _json.loads(log_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._emit("读取备份日志失败: {}".format(e))
+            return 0
+        if not isinstance(log_data, list):
+            log_data = []
+
         restored = 0
-        for bak_file in self.backup_dir.glob("*.bak"):
-            # 从文件名推断目标
-            # 这里简化处理：用户可以手动指定
+        seen = set()
+        for entry in log_data:
+            bak_name = entry.get("backup_name")
+            target = entry.get("target_path")
+            if not bak_name or not target:
+                continue
+            key = "{}->{}".format(bak_name, target)
+            if key in seen:
+                continue
+            seen.add(key)
+            bak_file = self.backup_dir / bak_name
+            if not bak_file.exists():
+                self._emit("  ⚠ 备份文件不存在: {}".format(bak_file.name))
+                continue
             try:
-                # 读取备份日志
-                log_file = self.backup_dir / "backup_log.json"
-                if log_file.exists():
-                    import json
-                    with open(log_file, "r", encoding="utf-8") as f:
-                        log_data = json.load(f)
-                    for entry in log_data:
-                        if entry.get("backup_name") == bak_file.name:
-                            target = Path(entry["target_path"])
-                            shutil.copy2(str(bak_file), str(target))
-                            self._emit("回滚: {} → {}".format(bak_file.name, target))
-                            restored += 1
-                            break
-            except Exception as e:
+                _shutil.copy2(str(bak_file), str(target))
+                self._emit("回滚: {} → {}".format(bak_file.name, target))
+                restored += 1
+            except OSError as e:
                 self._emit("回滚 {} 失败: {}".format(bak_file.name, e))
 
         self._emit("回滚完成, 恢复 {} 个文件".format(restored))

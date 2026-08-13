@@ -147,21 +147,57 @@ class SyncState:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             from safe_io import _safe_write_text
-            content = json.dumps(self.state, ensure_ascii=False, indent=2)
-            if not _safe_write_text(self.state_path, content):
-                # 主路径失败（OneDrive 锁？），尝试 LOCALAPPDATA 备份路径
-                import os
-                local_appdata = os.environ.get("LOCALAPPDATA", "")
-                if local_appdata:
-                    fallback_dir = Path(local_appdata) / "AgentMemorySystem"
-                    fallback_dir.mkdir(parents=True, exist_ok=True)
-                    fallback_path = fallback_dir / ".sync_state.json"
-                    _safe_write_text(fallback_path, content)
-                    logger.warning(
-                        "sync_state 主路径写入失败，已保存到备份路径: {}".format(fallback_path))
+            from agent_memory import FileLock
+            lock_path = self.state_path.with_name(".sync_state.lock")
+            # v2.1.2: 文件锁 + 合并磁盘最新状态（同机多进程/跨机并发不互相覆盖）
+            with FileLock(lock_path):
+                merged = self._merge_states(self._load_raw())
+                self.state = merged
+                content = json.dumps(self.state, ensure_ascii=False, indent=2)
+                if not _safe_write_text(self.state_path, content):
+                    # 主路径失败（OneDrive 锁？），尝试 LOCALAPPDATA 备份路径
+                    import os
+                    local_appdata = os.environ.get("LOCALAPPDATA", "")
+                    if local_appdata:
+                        fallback_dir = Path(local_appdata) / "AgentMemorySystem"
+                        fallback_dir.mkdir(parents=True, exist_ok=True)
+                        fallback_path = fallback_dir / ".sync_state.json"
+                        _safe_write_text(fallback_path, content)
+                        logger.warning(
+                            "sync_state 主路径写入失败，已保存到备份路径: {}".format(fallback_path))
         except Exception as e:
-            # 尽力而为，不让状态保存失败中断同步
-            logger.warning("sync_state 保存失败: {}".format(e))
+            # 锁不可用（如跨机同步延迟）：降级为直接原子写，尽力而为
+            try:
+                from safe_io import _safe_write_text
+                content = json.dumps(self.state, ensure_ascii=False, indent=2)
+                _safe_write_text(self.state_path, content)
+            except Exception:
+                pass
+            logger.warning("sync_state 保存失败(带锁): {}".format(e))
+
+    def _load_raw(self) -> dict:
+        """直接读取磁盘上的最新状态（不做 LOCALAPPDATA 回退，用于合并）。"""
+        if not self.state_path.exists():
+            return {}
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _merge_states(self, disk: dict) -> dict:
+        """合并磁盘最新状态与当前会话状态。
+
+        规则：
+        - 本会话触碰过的 agent（self.state 中存在 key）：以本会话为准
+          （reconcile 删除/清空的 hash 必须消失，不能因合并而复活）
+        - 本会话未涉及的 agent：保留磁盘内容（其他进程/机器的写入不丢）
+        """
+        merged = dict(disk) if isinstance(disk, dict) else {}
+        for agent_id, hashes in self.state.items():
+            merged[agent_id] = dict(hashes) if isinstance(hashes, dict) else {}
+        return merged
 
     def is_duplicate(self, agent_id: str, content: str) -> bool:
         h = content_hash(content)
@@ -251,7 +287,7 @@ class SyncState:
 # 备份管理
 # ---------------------------------------------------------------------------
 
-def backup_file(file_path: Path, backup_dir: Path) -> Path:
+def backup_file(file_path: Path, backup_dir: Path, agent_id: str = None) -> Path:
     """
     备份文件到指定目录
 
@@ -261,6 +297,8 @@ def backup_file(file_path: Path, backup_dir: Path) -> Path:
         要备份的文件
     backup_dir : Path
         备份目标目录
+    agent_id : str, optional
+        Agent ID（v2.1.2: 加入备份名防止不同 Agent 的同名文件互相覆盖）
 
     Returns
     -------
@@ -273,11 +311,38 @@ def backup_file(file_path: Path, backup_dir: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
     # 用原文件名 + .bak 后缀
     safe_name = file_path.name.replace("/", "_").replace("\\", "_")
+    if agent_id:
+        safe_name = "{}_{}".format(agent_id, safe_name)
     backup_path = backup_dir / "{}.bak".format(safe_name)
 
     import shutil
     shutil.copy2(str(file_path), str(backup_path))
     return backup_path
+
+
+def _append_backup_log(backup_dir: Path, agent_id, target_path, backup_name) -> None:
+    """把备份条目追加到 backup_log.json，供回滚时定位目标文件。"""
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        log_file = backup_dir / "backup_log.json"
+        entries = []
+        if log_file.exists():
+            try:
+                data = json.loads(log_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    entries = data
+            except Exception:
+                entries = []
+        entries.append({
+            "agent_id": agent_id,
+            "target_path": str(target_path),
+            "backup_name": backup_name,
+        })
+        log_file.write_text(
+            json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -815,11 +880,13 @@ class BaseMemoryWriter(ABC):
             )
         return hashes
 
-    def _do_backup(self, file_path: Path, backup_dir: Path) -> Optional[str]:
+    def _do_backup(self, file_path: Path, backup_dir: Path,
+                   agent_id: str = None) -> Optional[str]:
         if backup_dir and file_path.exists():
-            bp = backup_file(file_path, backup_dir)
+            bp = backup_file(file_path, backup_dir, agent_id=agent_id)
             if bp:
                 self.logger.info("备份: {} → {}".format(file_path, bp))
+                _append_backup_log(backup_dir, agent_id, file_path, bp.name)
                 return str(bp)
         return None
 
@@ -980,9 +1047,9 @@ class ClaudeMemoryWriter(BaseMemoryWriter):
                 # 备份
                 shared_file = mem_dir / "shared_from_agents.md"
                 if backup_dir:
-                    result.backup_path = self._do_backup(shared_file, backup_dir)
+                    result.backup_path = self._do_backup(shared_file, backup_dir, agent_id=agent_id)
                     # 也备份 MEMORY.md
-                    self._do_backup(mem_dir / "MEMORY.md", backup_dir)
+                    self._do_backup(mem_dir / "MEMORY.md", backup_dir, agent_id=agent_id)
 
                 # 写入 shared_from_agents.md（用 _safe_write_text 绕过文件锁）
                 if not _safe_write_text(shared_file, content):
@@ -1180,7 +1247,7 @@ class TraeMemoryWriter(BaseMemoryWriter):
         try:
             # 备份
             if backup_dir:
-                result.backup_path = self._do_backup(profile_path, backup_dir)
+                result.backup_path = self._do_backup(profile_path, backup_dir, agent_id=agent_id)
 
             content = _safe_read_text(profile_path, default="")
             if not content:
@@ -1422,7 +1489,7 @@ class HermesMemoryWriter(BaseMemoryWriter):
 
             # 备份
             if backup_dir:
-                result.backup_path = self._do_backup(md_path, backup_dir)
+                result.backup_path = self._do_backup(md_path, backup_dir, agent_id=agent_id)
 
             # 读取（用 _safe_read_text 绕过文件锁）
             content = _safe_read_text(md_path, default="")
@@ -1613,8 +1680,7 @@ class GenericMarkdownWriter(BaseMemoryWriter):
                 self.logger.warning("创建锁文件失败，继续: {}".format(e))
 
             if backup_dir:
-                result.backup_path = self._do_backup(md_path, backup_dir)
-
+                result.backup_path = self._do_backup(md_path, backup_dir, agent_id=agent_id)
             # 用 _safe_read_text 读取（绕过文件锁）
             content = _safe_read_text(md_path, default="")
 

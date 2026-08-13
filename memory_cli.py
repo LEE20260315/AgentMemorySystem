@@ -38,22 +38,17 @@ def cmd_write(args):
     # 智能兜底: device_config.json 缺失时自动创建
     device_config_path = agent_dir / "device_config.json"
     if not device_config_path.exists():
-        # 优先检查本地代码目录 (v1.2 设计)
-        local_code_dir = Path(__file__).parent
-        local_dc = local_code_dir / "device_config.json"
-        if local_dc.exists():
-            device_config_path = local_dc
-        else:
-            # 兜底: 在 agent_dir 创建默认
-            import socket
-            default_device = socket.gethostname().lower().replace("\\", "_").replace(" ", "_")
-            default_device = "agent_" + default_device if not default_device.startswith("agent_") else default_device
-            device_config_path.write_text(
-                json.dumps({"source_device": default_device}, indent=2, ensure_ascii=False),
-                encoding="utf-8"
-            )
-            print("[AUTO-CREATE] 缺少 device_config.json, 已自动创建: {}".format(device_config_path))
-            print("             source_device = {}".format(default_device))
+        # v2.1.2: 不再回退到仓库根目录的旧版 device_config.json（可能是其他机器
+        # 的陈旧配置，会导致设备名分裂），直接用 hostname 自动创建。
+        import socket
+        default_device = socket.gethostname().lower().replace("\\", "_").replace(" ", "_")
+        default_device = "agent_" + default_device if not default_device.startswith("agent_") else default_device
+        device_config_path.write_text(
+            json.dumps({"source_device": default_device}, indent=2, ensure_ascii=False),
+            encoding="utf-8"
+        )
+        print("[AUTO-CREATE] 缺少 device_config.json, 已自动创建: {}".format(device_config_path))
+        print("             source_device = {}".format(default_device))
 
     # 启动
     am._context = None

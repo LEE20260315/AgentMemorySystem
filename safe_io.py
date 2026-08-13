@@ -324,10 +324,11 @@ def _safe_read_text(path, default: str = "", encoding: str = "utf-8", max_size: 
                         return f.read()
             except OSError:
                 pass
-        except (OSError, MemoryError):
-            # MemoryError 或其他 OSError：返回默认值而非崩溃
-            if isinstance(OSError, MemoryError):
-                return default
+        except MemoryError:
+            # v2.1.2: 超大文件即使截断读取仍内存不足：直接返回默认值（重试无意义）
+            return default
+        except OSError:
+            # 其他 OSError：重试（最多 3 次），最终返回默认值
             pass
         if attempt < 2:
             time.sleep(0.3 * (attempt + 1))

@@ -523,6 +523,7 @@ def FileLock(lock_path):
      超过 30 秒即视为死锁。)
     """
     lock_fd = None
+    lock_acquired = False
     try:
         # 死锁检测: 检查已有锁是否超时
         if lock_path.exists():
@@ -745,7 +746,13 @@ def load_identity(identity_path, device_config_path=None):
             )
 
     if device_config_path is None:
-        device_config_path = Path(__file__).parent / "device_config.json"
+        # v2.1.2: 默认使用数据根的 device_config.json（单一事实来源），
+        # 避免读到仓库根目录的旧版 device_config.json 导致设备名分裂。
+        try:
+            from safe_io import get_data_root
+            device_config_path = get_data_root() / "device_config.json"
+        except Exception:
+            device_config_path = Path(__file__).parent / "device_config.json"
 
     if not device_config_path.exists():
         raise DeviceConfigNotFoundError(
@@ -757,9 +764,20 @@ def load_identity(identity_path, device_config_path=None):
 
     device_raw = json.loads(device_config_path.read_text(encoding="utf-8"))
 
-    # v2.0: 多机注册表解析
-    # 优先级：hostname 匹配 > user_home 匹配 > default_device > source_device (legacy)
-    source_device = _resolve_source_device(device_raw, device_config_path)
+    # v2.0: 多机注册表解析（hostname 匹配 > user_home 匹配）
+    try:
+        source_device = _resolve_source_device(device_raw, device_config_path)
+    except DeviceConfigNotFoundError:
+        # v2.1.2: 无匹配设备时自动注册当前机器（hostname），
+        # 之后 Agent 记忆不再被标记为其他设备的设备名（跨机冒名）。
+        try:
+            register_current_device(device_config_path)
+            device_raw = json.loads(device_config_path.read_text(encoding="utf-8"))
+            source_device = _resolve_source_device(device_raw, device_config_path)
+        except Exception:
+            # 注册/重读失败（如 OneDrive 锁）：回退到真实 hostname，绝不冒名
+            import socket
+            source_device = socket.gethostname().lower().replace("-", "_")
 
     # v2.0: 相对路径解析
     # identity.json 所在目录作为基准
@@ -795,8 +813,9 @@ def _resolve_source_device(device_raw: dict, device_config_path: Path) -> str:
 
     v2.0 多机注册表支持：
     1. 若 devices 字典存在，按 hostname / user_home 匹配当前机器
-    2. 无匹配时回退到 default_device
-    3. 兼容旧格式：仅有 source_device 字段时直接使用
+    2. v2.1.2: 无匹配时直接抛错（不再回退 default_device，避免跨机冒名），
+       调用方可捕获后自动注册当前机器
+    3. 兼容旧格式：仅有 source_device 字段（无 devices 字典）时直接使用
 
     Returns
     -------
@@ -847,22 +866,17 @@ def _resolve_source_device(device_raw: dict, device_config_path: Path) -> str:
         if device_home and Path(device_home).resolve() == Path(current_user_home).resolve():
             return device_name
 
-    # 3. default_device
-    default_device = device_raw.get("default_device")
-    if default_device and default_device in devices:
-        return default_device
-
-    # 4. 兼容旧字段
-    if "source_device" in device_raw:
-        return device_raw["source_device"]
-
+    # v2.1.2: 移除 default_device / source_device 静默回退。
+    # 多机注册表存在时，无匹配必须显式失败（由调用方决定自动注册），
+    # 否则新机器会被静默标记为其他机器的设备名（跨机冒名）。
     # 无法匹配：报错并提示
     available = ", ".join("{} (host={})".format(
         name, info.get("hostname", "?") if isinstance(info, dict) else "?"
     ) for name, info in devices.items())
     raise DeviceConfigNotFoundError(
         "device_config.json 中无设备匹配当前机器 (hostname={}, user_home={})。"
-        "可用设备: {}。请运行: python memory_cli.py register-device".format(
+        "可用设备: {}。请运行: python memory_cli.py register-device"
+        "（同步引擎会自动注册，无需手动操作）".format(
             current_hostname, current_user_home, available
         )
     )
@@ -922,10 +936,18 @@ def register_current_device(device_config_path: Path, device_name: str = None) -
     config["default_device"] = config.get("default_device", device_name)
 
     device_config_path.parent.mkdir(parents=True, exist_ok=True)
-    device_config_path.write_text(
-        json.dumps(config, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # v2.1.2: 原子写（避免多机首次并发注册时 JSON 半写/损坏）
+    try:
+        from safe_io import _safe_write_text
+        _safe_write_text(
+            device_config_path,
+            json.dumps(config, ensure_ascii=False, indent=2),
+        )
+    except Exception:
+        device_config_path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return device_name
 
 
@@ -1033,9 +1055,12 @@ def check_conflict_files(memory_root):
     OneDrive 冲突文件命名格式: memory_private-<设备名>.md
     若存在冲突文件, 返回 False (暂停写入); 否则返回 True。
     """
-    conflict_pattern = re.compile(r"^memory_private-.*\.md$")
+    # v2.1.2: 兼容多语言冲突命名
+    conflict_pattern = re.compile(
+        r"^memory_private-.*\.md$|\(conflicted copy\)|（冲突副本）|（衝突副本）"
+    )
     for child in memory_root.iterdir():
-        if child.is_file() and conflict_pattern.match(child.name):
+        if child.is_file() and conflict_pattern.search(child.name):
             return False
     return True
 
@@ -5652,7 +5677,18 @@ def check_onedrive_conflicts(root: Path) -> list:
     """
     if not root.exists():
         return []
-    return list(root.rglob("* (conflicted copy)*"))
+    # v2.1.2: 支持多语言冲突命名（英文/简体中文/繁体中文/法语/德语），
+    # 之前只匹配英文 "(conflicted copy)" 导致中文系统漏检。
+    # 单次遍历 + 正则匹配，避免对每语言各做一次全树扫描。
+    import re as _re
+    conflict_re = _re.compile(
+        r"\(conflicted copy\)|（冲突副本）|\（?冲突副本\）?|（衝突副本）|\(conflit\)|\(Konflikt\)"
+    )
+    result = []
+    for p in root.rglob("*"):
+        if p.is_file() and conflict_re.search(p.name):
+            result.append(p)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -6726,8 +6762,15 @@ def extract_local_to_fused(agent_id: str, root: Path = None,
             root_dc_raw = json.loads(root_device_config.read_text(encoding="utf-8"))
             resolved_device = _resolve_source_device(root_dc_raw, root_device_config)
         except Exception:
-            # _resolve_source_device 失败时回退到 unknown
-            pass
+            # v2.1.2: 无匹配设备时自动注册当前机器（hostname），
+            # 避免静默标记为 unknown / 冒充其他已注册设备。
+            try:
+                register_current_device(root_device_config)
+                root_dc_raw = json.loads(root_device_config.read_text(encoding="utf-8"))
+                resolved_device = _resolve_source_device(root_dc_raw, root_device_config)
+            except Exception:
+                import socket
+                resolved_device = socket.gethostname().lower().replace("-", "_")
 
     identity_data = {
         "agent_id": agent_id,
@@ -7224,17 +7267,14 @@ class SessionFlusher:
             identity_path = self.memory_root / "identity.json"
             device_config_path = self.memory_root / "device_config.json"
             if not device_config_path.exists():
-                # 兜底: 使用本地代码目录或自动创建
-                local_dc = Path(__file__).parent / "device_config.json"
-                if local_dc.exists():
-                    device_config_path = local_dc
-                else:
-                    import socket
-                    default_device = socket.gethostname().lower().replace("\\", "_").replace(" ", "_")
-                    device_config_path.write_text(
-                        json.dumps({"source_device": default_device}, indent=2, ensure_ascii=False),
-                        encoding="utf-8"
-                    )
+                # v2.1.2: 不再回退到仓库根目录的旧版 device_config.json（可能是其他
+                # 机器的陈旧配置）。数据根不存在时直接用 hostname 自动创建。
+                import socket
+                default_device = socket.gethostname().lower().replace("\\", "_").replace(" ", "_")
+                device_config_path.write_text(
+                    json.dumps({"source_device": default_device}, indent=2, ensure_ascii=False),
+                    encoding="utf-8"
+                )
             startup(identity_path, device_config_path)
 
         for entry in buffer:

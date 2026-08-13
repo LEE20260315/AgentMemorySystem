@@ -909,6 +909,276 @@ def test_integration_rollback_no_crash():
 
 
 # ===========================================================================
+# 7.5 v2.1.2 修复回归测试
+# ===========================================================================
+
+def test_filelock_acquire_release():
+    """FileLock 正常获取/释放"""
+    r.set_module("agent_memory")
+    from agent_memory import FileLock
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        lock_path = tmp / "test.lock"
+        with FileLock(lock_path):
+            r.assert_true("lock file exists", lock_path.exists())
+        r.assert_true("lock released", not lock_path.exists())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_filelock_conflict_raises_lockerror():
+    """FileLock 锁冲突时抛 LockError（而非 UnboundLocalError）"""
+    r.set_module("agent_memory")
+    from agent_memory import FileLock, LockError
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        lock_path = tmp / "test.lock"
+        with FileLock(lock_path):
+            try:
+                with FileLock(lock_path):
+                    r.fail("second lock", "should raise")
+            except LockError:
+                r.ok("second lock raises LockError")
+            except UnboundLocalError as e:
+                r.fail("second lock", "UnboundLocalError: {}".format(e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_filelock_stale_lock_recovered():
+    """FileLock 陈旧锁（超时）自动清理"""
+    r.set_module("agent_memory")
+    from agent_memory import FileLock
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        lock_path = tmp / "test.lock"
+        lock_path.write_text("2000-01-01T00:00:00", encoding="utf-8")
+        with FileLock(lock_path):
+            r.ok("stale lock recovered")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_backup_file_agent_id_naming():
+    """备份文件名含 agent_id，不同 Agent 同名文件不互相覆盖"""
+    r.set_module("sync_writers")
+    from sync_writers import backup_file
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        a = tmp / "a" / "MEMORY.md"; a.parent.mkdir(parents=True, exist_ok=True)
+        a.write_text("x", encoding="utf-8")
+        b = tmp / "b" / "MEMORY.md"; b.parent.mkdir(parents=True, exist_ok=True)
+        b.write_text("y", encoding="utf-8")
+        bd = tmp / "backups"
+        bak_a = backup_file(a, bd, agent_id="hermes")
+        bak_b = backup_file(b, bd, agent_id="trae")
+        r.assert_true("names differ", bak_a.name != bak_b.name)
+        r.assert_true("hermes prefixed", "hermes" in bak_a.name)
+        r.assert_true("trae prefixed", "trae" in bak_b.name)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_backup_log_roundtrip():
+    """备份日志 + SyncEngine.rollback 恢复目标文件"""
+    r.set_module("sync_engine")
+    from sync_engine import SyncEngine
+    from sync_writers import _append_backup_log
+    from safe_io import _safe_write_text
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        target = tmp / "target.md"
+        _safe_write_text(target, "original")
+        backup_dir = tmp / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        bak = backup_dir / "hermes_target.md.bak"
+        bak.write_text("original", encoding="utf-8")
+        _append_backup_log(backup_dir, "hermes", str(target), bak.name)
+        _safe_write_text(target, "mutated")
+
+        engine = SyncEngine()
+        engine.root = tmp
+        engine.backup_dir = backup_dir
+        restored = engine.rollback()
+        r.assert_eq("rollback restores 1", restored, 1)
+        r.assert_eq("content restored", target.read_text(encoding="utf-8"), "original")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_resolve_source_device_no_match_raises():
+    """跨机无匹配时抛 DeviceConfigNotFoundError（不静默冒名）"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        dc = {"devices": {"other": {"hostname": "totally-different-host-xyz",
+                                    "user_home": "C:/no/such/home"}},
+              "default_device": "other"}
+        try:
+            am._resolve_source_device(dc, tmp / "device_config.json")
+            r.fail("no match raises", "should raise DeviceConfigNotFoundError")
+        except am.DeviceConfigNotFoundError:
+            r.ok("no match raises DeviceConfigNotFoundError")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_register_current_device_roundtrip():
+    """自动注册当前机器后能被解析"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        dc_path = tmp / "device_config.json"
+        name = am.register_current_device(dc_path)
+        dc = json.loads(dc_path.read_text(encoding="utf-8"))
+        resolved = am._resolve_source_device(dc, dc_path)
+        r.assert_eq("resolve after register", resolved, name)
+        r.assert_true("default set", dc.get("default_device") == name)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_resolve_device_name_no_impersonation():
+    """SyncEngine._resolve_device_name 匹配失败时不返回其他机器名"""
+    r.set_module("sync_engine")
+    import socket
+    from sync_engine import SyncEngine
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        dc = tmp / "device_config.json"
+        dc.write_text(json.dumps({
+            "devices": {"other_machine": {"hostname": "totally-different-host-xyz",
+                                           "user_home": "C:/no/such/home"}},
+            "default_device": "other_machine",
+        }), encoding="utf-8")
+        engine = SyncEngine()
+        engine.root = tmp
+        with patch("sync_engine.register_current_device") as mock_reg:
+            mock_reg.side_effect = Exception("simulated write failure")
+            name = engine._resolve_device_name()
+        r.assert_true("no impersonation", name != "other_machine")
+        r.assert_eq("returns hostname", name, socket.gethostname().lower().replace("-", "_"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_safe_read_text_memory_error():
+    """_safe_read_text 遇 MemoryError 返回默认值（不再死代码重试）"""
+    r.set_module("safe_io")
+    from safe_io import _safe_read_text
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        p = tmp / "big.md"
+        p.write_text("hello", encoding="utf-8")
+        with patch("builtins.open", side_effect=MemoryError("oom")):
+            result = _safe_read_text(p, default="DEFAULT")
+        r.assert_eq("memory error returns default", result, "DEFAULT")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_shrink_md_fallback_truncates():
+    """体积控制兜底：超限文件被截断"""
+    r.set_module("sync_engine")
+    from sync_engine import SyncEngine
+    engine = SyncEngine()
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        md = tmp / "memory_shared.md"
+        content = "# 测试\n\n" + "\n".join("line {}".format(i) for i in range(5000))
+        md.write_text(content, encoding="utf-8")
+        res = engine._shrink_md_fallback(md, max_lines=1000, max_size_kb=256)
+        r.assert_eq("action truncated", res["action"], "force_truncated")
+        r.assert_true("lines reduced", res["after_lines"] < res["before_lines"])
+        actual = md.read_text(encoding="utf-8").splitlines()
+        r.assert_true("file actually truncated", len(actual) <= 1000)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_sync_state_merge_preserves_other_agents():
+    """SyncState 合并保留其他 agent 的磁盘状态"""
+    r.set_module("sync_writers")
+    from sync_writers import SyncState
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        state_path = tmp / ".sync_state.json"
+        state_path.write_text(json.dumps({"agent_b": {"h1": "2026-01-01"}}), encoding="utf-8")
+        ss = SyncState(state_path=state_path)
+        ss.state["agent_a"] = {"h2": "2026-01-02"}
+        merged = ss._merge_states(ss._load_raw())
+        r.assert_true("other agent preserved", "agent_b" in merged)
+        r.assert_true("own agent kept", "agent_a" in merged)
+        r.assert_true("other hash kept", "h1" in merged["agent_b"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_check_onedrive_conflicts_chinese():
+    """OneDrive 冲突检测支持中文命名"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "记忆（冲突副本）.md").write_text("x", encoding="utf-8")
+        conflicts = am.check_onedrive_conflicts(tmp)
+        r.assert_eq("chinese conflict detected", len(conflicts), 1)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_enforce_db_limit_date_prefix_sql():
+    """过期清理 SQL：日期前缀比较对 T/Z/小数秒时间戳生效"""
+    r.set_module("sync_engine")
+    import sqlite3
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db_path = tmp / "shared.db"
+        con = sqlite3.connect(str(db_path))
+        con.execute("CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT, confidence TEXT, timestamp TEXT)")
+        con.executemany("INSERT INTO memories VALUES (?,?,?,?)", [
+            ("old1", "c", "low", "2025-01-01T02:24:31.09081"),
+            ("old2", "c", "low", "2025-01-01T02:24:31Z"),
+            ("new1", "c", "low", "2026-07-01 02:24:31"),
+        ])
+        con.commit()
+        rows = con.execute(
+            "SELECT id FROM memories WHERE confidence='low' "
+            "AND substr(timestamp,1,10) < date('now','-180 days')"
+        ).fetchall()
+        ids = [r_[0] for r_ in rows]
+        r.assert_true("old entries expire", "old1" in ids and "old2" in ids)
+        r.assert_true("new entry kept", "new1" not in ids)
+        con.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tools_package_importable():
+    """tools 包静态导入（体积控制不再依赖 sys.path 魔法）"""
+    r.set_module("tools")
+    from tools.shrink_memory_files import shrink_file, parse_memory_entries, format_entry
+    r.assert_true("shrink_file callable", callable(shrink_file))
+    r.assert_true("parse_memory_entries callable", callable(parse_memory_entries))
+
+
+def test_build_py_paths_tools():
+    """build.py 包含 tools 包打包参数（防 shrink_file 缺失回归）"""
+    r.set_module("build.py")
+    content = (Path(__file__).parent / "build.py").read_text(encoding="utf-8")
+    r.assert_true("has --paths tools", "--paths" in content and "shrink_memory_files" in content)
+
+
+def test_build_py_smoke_check():
+    """build.py 包含打包产物冒烟检查"""
+    r.set_module("build.py")
+    content = (Path(__file__).parent / "build.py").read_text(encoding="utf-8")
+    r.assert_true("has smoke check", "冒烟" in content and "shrink_memory_files" in content)
+
+
+# ===========================================================================
 # 主入口
 # ===========================================================================
 
@@ -968,6 +1238,23 @@ ALL_TESTS = [
     test_integration_full_sync_flow,
     test_integration_path_consistency,
     test_integration_rollback_no_crash,
+    # v2.1.2 fixes
+    test_filelock_acquire_release,
+    test_filelock_conflict_raises_lockerror,
+    test_filelock_stale_lock_recovered,
+    test_backup_file_agent_id_naming,
+    test_backup_log_roundtrip,
+    test_resolve_source_device_no_match_raises,
+    test_register_current_device_roundtrip,
+    test_resolve_device_name_no_impersonation,
+    test_safe_read_text_memory_error,
+    test_shrink_md_fallback_truncates,
+    test_sync_state_merge_preserves_other_agents,
+    test_check_onedrive_conflicts_chinese,
+    test_enforce_db_limit_date_prefix_sql,
+    test_tools_package_importable,
+    test_build_py_paths_tools,
+    test_build_py_smoke_check,
 ]
 
 
