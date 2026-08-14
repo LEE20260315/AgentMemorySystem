@@ -983,6 +983,23 @@ def apply_modern_style(root: tk.Tk):
 # 主窗口
 # ---------------------------------------------------------------------------
 
+def _fit_window_size(req_w: int, req_h: int, cur_w: int, cur_h: int,
+                     max_w: int, max_h: int):
+    """计算容纳内容所需的最小窗口尺寸（v2.2.1）。
+
+    窗口尺寸至少容纳内容所需（winfo_req*，已含 DPI 缩放后的物理像素），
+    但不小于当前尺寸（不覆盖用户拖拽偏好），且不超过屏幕工作区上限。
+
+    Returns
+    -------
+    tuple
+        (width, height)
+    """
+    w = max(req_w, cur_w)
+    h = max(req_h, cur_h)
+    return min(w, max_w), min(h, max_h)
+
+
 class SyncMainWindow:
     """多Agent记忆融合器主窗口 —— Windows 桌面工具风格。"""
 
@@ -1061,6 +1078,23 @@ class SyncMainWindow:
         # Windows 系统标题栏改成灰白配色（Win10 1903+ / Win11）
         self.root.update_idletasks()
         apply_dwm_caption_colors(self.root)
+
+        # ---- 内容自适应校正（v2.2.1）----
+        # 历史问题：默认/保存的几何是硬编码物理像素，内容所需高度（右侧操作
+        # 卡片：汇总 + 按钮）超过窗口时，底部按钮被裁掉（v2.0 起反复出现）。
+        # 这里按内容实际所需尺寸放大（不缩小用户偏好尺寸），并裁剪到屏幕。
+        self.root.update_idletasks()
+        try:
+            req_w = self.root.winfo_reqwidth()
+            req_h = self.root.winfo_reqheight()
+            cur_w = self.root.winfo_width()
+            cur_h = self.root.winfo_height()
+            new_w, new_h = _fit_window_size(req_w, req_h, cur_w, cur_h, max_w, max_h)
+            if new_w != cur_w or new_h != cur_h:
+                self.root.geometry("{}x{}".format(new_w, new_h))
+                self.root.update_idletasks()
+        except Exception:
+            pass
 
         # ---- 居中窗口（提前到 __init__ 避免 run() 时闪烁）----
         self._center_window()
@@ -1376,6 +1410,14 @@ class SyncMainWindow:
             btn_box, text="打开数据目录", style="Secondary.TButton", command=self._open_data_dir,
         )
         self.open_dir_btn.pack(fill=tk.X, ipady=4)
+
+        # v2.2.1: 直接退出按钮（用户明确要求"直接退出"，不加确认弹窗）。
+        # 上方用 1px 分隔线与其他操作区分，避免误触。
+        tk.Frame(btn_box, bg=COLORS["border"], height=1).pack(fill=tk.X, pady=(10, 10))
+        self.quit_btn = ttk.Button(
+            btn_box, text="退出程序", style="Secondary.TButton", command=self._quit,
+        )
+        self.quit_btn.pack(fill=tk.X, ipady=4)
 
     def _open_data_dir(self):
         """打开数据根目录（v2.1.0 新增）。"""
