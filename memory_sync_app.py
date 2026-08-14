@@ -300,6 +300,23 @@ if sys.platform == "win32":
         # 最终兜底：系统默认应用图标
         return _shell32.ExtractIconW(0, "shell32.dll", 0)
 
+    def _shell_notify_icon_add(nid, retries: int = 2, delay: float = 0.5):
+        """调用 Shell_NotifyIconW(NIM_ADD)，失败时短暂延迟重试（v2.2.1）。
+
+        一次性失败通常是任务栏/资源管理器的瞬时状态（托盘区初始化、
+        资源管理器重启），重试一次即可；持续失败由调用方降级处理。
+        返回 (ok, last_error)。
+        """
+        ok = _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid))
+        err = ctypes.windll.kernel32.GetLastError()
+        for _ in range(max(0, retries - 1)):
+            if ok:
+                break
+            time.sleep(delay)
+            ok = _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid))
+            err = ctypes.windll.kernel32.GetLastError()
+        return ok, err
+
 
 # ---------------------------------------------------------------------------
 # 设置文件
@@ -359,18 +376,9 @@ def _normalize_windows_path(path: Path) -> Path:
 
 
 def _reloc_log(msg: str):
-    """记录迁移诊断信息到 tray_error.log。"""
+    """记录迁移诊断信息（v2.2.1: 本机优先，数据根尽力而为）。"""
     try:
-        data_dir = _data_dir()
-    except Exception:
-        try:
-            data_dir = Path(sys.executable).parent / "data"
-        except Exception:
-            return
-    try:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        with open(data_dir / "tray_error.log", "a", encoding="utf-8") as f:
-            f.write(f"[RELOC] {msg}\n")
+        _write_diag("[RELOC] {}\n".format(msg))
     except Exception:
         pass
 
@@ -400,6 +408,42 @@ def _append_rotated(log_path: Path, line: str, max_bytes: int = 1 * 1024 * 1024)
             f.write(line)
     except Exception:
         pass
+
+
+def _diag_log_paths() -> list:
+    """诊断日志写入路径：本机优先，数据根尽力而为（v2.2.1）。
+
+    历史：诊断日志只写数据根 tray_error.log（OneDrive 同步目录），OneDrive
+    瞬时锁会导致写入失败，故障现场直接丢失（v2.2.0 事故——托盘/同步故障
+    的诊断行一条都没落盘）。现在先写 LOCALAPPDATA（本机磁盘，可靠），
+    数据根仅作跨机诊断副本（失败不影响主流程）。
+    """
+    paths = []
+    try:
+        import os as _os
+        local_dir = Path(_os.environ.get("LOCALAPPDATA", _os.path.expanduser("~"))) / "AgentMemorySystem"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        paths.append(local_dir / "tray_error.log")
+    except Exception:
+        pass
+    try:
+        data_root_path = _data_dir() / "tray_error.log"
+        data_root_path.parent.mkdir(parents=True, exist_ok=True)
+        paths.append(data_root_path)
+    except Exception:
+        try:
+            fallback_path = Path(sys.executable).parent / "data" / "tray_error.log"
+            fallback_path.parent.mkdir(parents=True, exist_ok=True)
+            paths.append(fallback_path)
+        except Exception:
+            pass
+    return paths
+
+
+def _write_diag(line: str):
+    """把诊断内容写入全部诊断日志路径（任一失败不影响其它）。"""
+    for log_path in _diag_log_paths():
+        _append_rotated(log_path, line)
 
 
 def _migrate_old_data():
@@ -1761,9 +1805,6 @@ class SyncMainWindow:
 
     def _minimize_to_tray(self):
         """最小化到系统托盘（Windows 原生 API）"""
-        _tray_log = _data_dir() / "tray_error.log"
-        _tray_log.parent.mkdir(parents=True, exist_ok=True)
-
         self._log("正在最小化到系统托盘...")
 
         tray_ok = False
@@ -1771,12 +1812,7 @@ class SyncMainWindow:
             tray_ok = self._create_tray_icon()
         except Exception as e:
             import traceback
-            try:
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    f.write("FAIL: tray create error: {}\n".format(e))
-                    traceback.print_exc(file=f)
-            except OSError:
-                pass
+            _write_diag("FAIL: tray create error: {}\n{}\n".format(e, traceback.format_exc()))
 
         # 托盘创建成功后再隐藏主窗口；失败时保留窗口，避免"程序不见了"的错觉
         if tray_ok:
@@ -1791,42 +1827,39 @@ class SyncMainWindow:
             except Exception as e:
                 notify_status = "notify_fail={}".format(e)
 
-            try:
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    f.write("OK: tray created\n")
-                    f.write("  hwnd={} hicon={} nid={}\n".format(
-                        self._tray_hwnd, self._tray_hicon, self._tray_nid is not None))
-                    f.write("  {}\n".format(notify_status))
-                    f.write("  提示: Win11 托盘图标可能在溢出区(^箭头)，可拖到任务栏可见区域\n")
-            except OSError:
-                pass
+            _write_diag(
+                "OK: tray created\n"
+                "  hwnd={} hicon={} nid={}\n"
+                "  {}\n"
+                "  提示: Win11 托盘图标可能在溢出区(^箭头)，可拖到任务栏可见区域\n".format(
+                    self._tray_hwnd, self._tray_hicon, self._tray_nid is not None,
+                    notify_status))
 
         else:
             self._log("托盘图标创建失败，窗口保持显示")
-            # 托盘失败时不隐藏窗口，让用户能继续操作；同时弹出提示
-            try:
-                self._notify("AgentMemorySync",
-                             "托盘图标创建失败，窗口保持显示。请查看 tray_error.log")
-            except Exception:
-                pass
-            try:
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    f.write("WARN: tray icon unavailable, window stays visible\n")
-            except OSError:
-                pass
+            # 托盘失败时不隐藏窗口，让用户能继续操作。
+            # v2.2.1: 先弹提示框（用户反馈），通知放最后且自带超时——
+            # 失败路径绝不执行任何可能阻塞主线程的调用。
             try:
                 msg = (
                     "系统托盘图标创建失败，窗口保持显示。\n\n"
                     "可能原因：当前 EXE 位于 OneDrive 目录，系统限制了托盘 API。\n\n"
                     "解决方案（任选其一）：\n"
-                    "1. 使用 build.py 打包后生成的桌面快捷方式启动\n"
+                    "1. 使用 AgentMemorySync.bat 启动（会自动复制到本地临时目录再运行）\n"
                     "2. 手动复制整个 AgentMemorySync/ 目录到本地非 OneDrive 位置\n"
                     "3. 从该本地目录双击 AgentMemorySync.exe 启动\n\n"
-                    "如果仍有问题，请检查 tray_error.log 并把内容反馈给我。"
+                    "如果仍有问题，请检查\n%LOCALAPPDATA%\\AgentMemorySystem\\tray_error.log\n"
+                    "并把内容反馈给我。"
                 )
                 messagebox.showwarning("托盘图标未创建", msg)
             except Exception:
                 pass
+            try:
+                self._notify("AgentMemorySync",
+                             "托盘图标创建失败，窗口保持显示。请查看 tray_error.log")
+            except Exception:
+                pass
+            _write_diag("WARN: tray icon unavailable, window stays visible\n")
 
     def _create_tray_icon(self):
         """用 Windows 原生 Shell_NotifyIconW 创建系统托盘图标
@@ -1836,8 +1869,6 @@ class SyncMainWindow:
         """
         if self._tray_nid is not None:
             return True
-
-        _tray_log = _data_dir() / "tray_error.log"
 
         # 加载图标
         self._tray_hicon = None
@@ -1855,11 +1886,7 @@ class SyncMainWindow:
             if self._tray_hicon:
                 icon_path_used = "default"
 
-        try:
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("DEBUG: icon_path={} hicon={}\n".format(icon_path_used, self._tray_hicon))
-        except OSError:
-            pass
+        _write_diag("DEBUG: icon_path={} hicon={}\n".format(icon_path_used, self._tray_hicon))
 
         if not self._tray_hicon:
             self._log("⚠ 无法加载托盘图标，将使用系统默认图标")
@@ -1872,19 +1899,11 @@ class SyncMainWindow:
         if not self._tray_hwnd:
             err = ctypes.windll.kernel32.GetLastError()
             self._log("⚠ 托盘消息窗口创建失败 (error={})".format(err))
-            try:
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    f.write("DEBUG: message window creation failed last_error={}\n".format(err))
-            except OSError:
-                pass
+            _write_diag("DEBUG: message window creation failed last_error={}\n".format(err))
             return False
 
         self._log("托盘消息窗口已创建")
-        try:
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("DEBUG: message window created hwnd={}\n".format(self._tray_hwnd))
-        except OSError:
-            pass
+        _write_diag("DEBUG: message window created hwnd={}\n".format(self._tray_hwnd))
 
         # 先删除同一 hWnd/uID 的旧图标，避免重复注册或脏状态
         del_nid = _NOTIFYICONDATAW()
@@ -1904,16 +1923,11 @@ class SyncMainWindow:
         nid.szTip = "多Agent记忆融合器"
         self._tray_nid = nid
 
-        # 注册托盘图标
+        # 注册托盘图标（v2.2.1: 瞬时失败延迟重试一次，避免任务栏瞬时状态误判）
         self._log("正在注册系统托盘图标...")
-        ok = _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid))
-        err = ctypes.windll.kernel32.GetLastError()
-        try:
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("DEBUG: Shell_NotifyIconW add={} last_error={} hwnd={} cbSize={} hicon={}\n".format(
-                    ok, err, self._tray_hwnd, nid.cbSize, self._tray_hicon))
-        except OSError:
-            pass
+        ok, err = _shell_notify_icon_add(nid, retries=2, delay=0.5)
+        _write_diag("DEBUG: Shell_NotifyIconW add={} last_error={} hwnd={} cbSize={} hicon={}\n".format(
+            ok, err, self._tray_hwnd, nid.cbSize, self._tray_hicon))
 
         if not ok:
             self._tray_nid = None
@@ -1938,12 +1952,7 @@ class SyncMainWindow:
         action = getattr(self, "_tray_click_action", None)
         if action:
             self._tray_click_action = None
-            try:
-                _tray_log = _data_dir() / "tray_error.log"
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    f.write("DEBUG: pump processing action={}\n".format(action))
-            except Exception:
-                pass
+            _write_diag("DEBUG: pump processing action={}\n".format(action))
             if action == "show":
                 self._show_window()
             elif action == "menu":
@@ -1953,8 +1962,6 @@ class SyncMainWindow:
 
     def _create_message_window(self):
         """创建一个隐藏的 Win32 消息窗口来接收托盘回调"""
-        _tray_log = _data_dir() / "tray_error.log"
-
         WNDPROC = ctypes.WINFUNCTYPE(
             _LPARAM, ctypes.wintypes.HWND, ctypes.wintypes.UINT,
             _WPARAM, _LPARAM
@@ -1976,34 +1983,18 @@ class SyncMainWindow:
             reg_err = ctypes.windll.kernel32.GetLastError()
             if atom:
                 self._tray_class_registered = True
-                try:
-                    with open(_tray_log, "a", encoding="utf-8") as f:
-                        f.write("DEBUG: RegisterClassW OK atom={}\n".format(atom))
-                except OSError:
-                    pass
+                _write_diag("DEBUG: RegisterClassW OK atom={}\n".format(atom))
             else:
-                try:
-                    with open(_tray_log, "a", encoding="utf-8") as f:
-                        f.write("DEBUG: RegisterClassW failed error={}; try unregister\n".format(reg_err))
-                except OSError:
-                    pass
+                _write_diag("DEBUG: RegisterClassW failed error={}; try unregister\n".format(reg_err))
                 # 类已存在（上次崩溃未清理），注销旧类后重新注册
                 _user32.UnregisterClassW(_TRAY_CLASS_NAME, ctypes.c_void_p(self._hInstance))
                 atom = _user32.RegisterClassW(ctypes.byref(wnd_class))
                 reg_err2 = ctypes.windll.kernel32.GetLastError()
                 if atom:
                     self._tray_class_registered = True
-                    try:
-                        with open(_tray_log, "a", encoding="utf-8") as f:
-                            f.write("DEBUG: RegisterClassW retry OK atom={}\n".format(atom))
-                    except OSError:
-                        pass
+                    _write_diag("DEBUG: RegisterClassW retry OK atom={}\n".format(atom))
                 else:
-                    try:
-                        with open(_tray_log, "a", encoding="utf-8") as f:
-                            f.write("DEBUG: RegisterClassW retry failed error={}\n".format(reg_err2))
-                    except OSError:
-                        pass
+                    _write_diag("DEBUG: RegisterClassW retry failed error={}\n".format(reg_err2))
 
         hwnd = _user32.CreateWindowExW(
             0, _TRAY_CLASS_NAME, _TRAY_CLASS_NAME,
@@ -2014,11 +2005,7 @@ class SyncMainWindow:
             None,                       # lpParam
         )
         cw_err = ctypes.windll.kernel32.GetLastError()
-        try:
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("DEBUG: CreateWindowExW hwnd={} error={}\n".format(hwnd, cw_err))
-        except OSError:
-            pass
+        _write_diag("DEBUG: CreateWindowExW hwnd={} error={}\n".format(hwnd, cw_err))
         return hwnd
 
     def _tray_wndproc(self, hwnd, msg, wparam, lparam):
@@ -2055,12 +2042,7 @@ class SyncMainWindow:
 
     def _show_tray_menu(self):
         """显示托盘右键菜单"""
-        try:
-            _tray_log = _data_dir() / "tray_error.log"
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("DEBUG: show tray menu\n")
-        except Exception:
-            pass
+        _write_diag("DEBUG: show tray menu\n")
 
         try:
             # 窗口被 withdraw 时 tk_popup 可能行为异常，先恢复再弹出
@@ -2088,66 +2070,32 @@ class SyncMainWindow:
             # 如果弹出前是隐藏状态且用户没选"显示主窗口"等会恢复窗口的命令，
             # 这里不再自动隐藏，避免窗口闪烁；由用户通过菜单命令控制。
         except Exception as e:
-            try:
-                _tray_log = _data_dir() / "tray_error.log"
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    import traceback
-                    f.write("ERROR: show tray menu failed: {}\n".format(e))
-                    traceback.print_exc(file=f)
-            except Exception:
-                pass
+            import traceback
+            _write_diag("ERROR: show tray menu failed: {}\n{}\n".format(e, traceback.format_exc()))
 
     def _show_window(self, icon=None, item=None):
         """显示主窗口"""
-        try:
-            _tray_log = _data_dir() / "tray_error.log"
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("DEBUG: show window called\n")
-        except Exception:
-            pass
+        _write_diag("DEBUG: show window called\n")
         try:
             self.root.after(100, self._deiconify_and_remove_tray)
         except Exception as e:
-            try:
-                _tray_log = _data_dir() / "tray_error.log"
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    import traceback
-                    f.write("ERROR: show window failed: {}\n".format(e))
-                    traceback.print_exc(file=f)
-            except Exception:
-                pass
+            import traceback
+            _write_diag("ERROR: show window failed: {}\n{}\n".format(e, traceback.format_exc()))
 
     def _deiconify_and_remove_tray(self):
         """恢复窗口并移除托盘图标"""
-        try:
-            _tray_log = _data_dir() / "tray_error.log"
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write("DEBUG: deiconify and remove tray\n")
-        except Exception:
-            pass
+        _write_diag("DEBUG: deiconify and remove tray\n")
         # 先移除托盘图标，再显示窗口，避免消息泵和窗口销毁冲突
         try:
             self._remove_tray_icon()
         except Exception as e:
-            try:
-                _tray_log = _data_dir() / "tray_error.log"
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    import traceback
-                    f.write("ERROR: remove tray icon failed: {}\n".format(e))
-                    traceback.print_exc(file=f)
-            except Exception:
-                pass
+            import traceback
+            _write_diag("ERROR: remove tray icon failed: {}\n{}\n".format(e, traceback.format_exc()))
         try:
             self.root.deiconify()
         except Exception as e:
-            try:
-                _tray_log = _data_dir() / "tray_error.log"
-                with open(_tray_log, "a", encoding="utf-8") as f:
-                    import traceback
-                    f.write("ERROR: deiconify failed: {}\n".format(e))
-                    traceback.print_exc(file=f)
-            except Exception:
-                pass
+            import traceback
+            _write_diag("ERROR: deiconify failed: {}\n{}\n".format(e, traceback.format_exc()))
 
     def _remove_tray_icon(self):
         """移除系统托盘图标"""
@@ -2247,9 +2195,15 @@ class SyncMainWindow:
                 "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
                 "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AgentMemorySync').Show($toast)"
             )
+            # v2.2.1: 必须带超时且不捕获输出（管道）——PowerShell 在无控制台的
+            # GUI 进程里偶发管道 EOF 挂起，无超时会永久阻塞 tkinter 主线程，
+            # 导致整个界面假死（v2.2.0 事故：托盘失败后程序再无响应、心跳停止）。
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
                 creationflags=0x08000000
             )
         except Exception:
@@ -2808,13 +2762,25 @@ def _ensure_local_install():
     _reloc_log(f"need_copy={need_copy}")
     if need_copy:
         try:
-            import shutil
-            # 复制整个 EXE 目录（onedir 模式）
+            # v2.2.1: 改用 robocopy（/MIR 镜像 + 自带重试）复制整个 EXE 目录
+            # （onedir 模式）——与 AgentMemorySync.bat 已验证的迁移路径一致。
+            # shutil.copytree 在 OneDrive 并发同步/锁文件场景会半途失败甚至
+            # 卡死（v2.2.0 事故：程序原地运行 → 托盘 API 被拒 error=5）。
+            # 整体加超时，失败仅告警、继续原地运行，绝不阻塞启动。
             src_dir = exe_path.parent
             _reloc_log(f"copying {src_dir} -> {local_dir}")
-            if local_dir.exists():
-                shutil.rmtree(local_dir, ignore_errors=True)
-            shutil.copytree(src_dir, local_dir)
+            _sys32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+            robocopy_exe = str(_sys32 / "robocopy.exe")
+            result = subprocess.run(
+                [robocopy_exe, str(src_dir), str(local_dir),
+                 "/MIR", "/R:3", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS", "/NP"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=180, creationflags=0x08000000,
+            )
+            # robocopy 退出码：0-7 视为成功（1=有文件被复制），>=8 为失败
+            if result.returncode >= 8:
+                raise RuntimeError("robocopy rc={}".format(result.returncode))
             _reloc_log("copy done")
         except Exception as e:
             _reloc_log(f"copy failed: {e}")
@@ -2880,9 +2846,10 @@ def _try_powershell_relocate(exe_path: Path):
 
 
 def _write_crash_log(exc_type, exc_value, exc_tb):
-    """将未捕获异常写入 tray_error.log，便于事后排查。
+    """将未捕获异常写入诊断日志，便于事后排查。
 
     v2.1.0: 同时写本地磁盘（LOCALAPPDATA），避免 OneDrive 锁导致崩溃信息丢失。
+    v2.2.1: 本地写入优先（可靠），数据根尽力而为（跨机诊断副本）。
     """
     import os as _os
     lines = []
@@ -2896,19 +2863,12 @@ def _write_crash_log(exc_type, exc_value, exc_tb):
     lines.append("=== END CRASH ===\n\n")
     content = "".join(lines)
     try:
-        _tray_log = _data_dir() / "tray_error.log"
-        _tray_log.parent.mkdir(parents=True, exist_ok=True)
-        with open(_tray_log, "a", encoding="utf-8") as f:
-            f.write(content)
-    except Exception:
-        pass
-    try:
         local_dir = Path(_os.environ.get("LOCALAPPDATA", _os.path.expanduser("~"))) / "AgentMemorySystem"
         local_dir.mkdir(parents=True, exist_ok=True)
-        with open(local_dir / "crash.log", "a", encoding="utf-8") as f:
-            f.write(content)
+        _append_rotated(local_dir / "crash.log", content)
     except Exception:
         pass
+    _write_diag(content)
 
 
 def _setup_crash_handlers():
@@ -2942,16 +2902,11 @@ def _setup_crash_handlers():
         try:
             local_dir = Path(_os.environ.get("LOCALAPPDATA", _os.path.expanduser("~"))) / "AgentMemorySystem"
             local_dir.mkdir(parents=True, exist_ok=True)
-            with open(local_dir / "heartbeat.log", "a", encoding="utf-8") as f:
-                f.write(line)
+            _append_rotated(local_dir / "heartbeat.log", line)
         except Exception:
             pass
-        try:
-            _tray_log = _data_dir() / "tray_error.log"
-            with open(_tray_log, "a", encoding="utf-8") as f:
-                f.write(line)
-        except Exception:
-            pass
+        # v2.2.1: 数据根副本改为本地优先的 _write_diag（本地可靠、数据根尽力而为）
+        _write_diag(line)
 
     atexit.register(_on_exit)
 
@@ -2988,7 +2943,7 @@ def main():
 
     # 启动诊断日志（文件可能被锁定，不能因此崩溃）
     _diag_lines = [
-        "APP STARTING v2.2.0\n",
+        "APP STARTING v2.2.1\n",
         f"  _safe_home() = {_home}\n",
         f"  _data_dir() = {_data_dir()}\n",
         f"  _original_home() = {_original_home()}\n",
@@ -2997,26 +2952,21 @@ def main():
         f"  SETTINGS_PATH = {SETTINGS_PATH}\n",
     ]
     _migrate_old_data()
-    try:
-        _startup_log = _data_dir() / "tray_error.log"
-        _data_dir().mkdir(parents=True, exist_ok=True)
-        # 追加模式，保留 _ensure_local_install() 可能已写入的迁移日志
-        with open(_startup_log, "a", encoding="utf-8") as f:
-            f.writelines(_diag_lines)
-    except Exception as _log_err:
-        # 主日志写入失败时，回退到项目根目录或临时目录，方便排查
+    if _diag_log_paths():
+        # v2.2.1: 本机 LOCALAPPDATA 优先 + 数据根副本，任一失败不影响其它
+        _write_diag("".join(_diag_lines))
+    else:
+        # 本机/数据根都不可用时，回退到项目根目录或临时目录，方便排查
         try:
             _fallback_root = Path(__file__).parent if "__file__" in globals() else Path.cwd()
             _fallback_log = _fallback_root / "tray_error.log"
             with open(_fallback_log, "w", encoding="utf-8") as f:
                 f.writelines(_diag_lines)
-                f.write(f"  PRIMARY_LOG_ERROR = {_log_err}\n")
         except Exception:
             try:
                 _fallback_log2 = Path(os.environ.get("TEMP", "C:\\temp")) / "agent_memory_tray_error.log"
                 with open(_fallback_log2, "w", encoding="utf-8") as f:
                     f.writelines(_diag_lines)
-                    f.write(f"  PRIMARY_LOG_ERROR = {_log_err}\n")
             except Exception:
                 pass
 
