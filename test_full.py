@@ -1632,6 +1632,45 @@ def test_ensure_local_install_uses_robocopy():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ===========================================================================
+# 7.8 v2.2.1 UI 回归测试（退出按钮 + 窗口内容自适应）
+# ===========================================================================
+
+def test_fit_window_size():
+    """_fit_window_size：放大到内容所需、不缩小用户偏好、裁剪到屏幕上限"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+    fit = memory_sync_app._fit_window_size
+
+    # 内容所需高度超过当前窗口 → 放大高度
+    w, h = fit(req_w=700, req_h=560, cur_w=760, cur_h=540, max_w=1200, max_h=700)
+    r.assert_eq("height enlarged to req", (w, h), (760, 560))
+
+    # 内容小于当前窗口 → 不缩小（保留用户偏好/默认）
+    w, h = fit(req_w=500, req_h=400, cur_w=880, cur_h=620, max_w=1200, max_h=700)
+    r.assert_eq("no shrink below current", (w, h), (880, 620))
+
+    # 内容超过屏幕上限 → 裁剪到上限
+    w, h = fit(req_w=2000, req_h=1500, cur_w=880, cur_h=620, max_w=960, max_h=700)
+    r.assert_eq("clamped to max", (w, h), (960, 700))
+
+    # 宽度也需要放大
+    w, h = fit(req_w=900, req_h=500, cur_w=760, cur_h=540, max_w=1200, max_h=700)
+    r.assert_eq("width enlarged to req", (w, h), (900, 540))
+
+
+def test_ui_has_exit_button_and_fit():
+    """主界面含"退出程序"按钮，窗口尺寸走 _fit_window_size（源码级冒烟检查）"""
+    r.set_module("memory_sync_app")
+
+    src = Path(__file__).parent.joinpath("memory_sync_app.py").read_text(encoding="utf-8")
+    r.assert_true("has exit button text", 'text="退出程序"' in src)
+    r.assert_true("exit button calls _quit", "command=self._quit" in src)
+    r.assert_true("has _fit_window_size", "def _fit_window_size" in src)
+    r.assert_true("content fit wired in init", "_fit_window_size(req_w, req_h" in src)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -1725,6 +1764,9 @@ ALL_TESTS = [
     test_shell_notify_icon_retry_once,
     test_reloc_log_writes_local_first,
     test_ensure_local_install_uses_robocopy,
+    # v2.2.1: UI（退出按钮 + 窗口内容自适应）
+    test_fit_window_size,
+    test_ui_has_exit_button_and_fit,
 ]
 def main():
     print("=" * 60)
