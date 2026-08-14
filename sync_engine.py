@@ -143,7 +143,14 @@ class SyncEngine:
             (提取、融合仍执行以验证流程；写回阶段跳过)
         """
         self.config = config or get_config()
-        self.logger = get_logger()
+        # v2.2.1: get_logger() 已保证不抛异常，此处再加一层防御——
+        # 日志不可用时同步照常进行（进度消息仍走 on_progress 回调）
+        try:
+            self.logger = get_logger()
+        except Exception:
+            import logging as _logging
+            self.logger = _logging.getLogger("AgentMemory.null")
+            self.logger.addHandler(_logging.NullHandler())
         self.on_progress = on_progress or (lambda msg: None)
         self.sync_state = SyncState()
         self.dry_run = dry_run

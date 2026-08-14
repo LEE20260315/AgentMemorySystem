@@ -1433,6 +1433,205 @@ def test_detect_agents_cache_cross_device_invalidated():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ===========================================================================
+# 7.7 v2.2.1 回归测试（OneDrive 运行时解耦：日志本机化 / 启动不写数据根 /
+#     通知带超时 / 托盘重试 / 迁移走 robocopy）
+# ===========================================================================
+
+def test_get_data_root_skips_writable_test():
+    """get_data_root 热路径不再做 .writable_test 同步写（OneDrive 锁挂起/拒写修复）"""
+    r.set_module("safe_io")
+
+    from safe_io import get_data_root, reset_data_root_cache
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        reset_data_root_cache()
+        with patch.dict(os.environ, {"AGENT_MEMORY_DATA_DIR": str(tmp / "data")}):
+            root = get_data_root()
+            r.assert_true("returns env path", root == tmp / "data")
+            r.assert_true("no .writable_test created", not (root / ".writable_test").exists())
+    finally:
+        reset_data_root_cache()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_log_manager_fallback_on_bad_dir():
+    """LogManager 在日志目录不可用时降级为仅控制台，不抛异常（v2.2.1）"""
+    r.set_module("agent_memory")
+
+    from agent_memory import LogManager
+    import logging
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        # 用"文件路径冒充目录"构造必然失败的日志目录
+        blocker = tmp / "not_a_dir"
+        blocker.write_text("x", encoding="utf-8")
+        try:
+            lm = LogManager(log_dir=blocker)
+            logger = lm.get_logger()
+            r.assert_true("logger returned", logger is not None)
+            r.assert_true("file handler skipped", lm.file_handler is None)
+            r.assert_true("console handler present", any(
+                isinstance(h, logging.StreamHandler) for h in logger.handlers))
+        except Exception as e:
+            r.fail("LogManager raised", str(e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_log_manager_defaults_to_local_logs():
+    """LogManager 默认日志目录在本机 LOCALAPPDATA（而非 OneDrive 数据根）"""
+    r.set_module("agent_memory")
+
+    from agent_memory import LogManager
+    from safe_io import get_data_root
+    try:
+        lm = LogManager()
+        r.assert_true("log_dir resolved", lm.log_dir is not None)
+        r.assert_true("file handler attached", lm.file_handler is not None)
+        r.assert_true("log file created", lm.log_file is not None and lm.log_file.exists())
+        data_root = str(get_data_root()).lower()
+        local_dir = str(lm.log_dir).lower()
+        r.assert_true("logs not under data root", data_root not in local_dir)
+    except Exception as e:
+        r.fail("LogManager default dir", str(e))
+
+
+def test_get_logger_never_raises():
+    """get_logger() 永不抛异常，返回可用 logger（v2.2.1）"""
+    r.set_module("agent_memory")
+
+    from agent_memory import get_logger
+    try:
+        logger = get_logger()
+        r.assert_true("logger returned", logger is not None)
+    except Exception as e:
+        r.fail("get_logger raised", str(e))
+
+
+def test_notify_subprocess_bounded():
+    """_notify 的 PowerShell 通知调用必须带超时且不捕获输出（防主线程挂死）"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+    import subprocess
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0)
+
+    with patch.object(memory_sync_app.subprocess, "run", side_effect=fake_run):
+        win = memory_sync_app.SyncMainWindow.__new__(memory_sync_app.SyncMainWindow)
+        win._tray_nid = None
+        win._tray_hwnd = None
+        try:
+            memory_sync_app.SyncMainWindow._notify(win, "test", "body")
+            r.assert_true("timeout set", captured.get("timeout") is not None)
+            r.assert_true("stdout DEVNULL", captured.get("stdout") == subprocess.DEVNULL)
+            r.assert_true("stderr DEVNULL", captured.get("stderr") == subprocess.DEVNULL)
+            r.assert_true("stdin DEVNULL", captured.get("stdin") == subprocess.DEVNULL)
+        except Exception as e:
+            r.fail("_notify raised", str(e))
+
+
+def test_shell_notify_icon_retry_once():
+    """Shell_NotifyIconW 注册失败后延迟重试一次（托盘瞬时失败自愈）"""
+    r.set_module("memory_sync_app")
+    if sys.platform != "win32":
+        r.ok("skipped on non-win32")
+        return
+
+    import memory_sync_app
+    nid = memory_sync_app._NOTIFYICONDATAW()
+    nid.cbSize = memory_sync_app.ctypes.sizeof(memory_sync_app._NOTIFYICONDATAW)
+
+    calls = {"n": 0}
+    real_func = memory_sync_app._shell32.Shell_NotifyIconW
+
+    def fake(dwMessage, pnid):
+        calls["n"] += 1
+        return calls["n"] >= 2  # 第一次失败、第二次成功
+
+    memory_sync_app._shell32.Shell_NotifyIconW = fake
+    try:
+        ok, _err = memory_sync_app._shell_notify_icon_add(nid, retries=2, delay=0)
+        r.assert_true("eventually succeeds", ok)
+        r.assert_eq("called twice", calls["n"], 2)
+    finally:
+        memory_sync_app._shell32.Shell_NotifyIconW = real_func
+
+
+def test_reloc_log_writes_local_first():
+    """_reloc_log 写入本机 LOCALAPPDATA（OneDrive 锁下诊断不丢失）"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(tmp)}):
+            with patch.object(memory_sync_app, "_data_dir", return_value=tmp / "onedrive_data"):
+                memory_sync_app._reloc_log("test message")
+                local_log = tmp / "AgentMemorySystem" / "tray_error.log"
+                r.assert_true("local log written", local_log.exists())
+                content = local_log.read_text(encoding="utf-8")
+                r.assert_true("content contains message", "test message" in content)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_ensure_local_install_uses_robocopy():
+    """迁移复制走 robocopy（带超时、不捕获输出、退出码>=8 视为失败）"""
+    r.set_module("memory_sync_app")
+    if sys.platform != "win32":
+        r.ok("skipped on non-win32")
+        return
+
+    import memory_sync_app
+    import subprocess
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        fake_exe = tmp / "OneDrive" / "AgentMemorySync" / "AgentMemorySync.exe"
+        fake_exe.parent.mkdir(parents=True)
+        fake_exe.write_text("x")
+        local_exe_path = tmp / "Local" / "AgentMemorySystem" / "App" / "AgentMemorySync.exe"
+
+        def fake_run(*args, **kwargs):
+            # 模拟 robocopy 成功：生成本地副本
+            local_exe_path.parent.mkdir(parents=True, exist_ok=True)
+            local_exe_path.write_text("x")
+            return subprocess.CompletedProcess(args[0] if args else [], 1)
+
+        run_calls = {}
+        popen_calls = {}
+
+        def fake_popen(cmd, **kwargs):
+            popen_calls.update({"cmd": cmd, "kwargs": kwargs})
+            return object()
+
+        with patch.object(memory_sync_app.sys, "frozen", True, create=True):
+            with patch.object(memory_sync_app.sys, "executable", str(fake_exe)):
+                with patch.object(memory_sync_app.sys, "argv", [str(fake_exe)]):
+                    with patch.dict(os.environ, {"LOCALAPPDATA": str(tmp / "Local")}):
+                        with patch.object(memory_sync_app, "_reloc_log"):
+                            with patch.object(memory_sync_app.subprocess, "run", side_effect=fake_run) as mock_run:
+                                with patch.object(memory_sync_app.subprocess, "Popen", side_effect=fake_popen) as mock_popen:
+                                    with patch.object(memory_sync_app.sys, "exit"):
+                                        memory_sync_app._ensure_local_install()
+                                        run_calls["run"] = mock_run.call_args
+                                        run_calls["popen"] = mock_popen.call_args
+        args = run_calls["run"][0][0]
+        r.assert_true("uses robocopy", "robocopy" in args[0].lower())
+        r.assert_true("has timeout", run_calls["run"][1].get("timeout") is not None)
+        r.assert_true("stdout DEVNULL", run_calls["run"][1].get("stdout") == subprocess.DEVNULL)
+        r.assert_true("relaunch from local copy", "AgentMemorySystem" in run_calls["popen"][0][0][0])
+    except Exception as e:
+        r.fail("ensure_local_install robocopy", str(e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -1517,6 +1716,15 @@ ALL_TESTS = [
     test_parse_md_entry_ids_robust_to_separators,
     test_write_shared_md_incremental_no_rewrite,
     test_ensure_shared_cache_migrates_legacy,
+    # v2.2.1: OneDrive 运行时解耦（日志本机化 / 启动不写数据根 / 通知超时 / 托盘重试 / robocopy）
+    test_get_data_root_skips_writable_test,
+    test_log_manager_fallback_on_bad_dir,
+    test_log_manager_defaults_to_local_logs,
+    test_get_logger_never_raises,
+    test_notify_subprocess_bounded,
+    test_shell_notify_icon_retry_once,
+    test_reloc_log_writes_local_first,
+    test_ensure_local_install_uses_robocopy,
 ]
 def main():
     print("=" * 60)

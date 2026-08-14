@@ -5,6 +5,32 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] - v2.2.1
+
+### Fixed（OneDrive 运行时解耦，根治 v2.2.0 事故）
+
+- **同步失败根治（日志本机化）**：引擎日志 `agent_memory.log` 从数据根 `.logs`
+  （OneDrive 同步目录）迁至 `%LOCALAPPDATA%\AgentMemorySystem\logs`；`LogManager`
+  候选目录依次降级（本机 logs → 数据根 .logs → 仅控制台），`get_logger()` 永不
+  抛异常——日志故障不再中断同步（修复 `[Errno 13] Permission denied:
+  ...agent_memory.log`）。
+- **程序假死根治**：`_notify` 的 PowerShell 调用改为带超时（8s）且不捕获输出
+  （DEVNULL），不再可能永久阻塞 tkinter 主线程；托盘失败路径改为先弹提示框、
+  后发通知。
+- **启动不再触碰 OneDrive 写入**：`get_data_root()` 移除 `.writable_test` 同步写
+  测试（改为只读 `is_dir()` 校验），杜绝启动/CLI 在 OneDrive 锁下抛错或挂起。
+- **托盘注册自愈**：`Shell_NotifyIconW(NIM_ADD)` 失败后延迟重试一次；诊断日志
+  （`[RELOC]`/托盘 DEBUG/崩溃/退出）全部改为本机 LOCALAPPDATA 优先、数据根尽力
+  而为，OneDrive 锁下不再丢失故障现场。
+- **迁移复制加固**：`_ensure_local_install` 改用 robocopy（`/MIR` 镜像 + 自带
+  重试 + 整体超时），替代在 OneDrive 并发同步下会卡死/半途失败的
+  `shutil.copytree`；迁移失败仅告警、继续原地运行。
+
+### Added
+
+- 新增 8 个回归测试（日志降级/本机化、get_data_root 热路径不写盘、通知超时与
+  DEVNULL、托盘重试、robocopy 迁移、诊断日志本地优先），全量 203 断言。
+
 ## [2.2.0] - 2026-08-13
 
 ### Changed（架构：shared.db 本机化，方案 A）

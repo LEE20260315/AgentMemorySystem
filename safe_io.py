@@ -307,10 +307,11 @@ def get_data_root() -> Path:
     if env_data:
         env_path = Path(env_data).expanduser()
         try:
+            # v2.2.1: 去掉 .writable_test 同步写测试——数据根在 OneDrive 云同步
+            # 目录时，OneDrive 的瞬时文件锁会让 write_text 抛 PermissionError
+            # 甚至无限阻塞（v2.2.0 事故：同步/托盘/CLI 全挂）。可写性由实际
+            # 写入路径的错误处理兜底，启动路径不再触碰数据根写入。
             env_path.mkdir(parents=True, exist_ok=True)
-            test = env_path / ".writable_test"
-            test.write_text("ok", encoding="utf-8")
-            test.unlink()
             # 同步注册点：BAT 指定即权威，避免被历史错误注册带偏
             registered = _read_registry()
             if registered != env_path:
@@ -321,18 +322,12 @@ def get_data_root() -> Path:
             pass  # env 不可写，继续走注册点
 
     # 1) 注册点（单一事实来源，供无 env 的进程：watchdog / 直接双击）
+    # v2.2.1: 只做只读校验（is_dir），不再 mkdir + 写测试（理由同上：
+    # 启动路径绝不触碰 OneDrive 写入）。目录不存在 → 走重新推导。
     registered = _read_registry()
-    if registered is not None:
-        try:
-            registered.mkdir(parents=True, exist_ok=True)
-            test = registered / ".writable_test"
-            test.write_text("ok", encoding="utf-8")
-            test.unlink()
-            get_data_root._cached = registered
-            return registered
-        except OSError:
-            # 注册路径不可写（目录被删/权限变化）→ 重新推导
-            pass
+    if registered is not None and registered.is_dir():
+        get_data_root._cached = registered
+        return registered
 
     # 2) 首次运行或注册失效 → 推导 + 注册
     root = _resolve_and_register()

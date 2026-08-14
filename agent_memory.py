@@ -190,53 +190,96 @@ def get_config() -> ConfigManager:
 # ---------------------------------------------------------------------------
 
 class LogManager:
-    """日志管理器"""
+    """日志管理器
+
+    v2.2.1 起：日志本机化 + 永不因日志失败中断业务。
+    - 默认日志目录 = %LOCALAPPDATA%/AgentMemorySystem/logs（本机磁盘），
+      与 shared.db 同原则：跨机共享数据走 OneDrive，运行期写入走本机。
+      历史：日志曾放数据根 .logs/（OneDrive 同步目录），OneDrive 对云占位
+      文件的瞬时锁会让 open() 抛 PermissionError 甚至无限阻塞，导致整个
+      同步流程被日志拖垮/卡死（v2.2.0 事故）。
+    - 候选目录依次尝试：显式传入 > 本机 logs > 数据根 .logs；全部失败时
+      仅保留控制台输出。__init__ 永不抛异常。
+    """
 
     def __init__(self, log_dir: Path = None, config: ConfigManager = None):
         """
-        初始化日志管理器
-
         Parameters
         ----------
         log_dir : Path, optional
-            日志目录
+            日志目录（显式指定时仅尝试该目录）
         config : ConfigManager, optional
             配置管理器
         """
         if config is None:
-            config = get_config()
+            try:
+                config = get_config()
+            except Exception:
+                config = None
 
-        if log_dir is None:
-            # v2.1.0: 日志统一到数据根目录（.logs），与 SyncState/DB 同根，
-            # 修复历史分裂：日志曾写在项目根 .logs/ 而数据在 AgentMemory/
+        self.log_dir = None
+        self.log_file = None
+        self.file_handler = None
+
+        # 候选目录（按优先级）
+        candidates = []
+        if log_dir is not None:
+            candidates.append(Path(log_dir))
+        else:
+            # 1) 本机（LOCALAPPDATA）——首选，v2.2.1 起
+            try:
+                from safe_io import get_local_data_dir
+                candidates.append(get_local_data_dir() / "logs")
+            except Exception:
+                pass
+            # 2) 历史/兜底：数据根 .logs（OneDrive，尽力而为）
             try:
                 from safe_io import get_data_root
-                log_dir = get_data_root() / config.get("paths.log_dir", ".logs")
+                candidates.append(get_data_root() / config.get("paths.log_dir", ".logs"))
             except Exception:
-                log_dir = Path(__file__).parent / config.get("paths.log_dir", ".logs")
-
-        self.log_dir = log_dir
-        self.log_dir.mkdir(exist_ok=True)
+                candidates.append(Path(__file__).parent / config.get("paths.log_dir", ".logs"))
 
         self.logger = logging.getLogger("AgentMemory")
-        self.logger.setLevel(getattr(logging, config.get("logging.level", "INFO")))
+        try:
+            self.logger.setLevel(getattr(logging, config.get("logging.level", "INFO"), logging.INFO))
+        except Exception:
+            self.logger.setLevel(logging.INFO)
 
-        # 文件处理器（带轮转）
-        log_file = self.log_dir / "agent_memory.log"
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file,
-            maxBytes=config.get("logging.max_log_size_mb", 2) * 1024 * 1024,  # v1.3.7: 默认 2MB
-            backupCount=config.get("logging.max_log_files", 3),
-            encoding="utf-8"
-        )
-        file_handler.setFormatter(logging.Formatter(
-            config.get("logging.log_format", "%(asctime)s [%(levelname)s] %(message)s")
-        ))
-        self.logger.addHandler(file_handler)
+        # 文件处理器（带轮转）：候选目录逐个尝试，全部失败则仅控制台日志
+        max_bytes = 2 * 1024 * 1024
+        backup_count = 3
+        log_format = "%(asctime)s [%(levelname)s] %(message)s"
+        try:
+            max_bytes = config.get("logging.max_log_size_mb", 2) * 1024 * 1024  # v1.3.7: 默认 2MB
+            backup_count = config.get("logging.max_log_files", 3)
+            log_format = config.get("logging.log_format", log_format)
+        except Exception:
+            pass
+        for cand in candidates:
+            try:
+                cand.mkdir(parents=True, exist_ok=True)
+                log_file = cand / "agent_memory.log"
+                file_handler = logging.handlers.RotatingFileHandler(
+                    log_file,
+                    maxBytes=max_bytes,
+                    backupCount=backup_count,
+                    encoding="utf-8",
+                )
+                file_handler.setFormatter(logging.Formatter(log_format))
+                self.logger.addHandler(file_handler)
+                self.log_dir = cand
+                self.log_file = log_file
+                self.file_handler = file_handler
+                break
+            except Exception:
+                continue
 
         # 控制台处理器
         console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        try:
+            console_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        except Exception:
+            pass
         self.logger.addHandler(console_handler)
 
     def get_logger(self) -> logging.Logger:
@@ -250,12 +293,18 @@ _logger = None
 
 
 def get_logger() -> logging.Logger:
-    """获取全局日志记录器"""
+    """获取全局日志记录器（v2.2.1：永不抛异常）"""
     global _log_manager, _logger
     if _logger is None:
-        if _log_manager is None:
-            _log_manager = LogManager()
-        _logger = _log_manager.get_logger()
+        try:
+            if _log_manager is None:
+                _log_manager = LogManager()
+            _logger = _log_manager.get_logger()
+        except Exception:
+            # 日志系统自身故障绝不允许拖垮业务（权限/路径异常等）
+            _logger = logging.getLogger("AgentMemory")
+            if not _logger.handlers:
+                _logger.addHandler(logging.NullHandler())
     return _logger
 
 
