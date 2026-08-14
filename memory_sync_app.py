@@ -1035,21 +1035,23 @@ class SyncMainWindow:
                 geo_w = max(640, min(geo_w, max_w))
                 geo_h = max(460, min(geo_h, max_h))
                 self.root.geometry("{}x{}".format(geo_w, geo_h))
+                init_w, init_h = geo_w, geo_h
             except (ValueError, IndexError):
                 # 解析失败，回退到自适应默认尺寸
                 if screen_w <= 1366 or screen_h <= 768:
-                    self.root.geometry("{}x{}".format(min(760, max_w), min(540, max_h)))
+                    init_w, init_h = min(760, max_w), min(540, max_h)
                 else:
-                    self.root.geometry("{}x{}".format(min(880, max_w), min(620, max_h)))
+                    init_w, init_h = min(880, max_w), min(620, max_h)
+                self.root.geometry("{}x{}".format(init_w, init_h))
         else:
             # 默认尺寸根据屏幕自适应
             if screen_w <= 1366 or screen_h <= 768:
                 default_w, default_h = 760, 540
             else:
                 default_w, default_h = 880, 620
-            default_w = min(default_w, max_w)
-            default_h = min(default_h, max_h)
-            self.root.geometry("{}x{}".format(default_w, default_h))
+            init_w = min(default_w, max_w)
+            init_h = min(default_h, max_h)
+            self.root.geometry("{}x{}".format(init_w, init_h))
 
         # 最小尺寸也根据屏幕自适应：小屏幕降到 640x460
         if screen_w <= 1366 or screen_h <= 768:
@@ -1087,10 +1089,11 @@ class SyncMainWindow:
         try:
             req_w = self.root.winfo_reqwidth()
             req_h = self.root.winfo_reqheight()
-            cur_w = self.root.winfo_width()
-            cur_h = self.root.winfo_height()
-            new_w, new_h = _fit_window_size(req_w, req_h, cur_w, cur_h, max_w, max_h)
-            if new_w != cur_w or new_h != cur_h:
+            # 注意：这里用解析后的目标几何（init_w/init_h）而非 winfo_width()——
+            # 窗口尚未映射时 winfo_width() 不可靠（可能返回旧布局值），
+            # 会导致用户保存的更大尺寸被错误缩小（v2.2.1 实测发现）。
+            new_w, new_h = _fit_window_size(req_w, req_h, init_w, init_h, max_w, max_h)
+            if new_w != init_w or new_h != init_h:
                 self.root.geometry("{}x{}".format(new_w, new_h))
                 self.root.update_idletasks()
         except Exception:
