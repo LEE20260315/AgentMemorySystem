@@ -69,6 +69,7 @@ def _is_running(proc_name: str = "AgentMemorySync.exe") -> bool:
         out = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq {}".format(proc_name)],
             capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW: 避免每次检查弹出终端窗口
         ).stdout
         return proc_name.lower() in out.lower()
     except Exception:

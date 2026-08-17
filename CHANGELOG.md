@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] - v2.2.2
+
+### Fixed（OneDrive 冲突副本根治：写入一律原子化）
+
+- **`safe_io._safe_write_text` 重写为"永远原子"**：旧实现 `os.replace` 失败
+  （OneDrive/杀软瞬时锁）时回退 **in-place 直写**——就地截断重写云端正在同步
+  的文件，正是 OneDrive 报"无法操作/建立冲突副本"的元凶。新规则：
+  1. 永远先写同目录**进程唯一** tmp（`原名.tmp{pid}`，旧版固定 `.tmp` 名，
+     GUI/watchdog/CLI 并发写同一目标会互相覆盖 tmp 并撞 replace）+ `fsync`；
+  2. `os.replace` 遇 `PermissionError` 指数退避重试；
+  3. 持续锁定 → 完整快照落 `.pending`（读端优先采用更新快照，不丢数据）；
+  4. 写成功后清理已被取代的过期 `.pending`。
+- **`.pending` 生命周期语义修正**：`.pending` 一律是完整快照而非增量片段，
+  `merge_pending_file` 恢复动作改为"新则替换、旧则丢弃"（旧版 append 会把
+  快照再拼一遍 → 内容翻倍）；`_safe_read_text` 优先返回更新的 `.pending`；
+  各入口（GUI/CLI/watchdog）启动时 `merge_pending_files` 全树收编 + 清理
+  崩溃遗留超 1 小时的孤儿 `*.tmp*`。
+- **settings 读写原子化**：`memory_sync_app.load_settings/save_settings` 统一走
+  `safe_read_text`/`safe_write_text` 公共 API（新增别名），消灭模块内最后一处
+  in-place 直写路径。
+
+### Fixed（dsh agent 识别不出来：三层根因全修）
+
+- **检测配置缺失**：`config.json` 新增 `dsh` profile（`~/.dsh` 等候选路径，
+  `settings.yaml` 主签名 + `.anonymous-user-id` 备用签名——刚装完还没写
+  settings.yaml 也能识别）；`_verify_agent_signature` 支持备用签名路径。
+- **检测缓存不失效（隐蔽根因）**：`.detected_agents.json` 缓存 TTL 默认 24h，
+  配置新增 profile 后旧缓存照样命中，新 agent 最长 24h 不可见。修复：缓存写入
+  时记录 `agent_detection` 配置指纹（`profiles_hash`），读取时指纹不一致 →
+  缓存立即失效重检测；指纹一致则照常生效（缓存机制本身保留）。
+- **通用发现盲区**：`_discover_generic_agents` 增加家目录 `~` 点目录扫描
+  （大量 CLI agent 以 `~/.xxx` 安装），关键词增加 `dsh`。
+- **dsh 记忆扫描**：根目录 `*.md` + `sessions/**/*.jsonl` + `storages/*.json`；
+  `.zstd` 压缩会话跳过。
+
+### Security
+
+- **凭据文件绝不进入记忆管道**：`_should_skip_agent_memory_file` 过滤
+  `.credentials.yaml`（dsh）/`auth.json`（pi）等凭据类文件（`credential`/`auth`/
+  `.env`/`secrets` 等），写回产物兜底再滤一次。
+
+### Fixed（其他）
+
+- **rollback 回归测试环境依赖**：旧测试直接 `SyncEngine()` 用真实数据根，机器上
+  存在历史 `.sync_backups` 时断言恒失败；改为临时空数据根隔离。
+
+### Added
+
+- 新增 6 个回归测试（锁定目标原子写降级、pending 全树恢复 + 孤儿 tmp 清理、
+  缓存指纹失效/生效双场景、dsh 记忆扫描与凭据排除、rollback 隔离），全量
+  234 断言；对抗性审查（OneDrive 独占锁模拟、6 进程并发写、崩溃残留）通过。
+
 ## [Unreleased] - v2.2.1
 
 ### Fixed（OneDrive 运行时解耦，根治 v2.2.0 事故）

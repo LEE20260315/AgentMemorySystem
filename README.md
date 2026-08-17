@@ -52,6 +52,7 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 | CodePilot | SQLite (`codepilot.db`) | 匯出為 Markdown |
 | CodeBuddy | `MEMORY.md` | 通用 Markdown 寫回 |
 | pi / pi-web | `memory/MEMORY.md` + `.jsonl` | 通用 Markdown 寫回 |
+| dsh（DeepSeek CLI） | `*.md` + `sessions/**/*.jsonl` + `storages/*.json`（憑據檔案排除） | 通用 Markdown 寫回 |
 | OpenClaw | `.md` | 通用 Markdown 寫回 |
 | WorkBuddy | `MEMORY.md` | 通用 Markdown 寫回 |
 | Cursor / Windsurf / Cline / Continue / Aider / Roo-Code / Codex / Gemini CLI / OpenCode / Qwen / Qoder / QwenPaw / AlphaClaw | 通用 Markdown / JSONL | 自動適配 |
@@ -192,7 +193,8 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
-| **v2.2.1** | 2026-08 | **OneDrive 运行时解耦（根治 v2.2.0 事故）**：引擎日志 `agent_memory.log` 移出数据根 `.logs`（OneDrive 同步目录）→ `%LOCALAPPDATA%\AgentMemorySystem\logs`（与 shared.db 同原则），`get_logger()` 永不抛异常、日志故障不再中断同步；`get_data_root()` 启动路径不再做 `.writable_test` 同步写（OneDrive 锁下不再抛错/挂起）；PowerShell 通知带超时且不捕获输出（修复托盘失败后界面假死）；托盘注册失败自动重试一次；诊断日志（迁移/托盘/崩溃/退出）本机 LOCALAPPDATA 优先、数据根尽力而为；迁移复制改用 robocopy（替代在 OneDrive 并发同步下会卡死的 `shutil.copytree`） |
+| **v2.2.2** | 2026-08 | **OneDrive 衝突副本根治 + dsh 識別**：寫入一律原子化（`_safe_write_text` 重寫——舊版 replace 失敗回退 in-place 直寫正是衝突副本元兇；程序唯一 tmp + 退避重試 + `.pending` 完整快照降級，讀端優先新快照、啟動全樹收編）；**dsh（DeepSeek CLI）三層根因全修**（檢測 profile + 備用簽名；檢測緩存新增 `profiles_hash` 配置指紋——配置變更立即失效不再等 24h TTL；通用發現增加 `~` 點目錄掃描）；憑據檔案（`.credentials.yaml`/`auth.json` 等）絕不進入記憶管道；新增 6 個回歸測試，全量 234 斷言 |
+| **v2.2.1** | 2026-08 | **OneDrive 运行时解耦（根治 v2.2.0 事故）**：引擎日志 `agent_memory.log` 移出数据根 `.logs`（OneDrive 同步目录）→ `%LOCALAPPDATA%\AgentMemorySystem\logs`（与 shared.db 同原则），`get_logger()` 永不抛异常、日志故障不再中断同步；`get_data_root()` 启动路径不再做 `.writable_test` 同步写（OneDrive 锁下不再抛错/挂起）；PowerShell 通知带超时且不捕获输出（修复托盘失败后界面假死）；托盘注册失败自动重试一次；诊断日志（迁移/托盘/崩溃/退出）本机 LOCALAPPDATA 优先、数据根尽力而为；迁移复制改用 robocopy（替代在 OneDrive 并发同步下会卡死的 `shutil.copytree`）；"退出程序"按钮 + 窗口内容自适应 |
 | **v2.2.0** | 2026-08 | **架构升级：SQLite 本机化 + 增量同步**：`shared.db` 移出 OneDrive（改为 `%LOCALAPPDATA%` 本机查询缓存，跨机事实源为 `memory_shared.md`）；`memory_shared.md` 增量追加（不再每次全量重写，消除写放大/冲突）；缓存缺失自动从 .md 重建、旧库自动迁移；**体积控制打包失效根治**（tools 变正式包 + 静态导入 + build.py 冒烟检查 + 内置兜底截断）；回滚功能重写（backup_log.json 驱动）；跨机设备解析禁止静默冒名（自动注册当前机器）；FileLock/备份名/时区过期清理/VACUUM 低频化/多语言冲突检测/跨机相对路径注入/日志轮转 等 20 项修复；新增 22 个回归测试 |
 | **v2.1.2** | 2026-08 | **图标与托盘修复**：`app_icon.ico` 重制为紫色记忆图标（原为白底灰图形，视觉上像羽毛）；新增 `--tray-test` 诊断参数实测托盘创建成功（`Shell_NotifyIconW add=1`）；删除 LOCALAPPDATA 残留副本 |
 | **v2.1.1** | 2026-08 | **数据分裂根治**：数据根注册点（`%LOCALAPPDATA%\AgentMemorySystem\data_root.txt`）成为唯一事实来源，所有入口（GUI/CLI/watchdog/任意 EXE 副本/开发模式）只读注册点；BAT 注入的环境变量为最高权威，每次启动自动纠正注册；watchdog 重启注入同一数据根；实测直接双击任意 EXE 均收敛到项目根 `AgentMemory/` |

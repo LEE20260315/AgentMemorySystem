@@ -367,76 +367,201 @@ def _pending_path(target: Path) -> Path:
     return target.with_suffix(target.suffix + ".pending")
 
 
-def _safe_write_text(path, content: str, encoding: str = "utf-8", retries: int = 3) -> bool:
-    """Write text to file with retry on PermissionError.
+def _tmp_path(target: Path) -> Path:
+    """Return a per-process unique tmp path for atomic writes.
 
-    Uses atomic write (tmp + rename) when possible, falls back to direct write.
-    Returns True on success.
+    v2.2.2: 旧实现用 with_suffix(".tmp")（固定名），GUI / watchdog / CLI
+    并发写同一目标时会互相覆盖 tmp 并撞 replace；改为"原名 + .tmp + pid"，
+    同目录（保证 rename 原子性）且进程间互不冲突。
+    """
+    return target.with_name(target.name + ".tmp{}".format(os.getpid()))
+
+
+def _mtime(path: Path) -> float:
+    """Safe mtime（不存在返回 0）。"""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def merge_pending_file(target, remove_only: bool = False) -> bool:
+    """把 target 的 .pending 快照合并回主文件（启动恢复用）。
+
+    v2.2.2 语义修正：.pending 一律是 _safe_write_text 落下的**完整快照**，
+    而非增量片段——所以恢复动作是"新则替换，旧则丢弃"，绝不 append
+    （旧版 recover_pending 的 append 会把整份快照再拼一遍 → 内容翻倍）。
+
+    Returns True if a pending file was consumed.
+    """
+    target = Path(target)
+    pending = _pending_path(target)
+    if not pending.exists():
+        return False
+    if remove_only:
+        try:
+            pending.unlink()
+        except OSError:
+            pass
+        return True
+    try:
+        if not target.exists() or _mtime(pending) >= _mtime(target):
+            os.replace(str(pending), str(target))
+        else:
+            pending.unlink()  # 主文件更新（如 OneDrive 对端写入）→ 丢弃过期快照
+        return True
+    except OSError:
+        return False
+
+
+def merge_pending_files(root) -> int:
+    """扫描 root 下所有 *.pending 并逐一恢复；顺带清理遗留 *.tmp*。
+
+    在各入口（GUI / CLI / watchdog）启动时调用一次：
+    - .pending 比 target 新 → 原子替换回主文件
+    - .pending 比 target 旧 → 删除（已被更新的内容取代）
+    - 孤儿 .tmp*（崩溃残留）→ 删除
+    Returns number of pending files consumed.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    consumed = 0
+    try:
+        for p in root.rglob("*.pending"):
+            if p.is_file() and merge_pending_file(p.with_suffix("")):
+                consumed += 1
+        # 崩溃/断电遗留的临时文件：超过 1 小时的视为孤儿，清除
+        cutoff = time.time() - 3600
+        for p in root.rglob("*.tmp*"):
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return consumed
+
+
+def _safe_write_text(path, content: str, encoding: str = "utf-8", retries: int = 5) -> bool:
+    """Write text to file with retry — ALWAYS atomic (tmp + rename), never in-place.
+
+    v2.2.2 规则（OneDrive 冲突副本根治）：
+    1. 永远先写同目录唯一 tmp（fsync 落盘），再 os.replace 到目标——
+       绝不打开目标文件做 in-place 截断重写（旧版在 replace 失败时回退
+       direct write，正是 OneDrive"无法操作/建立冲突副本"的元凶：
+       云端正在同步的文件被就地改写，同步器无法 reconcile）。
+    2. replace 遇 PermissionError（OneDrive / 杀软瞬时锁）→ 指数退避重试。
+    3. 持续锁定 → 把完整快照落到 .pending 并在成功后由
+       merge_pending_file / merge_pending_files 收编；读取端
+       (_safe_read_text) 会优先采用更新的 .pending，不丢数据。
+    4. 写成功后清理同目标的过期 .pending（已被本次内容取代）。
+
+    Returns True on success (含落 .pending 的降级成功).
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = _tmp_path(path)
+    delay = 0.2
 
+    def _write_snapshot(target: Path) -> bool:
+        """把完整内容快照写到 target（fsync 落盘）。"""
+        with open(target, "w", encoding=encoding) as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        return True
+
+    # 步骤 1：写 tmp（同目录、进程唯一），失败退避重试
+    tmp_ok = False
     for attempt in range(retries):
         try:
-            with open(tmp, "w", encoding=encoding) as f:
-                f.write(content)
-                f.flush()
-                os.fsync(f.fileno())
-            try:
-                tmp.replace(path)
-            except OSError:
-                # Target locked (OneDrive / another process) → direct write
-                with open(path, "w", encoding=encoding) as f:
-                    f.write(content)
-            return True
+            tmp_ok = _write_snapshot(tmp)
+            break
         except PermissionError:
-            # File locked by another process → write to .pending
+            # tmp 本身被锁（罕见）→ 直接把快照落 .pending
             try:
-                pending = _pending_path(path)
-                with open(pending, "w", encoding=encoding) as f:
-                    f.write(content)
+                _write_snapshot(_pending_path(path))
                 return True
             except OSError:
                 pass
         except OSError:
             pass
-        if attempt < retries - 1:
-            time.sleep(0.3 * (attempt + 1))
+        time.sleep(delay * (attempt + 1))
+    if not tmp_ok:
+        return False
+
+    # 步骤 2：原子替换目标；PermissionError（OneDrive/杀软瞬时锁）退避重试
+    for replace_attempt in range(retries):
+        try:
+            os.replace(str(tmp), str(path))
+            # 成功：清理已被本次内容取代的 .pending 快照
+            pending = _pending_path(path)
+            if pending.exists() and _mtime(pending) <= _mtime(path):
+                try:
+                    pending.unlink()
+                except OSError:
+                    pass
+            return True
+        except PermissionError:
+            time.sleep(delay * (replace_attempt + 1))
+        except OSError:
+            break
+
+    # 步骤 3：目标持续锁定 → 完整快照落 .pending（读端会优先采用更新的快照）
+    try:
+        _write_snapshot(_pending_path(path))
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return True
+    except OSError:
+        pass
     return False
 
 
 def _safe_read_text(path, default: str = "", encoding: str = "utf-8", max_size: int = 50 * 1024 * 1024) -> str:
     """Read text from file with retry on PermissionError.
 
+    v2.2.2: 若存在比主文件**更新**的 .pending 快照（上次写入时目标被锁），
+    优先返回快照内容——追加/读改写流程基于最新数据构建，不丢已写内容。
+
     Returns default if file doesn't exist or can't be read.
     Files larger than max_size (default 50MB) are truncated to avoid MemoryError.
     """
-    path = Path(path)
-    if not path.exists():
+    target = Path(path)
+    pending = _pending_path(target)
+    try:
+        if pending.exists() and (not target.exists() or _mtime(pending) > _mtime(target)):
+            target = pending  # 快照是最新一次写入的完整内容
+    except OSError:
+        pass
+    if not target.exists():
+        # 主文件与快照都不存在 → 默认值
         return default
 
     for attempt in range(3):
         try:
             # 检查文件大小，超大文件截断读取避免 MemoryError
             try:
-                file_size = path.stat().st_size
+                file_size = target.stat().st_size
             except OSError:
                 file_size = 0
 
             if file_size > max_size:
                 # 只读取最后 max_size 字节
-                with open(path, "r", encoding=encoding, errors="replace") as f:
+                with open(target, "r", encoding=encoding, errors="replace") as f:
                     f.seek(max(0, file_size - max_size))
                     return f.read()
             else:
-                with open(path, "r", encoding=encoding, errors="replace") as f:
+                with open(target, "r", encoding=encoding, errors="replace") as f:
                     return f.read()
         except PermissionError:
             # Try reading .pending file
             try:
-                pending = _pending_path(path)
-                if pending.exists():
+                if pending.exists() and pending != target:
                     with open(pending, "r", encoding=encoding, errors="replace") as f:
                         return f.read()
             except OSError:
@@ -450,3 +575,10 @@ def _safe_read_text(path, default: str = "", encoding: str = "utf-8", max_size: 
         if attempt < 2:
             time.sleep(0.3 * (attempt + 1))
     return default
+
+
+# ---------------------------------------------------------------------------
+# 公共 API 别名（v2.2.2）：模块内一律通过别名调用，杜绝新的 in-place 写入
+# ---------------------------------------------------------------------------
+safe_write_text = _safe_write_text
+safe_read_text = _safe_read_text

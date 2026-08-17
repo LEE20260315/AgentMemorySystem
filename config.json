@@ -241,6 +241,18 @@
         "~/.pi/agent/settings.json"
       ],
       "note": "Pi Agent；signature 用根目录 MEMORY.md（~/.pi/settings.json 不存在）；记忆在 MEMORY.md + memory/MEMORY.md + agent/sessions/*.jsonl；agent/auth.json 含明文 API Key 需排除"
+    },
+    "dsh": {
+      "candidate_paths": [
+        "~/.dsh",
+        "~/AppData/Roaming/dsh",
+        "~/AppData/Local/dsh"
+      ],
+      "signature_file": "settings.yaml",
+      "signature_paths_fallback": [
+        "~/.dsh/.anonymous-user-id"
+      ],
+      "note": "DeepSeek DSH CLI（dsh-code）；根目录 settings.yaml 为签名；会话在 sessions/*/session.jsonl(.zstd)，工作区状态在 storages/*.json；.credentials.yaml 含凭据必须排除"
     }
   },
   "agents_md_standard": {

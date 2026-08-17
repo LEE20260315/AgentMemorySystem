@@ -894,18 +894,30 @@ def test_integration_path_consistency():
 
 
 def test_integration_rollback_no_crash():
-    """集成测试：回滚在无备份时不崩溃"""
+    """集成测试：回滚在无备份时不崩溃
+
+    v2.2.2 修复：旧版直接 SyncEngine() 用真实数据根，机器上存在历史
+    .sync_backups 时 rollback 会恢复文件返回 >0，断言恒失败（环境依赖）。
+    现改为临时空数据根隔离，"无备份"前提在任何机器上都成立。
+    """
     r.set_module("integration")
 
+    import agent_memory as am
     from sync_engine import SyncEngine
 
-    engine = SyncEngine()
+    tmp = Path(tempfile.mkdtemp())
     try:
-        result = engine.rollback()
-        r.assert_true("rollback returns int", isinstance(result, int))
-        r.assert_true("rollback returns 0 when no backup", result == 0)
+        config = am.ConfigManager(config_path=tmp / "config.json")
+        config.config["paths"] = {"memory_root": str(tmp / "empty_root")}
+        with patch.dict(os.environ, {"AGENT_MEMORY_DATA_DIR": str(tmp / "empty_root")}):
+            engine = SyncEngine(config=config)
+            result = engine.rollback()
+            r.assert_true("rollback returns int", isinstance(result, int))
+            r.assert_true("rollback returns 0 when no backup", result == 0)
     except Exception as e:
         r.fail("rollback no crash", str(e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ===========================================================================
@@ -1671,6 +1683,159 @@ def test_ui_has_exit_button_and_fit():
     r.assert_true("content fit wired in init", "_fit_window_size(req_w, req_h" in src)
 
 
+# ===========================================================================
+# v2.2.2 修复回归测试
+# ===========================================================================
+
+def test_safe_write_locked_target_falls_to_pending():
+    """v2.2.2: 目标被锁（OneDrive 模拟）→ 快照落 .pending，读取优先快照，解锁合并不翻倍
+
+    Windows：open() 句柄默认无 FILE_SHARE_DELETE → os.replace 被拒，完整验证锁降级链路。
+    POSIX：无"阻止 rename"的用户态锁，改为直接验证 pending 快照的读端优先 + 合并语义。
+    """
+    r.set_module("safe_io")
+    from safe_io import _safe_write_text, _safe_read_text, _pending_path, merge_pending_file
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        target = tmp / "memory.md"
+        _safe_write_text(target, "version-1\n")
+        if sys.platform == "win32":
+            lock = open(target, "r", encoding="utf-8")
+            try:
+                ok = _safe_write_text(target, "version-2-FULL\n")
+                r.assert_true("write returns True under lock", ok)
+                r.assert_true("pending snapshot created", _pending_path(target).exists())
+                r.assert_eq("pending has full snapshot", _pending_path(target).read_text(encoding="utf-8"), "version-2-FULL\n")
+                r.assert_eq("read prefers newer pending", _safe_read_text(target), "version-2-FULL\n")
+                r.assert_eq("target NOT modified in-place", target.read_text(encoding="utf-8"), "version-1\n")
+            finally:
+                lock.close()
+        else:
+            # POSIX：手动构造 pending 快照（等同锁降级的产物）
+            _safe_write_text(_pending_path(target), "version-2-FULL\n")
+            r.assert_eq("read prefers newer pending", _safe_read_text(target), "version-2-FULL\n")
+        r.assert_true("merge consumed", merge_pending_file(target))
+        r.assert_eq("target recovered", target.read_text(encoding="utf-8"), "version-2-FULL\n")
+        r.assert_true("pending removed", not _pending_path(target).exists())
+        r.assert_true("no content duplication", "version-1" not in target.read_text(encoding="utf-8"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_merge_pending_files_tree_and_orphan_tmp():
+    """v2.2.2: merge_pending_files 全树恢复 + 孤儿 .tmp*（>1h）清理"""
+    r.set_module("safe_io")
+    from safe_io import _safe_write_text, _pending_path, merge_pending_files
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        for rel in ("a/x.md", "b/c/y.json"):
+            p = tmp / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            _safe_write_text(p, "old\n")
+            _safe_write_text(_pending_path(p), "recovered\n")
+        n = merge_pending_files(tmp)
+        r.assert_eq("consumed 2 pending", n, 2)
+        r.assert_eq("a/x.md recovered", (tmp / "a" / "x.md").read_text(encoding="utf-8"), "recovered\n")
+        r.assert_eq("b/c/y.json recovered", (tmp / "b" / "c" / "y.json").read_text(encoding="utf-8"), "recovered\n")
+        # 孤儿 tmp：超 1 小时清除，新近保留
+        import time as _t
+        stale = tmp / "orphan.md.tmp99999"
+        stale.write_text("x", encoding="utf-8")
+        old = _t.time() - 7200
+        os.utime(str(stale), (old, old))
+        fresh = tmp / "fresh.md.tmp1"
+        fresh.write_text("x", encoding="utf-8")
+        merge_pending_files(tmp)
+        r.assert_true("stale orphan removed", not stale.exists())
+        r.assert_true("fresh tmp kept", fresh.exists())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_detect_agents_cache_profiles_hash_invalidation():
+    """v2.2.2: agent_detection 配置变化（新增 dsh profile）→ 旧缓存立即失效；hash 一致 → 缓存生效"""
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    data_root = tmp / "data"
+    (data_root / "_shared").mkdir(parents=True)
+    local_home = tmp / "Users" / "Dong"
+    local_home.mkdir(parents=True)
+    dsh_dir = local_home / ".dsh"
+    dsh_dir.mkdir(parents=True)
+    (dsh_dir / ".anonymous-user-id").write_text("uid", encoding="utf-8")
+    dsh_profile = {"candidate_paths": [str(dsh_dir)], "signature_file": "settings.yaml",
+                   "signature_paths_fallback": [str(dsh_dir / ".anonymous-user-id")]}
+    now_iso = "2026-08-17T00:00:00+00:00"
+    seeded = {"path": str(local_home / "zz_cached"), "memory_files": [], "detected_at": now_iso, "source": "auto"}
+
+    config = am.ConfigManager(config_path=tmp / "config.json")
+    config.config["agent_detection"] = {"dsh": dsh_profile}
+    config.config["agent_overrides"] = {}
+    config.config["sync_tool"] = {"cache_ttl_hours": 24}
+
+    old_la = os.environ.get("LOCALAPPDATA")
+    try:
+        os.environ["LOCALAPPDATA"] = str(local_home / "AppData" / "Local")
+        # 屏蔽 OS 权威 home 解析 → get_local_home 走 LOCALAPPDATA 推断 = local_home，
+        # 种子缓存里的路径才不会被"跨机过滤"误杀
+        with patch("safe_io._known_folder_profile", return_value=None):
+            with patch("agent_memory.get_data_root", return_value=data_root):
+                # 场景 1：旧版缓存（无 profiles_hash）→ 失效重检测 → dsh 可见
+                (data_root / ".detected_agents.json").write_text(
+                    json.dumps({"detected_at": now_iso, "agents": {"zz_cached": seeded}}), encoding="utf-8")
+                detected = am.detect_agents(config, write_cache=False)
+                r.assert_true("stale cache invalidated, dsh detected", "dsh" in detected)
+                r.assert_true("stale cache content not returned", "zz_cached" not in detected)
+
+                # 场景 2：hash 一致（TTL 内）→ 缓存照常生效（不能一刀切禁用缓存）
+                correct_hash = am._detection_profiles_hash(config)
+                (data_root / ".detected_agents.json").write_text(
+                    json.dumps({"detected_at": now_iso, "profiles_hash": correct_hash,
+                                "agents": {"zz_cached": seeded}}), encoding="utf-8")
+                detected2 = am.detect_agents(config, write_cache=False)
+                r.assert_true("matching-hash cache honored", "zz_cached" in detected2)
+                r.assert_true("no rescan when cache valid", "dsh" not in detected2)
+    finally:
+        if old_la is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = old_la
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_detect_agents_dsh_memory_scan():
+    """v2.2.2: dsh 记忆扫描——*.md + sessions/**/*.jsonl + storages/*.json；凭据/压缩文件排除"""
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    dsh_dir = tmp / ".dsh"
+    (dsh_dir / "sessions" / "s1").mkdir(parents=True)
+    (dsh_dir / "storages").mkdir(parents=True)
+    (dsh_dir / "settings.yaml").write_text("model: deepseek\n", encoding="utf-8")
+    (dsh_dir / ".anonymous-user-id").write_text("uid", encoding="utf-8")
+    (dsh_dir / ".credentials.yaml").write_text("api_key: SECRET", encoding="utf-8")
+    (dsh_dir / "MEMORY.md").write_text("# mem", encoding="utf-8")
+    (dsh_dir / "sessions" / "s1" / "session.jsonl").write_text('{"q":"hi"}\n', encoding="utf-8")
+    (dsh_dir / "sessions" / "s1" / "session.jsonl.zstd").write_text("compressed", encoding="utf-8")
+    (dsh_dir / "storages" / "ws.json").write_text("{}", encoding="utf-8")
+
+    files = am._scan_agent_memory_files("dsh", dsh_dir)
+    names = {Path(f).name for f in files}
+    r.assert_true("MEMORY.md scanned", "MEMORY.md" in names)
+    r.assert_true("session.jsonl scanned", "session.jsonl" in names)
+    r.assert_true("storages ws.json scanned", any(str(Path(f)).find("storages") >= 0 for f in files))
+    r.assert_true("zstd excluded", not any(f.endswith(".zstd") for f in files))
+    r.assert_true("credentials excluded", not any("credentials" in f.lower() for f in files))
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -1767,6 +1932,11 @@ ALL_TESTS = [
     # v2.2.1: UI（退出按钮 + 窗口内容自适应）
     test_fit_window_size,
     test_ui_has_exit_button_and_fit,
+    # v2.2.2: OneDrive 锁原子写 + dsh 识别 + 缓存指纹失效
+    test_safe_write_locked_target_falls_to_pending,
+    test_merge_pending_files_tree_and_orphan_tmp,
+    test_detect_agents_cache_profiles_hash_invalidation,
+    test_detect_agents_dsh_memory_scan,
 ]
 def main():
     print("=" * 60)

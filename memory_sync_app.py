@@ -517,8 +517,10 @@ def load_settings() -> dict:
     loaded = {}
     if SETTINGS_PATH.exists():
         try:
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
+            from safe_io import safe_read_text
+            raw = safe_read_text(SETTINGS_PATH, default="")
+            if raw:
+                loaded = json.loads(raw)
         except (json.JSONDecodeError, OSError):
             pass
     merged = {**DEFAULT_SETTINGS, **loaded}
@@ -542,19 +544,13 @@ def load_settings() -> dict:
 
 def save_settings(settings: dict):
     _data_dir().mkdir(parents=True, exist_ok=True)
-    tmp = SETTINGS_PATH.with_suffix(".tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.replace(SETTINGS_PATH)
-    except OSError:
-        try:
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-                json.dump(settings, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass  # 设置写入失败不应崩溃
+    # v2.2.2: 统一走 safe_io 原子写——旧版在 replace 失败（OneDrive 锁）时
+    # 回退 in-place 直写，正是 OneDrive 报"无法操作/建立冲突副本"的元凶。
+    from safe_io import safe_write_text
+    safe_write_text(
+        SETTINGS_PATH,
+        json.dumps(settings, ensure_ascii=False, indent=2),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2997,6 +2993,16 @@ def main():
         f"  SETTINGS_PATH = {SETTINGS_PATH}\n",
     ]
     _migrate_old_data()
+
+    # v2.2.2: 启动恢复——上次运行若因 OneDrive 锁把写入落到 .pending，
+    # 现在锁已释放，原子合并回主文件；顺带清理崩溃遗留的 .tmp*
+    try:
+        from safe_io import get_data_root, merge_pending_files
+        _merged = merge_pending_files(get_data_root())
+        if _merged:
+            _write_diag("startup merge_pending: recovered {} file(s)\n".format(_merged))
+    except Exception:
+        pass
     if _diag_log_paths():
         # v2.2.1: 本机 LOCALAPPDATA 优先 + 数据根副本，任一失败不影响其它
         _write_diag("".join(_diag_lines))

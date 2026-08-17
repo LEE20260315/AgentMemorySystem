@@ -121,10 +121,13 @@ class ConfigManager:
                 base[key] = value
 
     def save(self):
-        """保存配置文件"""
+        """保存配置文件（v2.2.2: 原子写，杜绝 in-place 截断重写）"""
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=2, ensure_ascii=False)
+            from safe_io import safe_write_text
+            safe_write_text(
+                self.config_path,
+                json.dumps(self.config, indent=2, ensure_ascii=False),
+            )
         except Exception as e:
             logging.error("保存配置文件失败: {}".format(e))
 
@@ -986,17 +989,14 @@ def register_current_device(device_config_path: Path, device_name: str = None) -
 
     device_config_path.parent.mkdir(parents=True, exist_ok=True)
     # v2.1.2: 原子写（避免多机首次并发注册时 JSON 半写/损坏）
-    try:
-        from safe_io import _safe_write_text
-        _safe_write_text(
-            device_config_path,
-            json.dumps(config, ensure_ascii=False, indent=2),
-        )
-    except Exception:
-        device_config_path.write_text(
-            json.dumps(config, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    # v2.2.2: 移除 in-place 直写回退（OneDrive 冲突副本元凶），失败即记录
+    from safe_io import _safe_write_text
+    ok = _safe_write_text(
+        device_config_path,
+        json.dumps(config, ensure_ascii=False, indent=2),
+    )
+    if not ok:
+        get_logger().warning("device_config.json 写入失败（含 .pending 降级）: {}".format(device_config_path))
     return device_name
 
 
@@ -1022,34 +1022,15 @@ def load_runtime_manual(shared_root):
 
 def recover_pending_if_exists(memory_root):
     """
-    第 3 步: 检测 memory_private.md.pending 是否存在,
-    若存在则将其内容并入 memory_private.md 后删除。
+    第 3 步: 检测 memory_private.md.pending 是否存在, 若存在则恢复。
+
+    v2.2.2 语义修正：.pending 是 _safe_write_text 在目标被锁时落下的
+    **完整内容快照**（而非增量片段）。旧版把快照 append 到主文件会把
+    已有内容整体复制一遍 → 记忆条目翻倍。现改为"新则原子替换，旧则丢弃"，
+    与 safe_io.merge_pending_file 保持同一语义。
     """
-    pending_path = memory_root / "memory_private.md.pending"
-    private_path = memory_root / "memory_private.md"
-
-    if not pending_path.exists():
-        return
-
-    pending_content = pending_path.read_text(encoding="utf-8")
-    if not pending_content.strip():
-        pending_path.unlink()
-        return
-
-    existing = read_file_if_exists(private_path)
-    merged = existing.rstrip("\n") + "\n\n" + pending_content.strip() + "\n"
-
-    # 原子写入: 先写临时文件, 再 rename, 防止崩溃导致重复合并
-    tmp_path = private_path.with_suffix(".md.merge_tmp")
-    try:
-        tmp_path.write_text(merged, encoding="utf-8")
-        fsync_file(tmp_path)
-        os.replace(str(tmp_path), str(private_path))
-        pending_path.unlink()
-    except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        raise
+    from safe_io import merge_pending_file
+    merge_pending_file(Path(memory_root) / "memory_private.md")
 
 
 def load_last_sync(memory_root):
@@ -4490,12 +4471,14 @@ class TieredStorageManager:
         archive_path = self.archive_dir / month_dir
         archive_path.mkdir(exist_ok=True)
 
-        # 追加到归档文件
+        # 追加到归档文件（v2.2.2: 读改写走原子替换，"a" 模式会长时间
+        # 持有句柄且 in-place 写，OneDrive 下易产生冲突副本）
         archive_file = archive_path / "memories.md"
         entry_text = format_memory_entry(memory)
 
-        with open(archive_file, "a", encoding="utf-8") as f:
-            f.write(entry_text + "\n")
+        from safe_io import _safe_read_text, _safe_write_text
+        existing = _safe_read_text(archive_file, default="")
+        _safe_write_text(archive_file, existing.rstrip("\n") + "\n" + entry_text + "\n")
 
         # 从主数据库删除（v2.1.0: 同步清理 FTS 索引）
         with MemoryDatabase(self.db_path) as db:
@@ -5055,7 +5038,9 @@ def _verify_agent_signature(path: Path, profile: dict) -> bool:
     path : Path
         待验证的路径
     profile : dict
-        agent 检测配置（signature_file, signature_content, signature_glob）
+        agent 检测配置（signature_file, signature_content, signature_glob,
+        signature_paths_fallback — v2.2.2 新增：主签名缺失时按序尝试的
+        备用绝对/~/ 相对路径，适配刚安装尚未生成主签名的 agent）
 
     Returns
     -------
@@ -5066,8 +5051,30 @@ def _verify_agent_signature(path: Path, profile: dict) -> bool:
         return False
     if "signature_file" in profile:
         sig_file = path / profile["signature_file"]
-        if not sig_file.exists():
-            return False
+        sig_exists = sig_file.exists()
+        if not sig_exists:
+            # v2.2.2: 主签名缺失 → 依次尝试备用签名路径（如 dsh 刚装完
+            # 还没写 settings.yaml，但已有 .anonymous-user-id）
+            fallbacks = profile.get("signature_paths_fallback") or []
+            matched = False
+            try:
+                from safe_io import get_local_home
+                home = get_local_home()
+            except Exception:
+                home = Path.home()
+            for fb in fallbacks:
+                fb_path = _expand_agent_home_path(fb, home)
+                try:
+                    if fb_path.exists():
+                        matched = True
+                        break
+                except OSError:
+                    continue
+            if not matched:
+                return False
+            if "signature_content" in profile:
+                # 主签名不存在则无法验证内容签名 → 仅靠备用签名放行
+                return True
         if "signature_content" in profile:
             try:
                 content = sig_file.read_text(encoding="utf-8")[:500]
@@ -5160,7 +5167,14 @@ def detect_agents(
                 cache = json.load(f)
             detected_at = datetime.fromisoformat(cache.get("detected_at", "2000-01-01T00:00:00+00:00"))
             age_hours = (datetime.now(timezone.utc) - detected_at).total_seconds() / 3600
-            if age_hours < cache_ttl_hours:
+            # v2.2.2: profiles 指纹校验——config.json 的 agent_detection 变化
+            # （如新增 dsh profile）时旧缓存立即失效，不再等 TTL（默认 24h）。
+            # 旧缓存无 profiles_hash 字段同样触发一次重检测（自愈）。
+            cached_hash = cache.get("profiles_hash")
+            current_hash = _detection_profiles_hash(config)
+            if cached_hash != current_hash:
+                logger.info("检测配置已变化（profiles_hash 不一致），缓存失效，重新检测")
+            elif age_hours < cache_ttl_hours:
                 result = cache.get("agents", {})
                 # v2.2.0: 跨机缓存失效——.detected_agents.json 位于数据根
                 # （OneDrive 同步），缓存的是原机的本机绝对路径；本机 home
@@ -5296,15 +5310,38 @@ def detect_agents(
     if write_cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump({
+            from safe_io import safe_write_text
+            safe_write_text(
+                cache_path,
+                json.dumps({
                     "detected_at": datetime.now(timezone.utc).isoformat(),
+                    "profiles_hash": _detection_profiles_hash(config),
                     "agents": found
-                }, f, ensure_ascii=False, indent=2)
+                }, ensure_ascii=False, indent=2),
+            )
         except OSError as e:
             logger.warning("保存检测缓存失败: {}".format(e))
 
     return found
+
+
+def _detection_profiles_hash(config) -> str:
+    """计算 agent_detection 配置的指纹（v2.2.2 缓存失效用）。
+
+    场景：用户新装 agent（如 dsh）后 config.json 增加了对应 profile，
+    但 .detected_agents.json 缓存 TTL 默认 24h 未过期 → 旧缓存直接命中，
+    新 agent 最长 24h 内都识别不出来（正是本次 dsh 识别不出的另一半根因）。
+
+    方案：缓存写入时记录 profiles 指纹；读取时指纹不一致（配置变了）
+    → 缓存视为过期，立即重检测。
+    """
+    import hashlib
+    try:
+        profiles = config.get("agent_detection", {}) or {}
+        raw = json.dumps(profiles, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
 
 
 def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
@@ -5315,12 +5352,15 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
     """
     # 常见 AI 工具的配置/数据目录
     # v1.3.7: 增加 ~/OneDrive 扫描（pi-web 等可能安装在 OneDrive 项目目录下）
+    # v2.2.2: 增加 ~ 根扫描——大量 CLI agent 以 ~/.xxx 点目录安装
+    #         （~/.dsh、~/.openclaw 等），旧版只扫 .config/AppData 会漏掉
     generic_candidates = [
         ("~/.config", "config"),
         ("~/AppData/Local", "appdata_local"),
         ("~/AppData/Roaming", "appdata_roaming"),
         ("~/.npm-global/node_modules/@agegr", "npm_global"),  # pi-web
         ("~/OneDrive", "onedrive_root"),
+        ("~", "home_root"),
     ]
 
     # AI 工具名称关键词（目录名包含这些词的会被识别为潜在 Agent）
@@ -5340,6 +5380,9 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
         "aipyapp",  # aipyapp
         "opencode",  # OpenCode
         "amazonq",  # Amazon Q
+        # v2.2.2 新增
+        "dsh",  # DeepSeek DSH CLI（~/.dsh）
+        "dashshell",  # DashShell 类
     ]
 
     # 排除的目录名（非 Agent 工具，或已知浏览器壳应用）
@@ -5622,6 +5665,24 @@ def _scan_agent_memory_files(agent_id: str, install_path: Path) -> list:
                 if _size_ok(jsonl_file):
                     memory_files.append(str(jsonl_file))
         # v2.1 安全：显式排除 agent/auth.json（含明文 API Key，不扫描）
+    elif "dsh" in agent_id or install_path.name.lower() in (".dsh", "dsh"):
+        # v2.2.2: DeepSeek DSH CLI（dsh-code）
+        # 记忆源：根目录 *.md（AGENTS.md/MEMORY.md 等用户自建）+ sessions/**/session.jsonl
+        # 注意：session.jsonl.zstd 为压缩格式无法解析，跳过；
+        #       .credentials.yaml 含凭据，绝不扫描（_filter_agent_memory_files 兜底再滤一次）
+        for md_file in install_path.glob("*.md"):
+            if _size_ok(md_file):
+                memory_files.append(str(md_file))
+        sessions_dir = install_path / "sessions"
+        if sessions_dir.exists():
+            for jsonl_file in sessions_dir.rglob("*.jsonl"):
+                if _size_ok(jsonl_file):
+                    memory_files.append(str(jsonl_file))
+        storages_dir = install_path / "storages"
+        if storages_dir.exists():
+            for json_file in storages_dir.glob("*.json"):
+                if _size_ok(json_file):
+                    memory_files.append(str(json_file))
     else:
         # v2.1: 新增 AGENTS.md 到候选（2026 跨工具标准）
         candidates = ["MEMORY.md", "memory.md", "memories.md", "USER.md", "user.md", "AGENTS.md"]
@@ -6138,12 +6199,15 @@ class AgentRegistry:
             return {}
 
     def _save(self):
-        """保存 registry"""
-        with open(self.registry_path, "w", encoding="utf-8") as f:
-            json.dump(
+        """保存 registry（v2.2.2: 原子写）"""
+        from safe_io import safe_write_text
+        safe_write_text(
+            self.registry_path,
+            json.dumps(
                 {"version": "1.3", "agents": self.agents},
-                f, ensure_ascii=False, indent=2
-            )
+                ensure_ascii=False, indent=2
+            ),
+        )
 
     def register(self, agent_id: str, installation_path: str = None,
                  memory_files: list = None, **kwargs) -> dict:
@@ -6501,10 +6565,13 @@ def _is_sync_generated_content(text: str) -> bool:
 
 
 def _should_skip_agent_memory_file(agent_id: str, file_path: Path) -> bool:
-    """过滤明显属于同步写回产物的文件。"""
+    """过滤明显属于同步写回产物的文件 / 敏感凭据文件。"""
     _ = agent_id  # 预留：后续可按 agent 定制过滤规则
     name = file_path.name.lower()
     if name == "shared_from_agents.md":
+        return True
+    # v2.2.2 安全：凭据类文件绝不进入记忆管道（dsh/.credentials.yaml、pi/auth.json 等）
+    if "credential" in name or name in ("auth.json", "auth.yaml", ".env", "secrets.yaml", "secrets.json"):
         return True
     return False
 
@@ -7284,8 +7351,9 @@ class TriggerEngine:
                 lines.append("  - \"{}\"".format(item))
             lines.append("")
         self.triggers_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.triggers_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+        # v2.2.2: 原子写（triggers.yaml 在 OneDrive 数据根内）
+        from safe_io import safe_write_text
+        safe_write_text(self.triggers_path, "\n".join(lines))
 
     def match_hotword(self, content: str) -> dict:
         """
@@ -7386,8 +7454,12 @@ class SessionFlusher:
             return []
 
     def _save_buffer(self, buffer: list):
-        with open(self.buffer_path, "w", encoding="utf-8") as f:
-            json.dump(buffer, f, ensure_ascii=False, indent=2)
+        # v2.2.2: 原子写（buffer 在 OneDrive 数据根内）
+        from safe_io import safe_write_text
+        safe_write_text(
+            self.buffer_path,
+            json.dumps(buffer, ensure_ascii=False, indent=2),
+        )
 
     def clear_buffer(self):
         """清空 buffer"""

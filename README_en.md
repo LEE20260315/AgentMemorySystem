@@ -51,6 +51,7 @@ Claude, Hermes, Trae, Cursor, CodePilot — each AI agent keeps its own memory, 
 | CodePilot | SQLite (`codepilot.db`) | Export as Markdown |
 | CodeBuddy | `MEMORY.md` | Generic Markdown writer |
 | pi / pi-web | `memory/MEMORY.md` + `.jsonl` | Generic Markdown writer |
+| dsh (DeepSeek CLI) | `*.md` + `sessions/**/*.jsonl` + `storages/*.json` (credentials excluded) | Generic Markdown writer |
 | OpenClaw | `.md` | Generic Markdown writer |
 | WorkBuddy | `MEMORY.md` | Generic Markdown writer |
 | Cursor / Windsurf / Cline / Continue / Aider / Roo-Code / Codex / Gemini CLI / OpenCode / Qwen / Qoder / QwenPaw / AlphaClaw | Generic Markdown / JSONL | Auto-adapted |
@@ -174,6 +175,9 @@ See `config.json` in the repository for the full configuration reference.
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v2.2.2** | 2026-08 | **OneDrive conflict-copy root fix + dsh detection**: all writes now strictly atomic (`_safe_write_text` rewritten — the legacy in-place fallback on replace failure was the exact cause of "file in use / conflict copy" errors; per-process unique tmp + backoff retry + `.pending` full-snapshot fallback, readers prefer the newer snapshot, startup merges the whole tree); **dsh (DeepSeek CLI) three-layer root fix** (detection profile + fallback signature; detection cache now stores a `profiles_hash` config fingerprint — config changes invalidate immediately instead of waiting out the 24h TTL; generic discovery now scans `~` dot-folders); credential files (`.credentials.yaml`/`auth.json` etc.) never enter the memory pipeline; 6 new regression tests, 234 assertions total |
+| **v2.2.1** | 2026-08 | **OneDrive runtime decoupling**: engine log moved out of the OneDrive-synced data root to `%LOCALAPPDATA%\AgentMemorySystem\logs`; `get_logger()` never raises; startup path no longer performs synchronous `.writable_test` writes; PowerShell notifications bounded with timeout; tray registration retried once; migration copy switched to robocopy; "Exit" button + content-aware window sizing |
+| **v2.2.0** | 2026-08 | **Architecture: SQLite localization + incremental sync**: `shared.db` moved out of OneDrive (local query cache in `%LOCALAPPDATA%`, cross-machine source of truth is `memory_shared.md`); incremental append for `memory_shared.md`; volume-control packaging fix; rollback rewritten (backup_log.json driven); 20+ fixes; 22 new regression tests |
 | **v2.0.4** | 2026-07 | **Icon unification** (tray/taskbar/window all use `app_icon.ico`, eliminating legacy multi-icon divergence); process file cleanup (removed DEVLOG.md, test_memory.py, design docs, one-time migration scripts, redundant icon assets, preserving version evolution path) |
 | **v2.0.3** | 2026-07 | Pre-write volume protection (`_enforce_write_volume_limit`, truncates old content at front matter boundary when over limit); `agent_runtime_manual.md` refactor; `prompt.md` hardcoded paths eliminated; `shrink_memory_files.py` sort logic simplified (6 sorts → single sorted) |
 | **v2.0.2** | 2026-07 | **Echo pollution root fix**: `_is_sync_generated_content` adds RAW_JSON/nested echo marker detection; `_purge_polluted_entries` auto-cleans DB and .md polluted entries before sync; `_count_legacy_markers` semantic fix; all `identity.json` migrated to relative paths (multi-machine portability); `extract_local_to_fused` parses `source_device` from `device_config.json` |
