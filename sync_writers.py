@@ -166,14 +166,21 @@ class SyncState:
                         logger.warning(
                             "sync_state 主路径写入失败，已保存到备份路径: {}".format(fallback_path))
         except Exception as e:
-            # 锁不可用（如跨机同步延迟）：降级为直接原子写，尽力而为
+            # v2.3.0: 锁不可用时的降级**绝不能再裸写 self.state**。
+            # 旧实现在这里直接 _safe_write_text(self.state, ...)，而 self.state
+            # 是本进程启动时（或更早）读到的快照 —— 会把其他进程/设备刚写进去的
+            # agent 状态整块覆盖掉。这正是「读-改-写无互斥 → 静默丢更新」的
+            # 实际发生点：锁失败后 fail-open。
+            # 降级也要先合并磁盘最新状态，最多丢本轮并发，不会抹掉别人的数据。
             try:
                 from safe_io import _safe_write_text
+                merged = self._merge_states(self._load_raw())
+                self.state = merged
                 content = json.dumps(self.state, ensure_ascii=False, indent=2)
                 _safe_write_text(self.state_path, content)
             except Exception:
                 pass
-            logger.warning("sync_state 保存失败(带锁): {}".format(e))
+            logger.warning("sync_state 保存降级（未持锁，已合并磁盘状态）: {}".format(e))
 
     def _load_raw(self) -> dict:
         """直接读取磁盘上的最新状态（不做 LOCALAPPDATA 回退，用于合并）。"""

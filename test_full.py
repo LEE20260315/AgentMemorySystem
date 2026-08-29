@@ -19,8 +19,11 @@ AgentMemorySystem 完整测试套件 v2.0
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import traceback
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -925,48 +928,156 @@ def test_integration_rollback_no_crash():
 # ===========================================================================
 
 def test_filelock_acquire_release():
-    """FileLock 正常获取/释放"""
+    """v2.3.0: FileLock 获取/释放正常，且**不在目标目录创建任何文件**。
+
+    旧实现会在 lock_path 指向的位置（数据根 = OneDrive 同步目录）真实创建
+    .lock 文件，同步到另一台机器后，对端看到一个"陈旧锁"就拒绝写入并走
+    fail-open 覆盖分支 —— 这是跨机丢更新的根因之一。新实现只把它当身份令牌。
+    """
     r.set_module("agent_memory")
     from agent_memory import FileLock
     tmp = Path(tempfile.mkdtemp())
     try:
         lock_path = tmp / "test.lock"
         with FileLock(lock_path):
-            r.assert_true("lock file exists", lock_path.exists())
-        r.assert_true("lock released", not lock_path.exists())
+            r.ok("lock acquired")
+        # 关键断言：目标目录保持干净，没有任何锁文件残留
+        leftovers = list(tmp.iterdir())
+        r.assert_true("目标目录无锁文件残留", len(leftovers) == 0)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_filelock_conflict_raises_lockerror():
-    """FileLock 锁冲突时抛 LockError（而非 UnboundLocalError）"""
+def test_filelock_reentrant_same_thread():
+    """v2.3.0: 同线程可重入（旧实现会自己把自己锁死，抛 LockError）"""
     r.set_module("agent_memory")
-    from agent_memory import FileLock, LockError
+    from agent_memory import FileLock
     tmp = Path(tempfile.mkdtemp())
     try:
         lock_path = tmp / "test.lock"
         with FileLock(lock_path):
-            try:
+            with FileLock(lock_path):
                 with FileLock(lock_path):
-                    r.fail("second lock", "should raise")
-            except LockError:
-                r.ok("second lock raises LockError")
-            except UnboundLocalError as e:
-                r.fail("second lock", "UnboundLocalError: {}".format(e))
+                    r.ok("三层嵌套重入成功")
+        # 全部退出后锁必须真的释放：再拿一次应当立刻成功
+        with FileLock(lock_path, timeout=2.0):
+            r.ok("释放后可再次获取")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_filelock_cross_process_mutual_exclusion():
+    """v2.3.0: **跨进程**真互斥（旧实现无法保证，且失败即 fail-open）
+
+    起一个子进程持锁 5 秒；父进程在此期间用 1 秒超时去抢，必须失败。
+    """
+    r.set_module("safe_io")
+    from safe_io import CrossProcessLock, LockTimeout
+    tmp = Path(tempfile.mkdtemp())
+    ready = tmp / "ready.txt"
+    target = tmp / "shared.md"
+    child = None
+    try:
+        code = (
+            "import sys, time\n"
+            "sys.path.insert(0, {!r})\n"
+            "from safe_io import CrossProcessLock\n"
+            "with CrossProcessLock({!r}, timeout=25):\n"
+            "    open({!r}, 'w').write('held')\n"
+            "    time.sleep(5)\n"
+            "print('done')\n"
+        ).format(os.getcwd(), str(target), str(ready))
+
+        child = subprocess.Popen([sys.executable, "-c", code])
+
+        # 等子进程持锁信号
+        waited = 0.0
+        while not ready.exists() and waited < 20.0:
+            time.sleep(0.1)
+            waited += 0.1
+        r.assert_true("子进程已持锁", ready.exists())
+
+        # 父进程抢锁必须超时失败
+        blocked = False
+        try:
+            with CrossProcessLock(target, timeout=1.0):
+                pass
+        except LockTimeout:
+            blocked = True
+        r.assert_true("跨进程争用被正确阻塞", blocked)
+
+        child.wait(timeout=30)
+        child = None
+
+        # 子进程退出后（OS 自动释放）必须能立刻拿到
+        acquired = False
+        with CrossProcessLock(target, timeout=5.0):
+            acquired = True
+        r.assert_true("子进程退出后可获取", acquired)
+    finally:
+        if child is not None:
+            try:
+                child.kill()
+                child.wait(timeout=10)
+            except Exception:
+                pass
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_locked_update_no_lost_update():
+    """v2.3.0 核心回归：并发追加不丢更新（旧实现会整块覆盖）"""
+    r.set_module("safe_io")
+    from safe_io import locked_update
+    tmp = Path(tempfile.mkdtemp())
+    target = tmp / "counter.txt"
+    try:
+        target.write_text("base\n", encoding="utf-8")
+
+        def _append(tag):
+            def _mutator(current):
+                # 刻意放大竞态窗口：读完之后睡一觉再返回
+                time.sleep(0.05)
+                return current + "{}\n".format(tag)
+            return _mutator
+
+        errors = []
+
+        def _worker(tag):
+            try:
+                locked_update(target, _append(tag), timeout=30.0)
+            except Exception as e:  # noqa: BLE001 - 测试里收集所有异常
+                errors.append("{}: {}".format(tag, e))
+
+        threads = [threading.Thread(target=_worker, args=("t%d" % i,))
+                   for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+
+        r.assert_true("无异常", not errors)
+        content = target.read_text(encoding="utf-8")
+        for i in range(8):
+            r.assert_true("t%d 未丢失" % i, ("t%d" % i) in content)
+        r.assert_true("base 仍在", "base" in content)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_filelock_stale_lock_recovered():
-    """FileLock 陈旧锁（超时）自动清理"""
+    """v2.3.0: 旧位置遗留的陈旧锁文件不再阻塞写入
+
+    旧实现若在 lock_path 处发现一个"30 秒内的锁"就直接抛 LockError；
+    升级后这类遗留文件（可能是上一版本同步过来的）不应再影响加锁。
+    """
     r.set_module("agent_memory")
     from agent_memory import FileLock
     tmp = Path(tempfile.mkdtemp())
     try:
         lock_path = tmp / "test.lock"
         lock_path.write_text("2000-01-01T00:00:00", encoding="utf-8")
-        with FileLock(lock_path):
-            r.ok("stale lock recovered")
+        with FileLock(lock_path, timeout=5.0):
+            r.ok("陈旧锁文件不再阻塞")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1894,8 +2005,10 @@ ALL_TESTS = [
     test_integration_rollback_no_crash,
     # v2.1.2 fixes
     test_filelock_acquire_release,
-    test_filelock_conflict_raises_lockerror,
+    test_filelock_reentrant_same_thread,
+    test_filelock_cross_process_mutual_exclusion,
     test_filelock_stale_lock_recovered,
+    test_locked_update_no_lost_update,
     test_backup_file_agent_id_naming,
     test_backup_log_roundtrip,
     test_resolve_source_device_no_match_raises,
