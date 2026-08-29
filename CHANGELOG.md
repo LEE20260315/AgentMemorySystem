@@ -5,6 +5,41 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.2.3] - 2026-08-29
+
+### Fixed（托盘图标反复沉入溢出区：GUID 标识接线）
+
+- **根因**：注册托盘图标时未带 `_NIF_GUID`，Windows 11 退回按 **EXE 路径**
+  识别图标并把「是否显示在任务栏」偏好记入注册表 IconStreams；而打包版
+  每次自解压到不同目录（`%TEMP%\..._Run_%RANDOM%_%RANDOM%`），路径一变
+  就被当作全新应用，默认塞进溢出区——用户手动拖出的设置随之失效。
+  `_TRAY_GUID` / `_NIF_GUID` 常量早已定义却从未接线。
+- **修复**：`nid.uFlags` 接入 `_NIF_GUID` 并填 `guidItem`，图标身份与显示
+  偏好永久绑定 GUID，不再随路径漂移；`NIM_DELETE` / `NIM_MODIFY`（气泡
+  通知）同步带 GUID，避免旧图标残影删不掉、通知发不出。
+- `guidItem` 结构体字段 `c_byte` 改 `c_ubyte`（GUID 是原始字节；两者内存
+  布局一致，仅为语义正确、调试不出现负值）。
+
+### Fixed（运行目录固定化：告别 %TEMP%）
+
+- EXE 自解压运行目录从 `%TEMP%\AgentMemorySync_Run[_随机]` 迁到
+  **`%LOCALAPPDATA%\AgentMemorySystem\Run`**（bat 启动器与 build.py 同步修改）：
+  1. `%TEMP%` 会被「存储感知 / 磁盘清理」清空，可能删掉正在运行的程序本体；
+  2. 旧兜底逻辑用 `%RANDOM%` 拼目录名，是托盘图标身份漂移的另一半根因；
+  3. `watchdog._find_exe` 兼容新旧两代路径，未重建的环境平滑过渡。
+
+### Fixed（心跳不再写 OneDrive）
+
+- 心跳此前每 5 分钟向数据根（OneDrive 同步目录）`tray_error.log` 追加一行，
+  实测堆积 **86 个轮转文件 / 36MB** 且永不清理；两台设备并发 append 同一
+  同步文件还会产生冲突副本。现在心跳只写 LOCALAPPDATA 主副本，跨设备诊断
+  信息仍由 `_write_diag()` 在启动/托盘事件时写入数据根。
+
+### Changed
+
+- `requirements.txt` 移除已废弃的 `pystray`（托盘自 v2.0 起为 ctypes 直调
+  原生 API），Pillow 描述修正为实际用途。
+
 ## [Unreleased] - v2.2.2
 
 ### Fixed（OneDrive 冲突副本根治：写入一律原子化）

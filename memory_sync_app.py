@@ -18,6 +18,11 @@
 
 from __future__ import annotations
 
+# v2.2.3: 版本号单点定义——此前启动诊断日志里是硬编码字符串 "v2.2.1"，
+# 与 pyproject / CHANGELOG 各自漂移。改动版本只改这里和 pyproject.toml。
+# 注意：必须放在 from __future__ 之后（__future__ 导入须紧随文档字符串）。
+__version__ = "2.2.3"
+
 import atexit
 import ctypes
 import ctypes.wintypes
@@ -3011,7 +3016,7 @@ def main():
 
     # 启动诊断日志（文件可能被锁定，不能因此崩溃）
     _diag_lines = [
-        "APP STARTING v2.2.1\n",
+        f"APP STARTING v{__version__}\n",
         f"  _safe_home() = {_home}\n",
         f"  _data_dir() = {_data_dir()}\n",
         f"  _original_home() = {_original_home()}\n",
