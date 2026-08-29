@@ -31,10 +31,19 @@ def _log(msg: str):
 
 
 def _find_exe() -> Path:
-    """定位 AgentMemorySync.exe：优先本地副本，其次 OneDrive 发布包。"""
-    local = Path(os.environ.get("TEMP", "")) / "AgentMemorySync_Run" / "AgentMemorySync.exe"
-    if local.exists():
-        return local
+    """定位 AgentMemorySync.exe：优先本地副本，其次 OneDrive 发布包。
+
+    v2.2.3: 本地副本已从 %TEMP% 迁到 %LOCALAPPDATA%\\AgentMemorySystem\\Run
+    （见 build.py 的 _install_local）。这里同时兼容旧的 Temp 路径，
+    便于尚未重新构建的环境平滑过渡。
+    """
+    app_base = Path(os.environ.get(
+        "LOCALAPPDATA", os.path.expanduser("~"))) / "AgentMemorySystem"
+    for base in (app_base / "Run", app_base / "Run_alt",
+                 Path(os.environ.get("TEMP", "")) / "AgentMemorySync_Run"):
+        local = base / "AgentMemorySync.exe"
+        if local.exists():
+            return local
     # 项目根
     repo = Path(__file__).resolve().parent.parent
     candidates = [
