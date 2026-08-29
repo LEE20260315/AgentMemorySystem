@@ -50,13 +50,20 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Set
 
+logger = logging.getLogger(__name__)
+
 TOMBSTONE_VERSION = 1
 # vanish 宽限期：写入 state 后不足该时长就消失的 hash 不墓碑化
 TOMBSTONE_GRACE_SECONDS = 24 * 3600
+# 单轮 vanish 数量超过此阈值视为"文件被重置/重写"而非逐条删除，
+# 不墓碑化（否则用户清空文件重置同步后，共享记忆永远写不回来）。
+# 与 reconcile 的 FORCE_CLEAR_THRESHOLD=50 同 philosophy：批量事件走保守。
+TOMBSTONE_MASS_VANISH_LIMIT = 50
 
 
 class TombstoneStore:
@@ -92,6 +99,15 @@ class TombstoneStore:
             self._entries = self._read_disk()
         return self._entries
 
+    def refresh(self) -> None:
+        """丢弃内存缓存，下次查询重新读盘。
+
+        必要性：GUI 常驻进程下，墓碑库在数据根（OneDrive）被其他设备更新，
+        本进程若一直用陈旧缓存，将看不到新墓碑 → 复活窗口。每轮同步开始时
+        调用一次。
+        """
+        self._entries = None
+
     # ------------------------------------------------------------------
     # 写入（FileLock + 读盘合并 + 原子写，模式与 SyncState.save 一致）
     # ------------------------------------------------------------------
@@ -123,9 +139,10 @@ class TombstoneStore:
                     ensure_ascii=False, indent=2, sort_keys=True,
                 )
                 _safe_write_text(self.path, content)
-        except Exception:
+        except Exception as e:
             # 写失败：丢弃内存缓存，下次重新从盘上读（可能丢本次新增，可接受）
             self._entries = None
+            logger.warning("墓碑写入失败(不阻断主流程): {}".format(e))
         return added
 
     def prune(self, keep_days: int = 0) -> int:
@@ -159,8 +176,9 @@ class TombstoneStore:
                 )
                 _safe_write_text(self.path, content)
             return len(expired)
-        except Exception:
+        except Exception as e:
             self._entries = None
+            logger.warning("墓碑清理失败(不阻断): {}".format(e))
             return 0
 
     # ------------------------------------------------------------------

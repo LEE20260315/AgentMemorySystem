@@ -252,6 +252,14 @@ class SyncEngine:
         )
         start_ts = time.time()
 
+        # P1-3: 每轮同步开始时刷新墓碑缓存 —— 数据根在 OneDrive 上，
+        # 其他设备可能新增了墓碑；GUI 常驻进程若用陈旧缓存会漏过滤（复活窗口）
+        try:
+            if self.tombstones is not None:
+                self.tombstones.refresh()
+        except Exception:
+            pass
+
         try:
             # ① 发现 Agent
             self._emit("正在检测本地 Agent...")

@@ -1922,6 +1922,54 @@ def test_reconcile_conservative_never_tombstones():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_tombstone_refresh_reloads_disk():
+    """refresh() 丢弃内存缓存——跨设备更新的墓碑对本进程可见"""
+    r.set_module("tombstones")
+
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        p = tmp / ".tombstones.json"
+        store_a = TombstoneStore(path=p)
+        r.assert_eq("a initially empty", store_a.count, 0)
+        # 模拟另一设备写入（独立实例直接落盘）
+        store_b = TombstoneStore(path=p)
+        store_b.add(["h_remote"], agent_id="other", reason="test")
+        # a 的进程内缓存仍是旧的（模拟 GUI 常驻）
+        r.assert_eq("a stale cache", store_a.count, 0)
+        # refresh 后可见
+        store_a.refresh()
+        r.assert_eq("a sees remote tombstone after refresh", store_a.count, 1)
+        r.assert_true("h_remote now tombstoned", store_a.is_tombstoned("h_remote"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reconcile_mass_vanish_not_tombstoned():
+    """单轮 vanish 超过阈值视为文件重置，不墓碑化（仅清 state）"""
+    r.set_module("tombstones")
+
+    from datetime import datetime, timedelta, timezone
+    from sync_writers import SyncState
+    from tombstones import TOMBSTONE_MASS_VANISH_LIMIT
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        state = SyncState(state_path=tmp / "state.json")
+        old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        n = TOMBSTONE_MASS_VANISH_LIMIT + 10
+        state.state["claude"] = {"h_{}".format(i): old for i in range(n)}
+        result = state.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=0, target_file_present=True)
+        r.assert_eq("all removed from state", result["removed"], n)
+        r.assert_true("no tombstone on mass vanish",
+                      "tombstoned" not in result)
+        r.assert_eq("tombstone file untouched", state.tombstones.count, 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_tombstone_purge_db_removes_rows():
     """purge_db 从 SQLite 删除命中墓碑的行，并清理 FTS 索引"""
     r.set_module("tombstones")
@@ -2146,6 +2194,8 @@ ALL_TESTS = [
     test_tombstone_store_roundtrip,
     test_reconcile_vanish_records_tombstone_after_grace,
     test_reconcile_conservative_never_tombstones,
+    test_tombstone_refresh_reloads_disk,
+    test_reconcile_mass_vanish_not_tombstoned,
     test_tombstone_purge_db_removes_rows,
     test_load_shared_memories_filters_tombstoned,
     test_sync_shared_to_agent_filters_tombstoned,

@@ -25,7 +25,7 @@ from agent_memory import (
     MemoryEntry, content_hash, get_logger, get_config,
 )
 from safe_io import _pending_path, _safe_read_text, _safe_write_text
-from tombstones import TOMBSTONE_GRACE_SECONDS
+from tombstones import TOMBSTONE_GRACE_SECONDS, TOMBSTONE_MASS_VANISH_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +292,12 @@ class SyncState:
 
         宽限期内（刚 mark_written 不久）就消失的 hash 视为 pending /
         写入失败等瞬时状态，不墓碑化 —— 只清 state，保持旧行为。
+        单轮 vanish 超过 TOMBSTONE_MASS_VANISH_LIMIT 视为文件被重置/
+        重写（如用户清空文件重新同步），同样不墓碑化。
         墓碑写入失败不阻断 reconcile。
         """
+        if len(hashes) > TOMBSTONE_MASS_VANISH_LIMIT:
+            return 0  # 批量 vanish：文件级事件，保守跳过
         agent_state = self.state.get(agent_id, {})
         now = datetime.now(timezone.utc)
         eligible = []
