@@ -7,7 +7,7 @@
 # 源码运行：
 #   安装全部依赖:  pip install -r requirements.txt
 #   只装核心:      pip install pyyaml
-#   只装 GUI:      pip install pyyaml pystray Pillow
+#   只装 GUI:      pip install pyyaml Pillow
 #
 # 打包为 EXE:    python build.py
 
@@ -15,8 +15,9 @@
 pyyaml>=6.0                   # YAML 解析 (triggers.yaml)
 
 # --- GUI 依赖（推荐）---
-pystray>=0.19                 # 系统托盘图标
-Pillow>=9.0                   # 托盘图标生成
+Pillow>=9.0                   # 图标/位图处理（窗口图标、托盘 fallback 图标、界面图形）
+# 注：系统托盘自 v2.0 起改用 ctypes 直调 Windows 原生 Shell_NotifyIconW，
+#     不再需要 pystray（保留旧说明只会误导安装）。
 
 # --- 可选依赖（高级功能）---
 # 以下依赖用于向量语义搜索，基础功能不需要。
