@@ -153,6 +153,12 @@ class SyncEngine:
             self.logger.addHandler(_logging.NullHandler())
         self.on_progress = on_progress or (lambda msg: None)
         self.sync_state = SyncState()
+        # P1-3: 墓碑库 —— 防止已删除记忆从共享层复活
+        try:
+            from tombstones import get_tombstone_store
+            self.tombstones = get_tombstone_store()
+        except Exception:
+            self.tombstones = None
         self.dry_run = dry_run
 
         # 确定 OneDrive 融合层根目录
@@ -245,6 +251,14 @@ class SyncEngine:
             device=self._resolve_device_name(),
         )
         start_ts = time.time()
+
+        # P1-3: 每轮同步开始时刷新墓碑缓存 —— 数据根在 OneDrive 上，
+        # 其他设备可能新增了墓碑；GUI 常驻进程若用陈旧缓存会漏过滤（复活窗口）
+        try:
+            if self.tombstones is not None:
+                self.tombstones.refresh()
+        except Exception:
+            pass
 
         try:
             # ① 发现 Agent
@@ -374,6 +388,17 @@ class SyncEngine:
                 self._emit("融合完成")
             else:
                 self._emit("只有 {} 个 Agent 有数据库，跳过融合".format(len(agent_dbs)))
+
+            # ④.5 P1-3: 墓碑清理 —— 融合后、写回前，从 shared.db 删除已墓碑的行。
+            # 必须在融合之后（否则 merge 会把其他 agent DB 里的同内容条目再灌回来），
+            # 必须在写回之前（否则 _load_shared_memories / memory_shared.md 重建复活）。
+            try:
+                if self.tombstones is not None:
+                    tombed = self.tombstones.purge_db(shared_db_path)
+                    if tombed:
+                        self._emit("墓碑清理: 从 shared.db 移除 {} 条已删除记忆".format(tombed))
+            except Exception as e:
+                self.logger.warning("墓碑清理失败(不阻断): {}".format(e))
 
             # ⑤ 写回各 Agent
             self._emit("开始写回各 Agent...")
@@ -633,6 +658,15 @@ class SyncEngine:
             self.logger.warning("FTS 修复扫描失败: {}".format(e))
             return {"repaired": 0, "saved_mb": 0.0}
 
+    def _is_tombstoned(self, h: str) -> bool:
+        """P1-3: 查询墓碑。墓碑库不可用时返回 False（不阻断主流程）。"""
+        if self.tombstones is None or not h:
+            return False
+        try:
+            return self.tombstones.is_tombstoned(h)
+        except Exception:
+            return False
+
     def _load_shared_memories(self, agent_id: str, force_refresh: bool = False) -> list:
         """从融合层读取指定 Agent 的共享记忆
         v1.3.7: 增量加载——跳过 SyncState 中已写回的条目，不再 LIMIT 500。
@@ -657,6 +691,10 @@ class SyncEngine:
                     # 增量跳过：已在 sync_state 中且 hash 一致的跳过
                     h = content_hash(entry.content)
                     if h in known_hashes:
+                        continue
+                    # P1-3: 墓碑过滤 —— 已删除的记忆绝不写回（force_refresh 也不豁免：
+                    # 墓碑语义是"删除"，与去重 state 无关）
+                    if self._is_tombstoned(h):
                         continue
                     memories.append(entry)
         except Exception as e:
@@ -1088,6 +1126,9 @@ class SyncEngine:
                 )
                 for row in cursor.fetchall():
                     entry = db._row_to_entry(row)
+                    # P1-3: 墓碑过滤 —— memory_shared.md 重建也不复活已删记忆
+                    if self._is_tombstoned(content_hash(entry.content)):
+                        continue
                     memories.append(entry)
         except Exception as e:
             self.logger.warning("读取全部共享记忆失败({}): {}".format(agent_id, e))

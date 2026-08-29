@@ -2393,10 +2393,27 @@ class MemoryMerger:
             # 获取共享库中非本 Agent 的记忆
             shared_memories = shared_db.list_memories(limit=10000)
 
+            # P1-3: 墓碑过滤 —— 已删除的记忆不再从共享库回流到 Agent DB
+            _tombs = None
+            try:
+                from tombstones import get_tombstone_store
+                _tombs = get_tombstone_store()
+            except Exception:
+                _tombs = None
+
             for memory in shared_memories:
                 # 跳过自己创建的记忆
                 if memory.agent_id == agent_id:
                     continue
+
+                # P1-3: 墓碑命中则跳过（不计数为 synced）
+                if _tombs is not None:
+                    try:
+                        if _tombs.is_tombstoned(content_hash(memory.content)):
+                            stats["skipped"] += 1
+                            continue
+                    except Exception:
+                        pass
 
                 # 检查是否已存在
                 cursor = agent_db.conn.execute(
