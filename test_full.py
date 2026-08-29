@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -1836,6 +1837,132 @@ def test_detect_agents_dsh_memory_scan():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# v2.3.0: 日志保留策略
+# ---------------------------------------------------------------------------
+def test_log_rotation_uses_timestamped_names():
+    """轮转文件名带时间戳，多次轮转互不覆盖（v2.1.2 的 .old 会被覆盖）。"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        p = tmp / "app.log"
+        for i in range(3):
+            p.write_text("X" * 5000, encoding="utf-8")
+            memory_sync_app._append_rotated(p, "LINE%d\n" % i,
+                                            max_bytes=1000, keep_count=99, keep_days=999)
+        names = sorted(x.name for x in tmp.glob("app.*.log"))
+        r.assert_eq("3 次轮转产生 3 个不同文件", len(names), 3)
+        r.assert_true("轮转文件名带时间戳", all(n.startswith("app.20") for n in names))
+        r.assert_true("旧内容未被覆盖",
+                      all("X" * 5000 in (tmp / n).read_text(encoding="utf-8") for n in names))
+        r.assert_eq("活跃文件只剩最新一行", p.read_text(encoding="utf-8"), "LINE2\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_log_prune_by_count_keeps_newest():
+    """按数量裁剪：只保留最新的 keep_count 个轮转文件，活跃文件不动。"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        p = tmp / "app.log"
+        p.write_text("ACTIVE", encoding="utf-8")
+        for i in range(6):
+            f = tmp / ("app.2026080%d-120000.log" % i)
+            f.write_text("old%d" % i, encoding="utf-8")
+            os.utime(f, (time.time() - (6 - i) * 86400,) * 2)
+        memory_sync_app._prune_log_files(p, keep_count=2, keep_days=999)
+        left = sorted(x.name for x in tmp.glob("app.*.log"))
+        r.assert_eq("只剩 2 个轮转", len(left), 2)
+        r.assert_eq("保留的是最新的两个", left,
+                    ["app.20260804-120000.log", "app.20260805-120000.log"])
+        r.assert_true("活跃文件未被删除", p.exists())
+        r.assert_eq("活跃文件内容不变", p.read_text(encoding="utf-8"), "ACTIVE")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_log_prune_by_days_and_never_touches_active():
+    """按天数裁剪；即使策略为 0，活跃文件也绝不会被删。"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        p = tmp / "app.log"
+        p.write_text("ACTIVE", encoding="utf-8")
+        old = tmp / "app.20260810-120000.log"
+        new = tmp / "app.20260826-120000.log"
+        old.write_text("old", encoding="utf-8")
+        new.write_text("new", encoding="utf-8")
+        os.utime(old, (time.time() - 10 * 86400,) * 2)
+        os.utime(new, (time.time() - 3 * 86400,) * 2)
+        memory_sync_app._prune_log_files(p, keep_count=99, keep_days=7)
+        r.assert_true("超龄轮转被淘汰", not old.exists())
+        r.assert_true("未超龄轮转保留", new.exists())
+
+        # 极端策略下活跃文件仍存活——这是「绝不删正在写的文件」的硬保证
+        memory_sync_app._prune_log_files(p, keep_count=0, keep_days=0)
+        r.assert_true("keep_count=0/keep_days=0 时活跃文件仍在", p.exists())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_log_write_failure_is_surfaced_not_swallowed():
+    """写入失败不再被 except 静默吞掉，下次成功时补记一行 WARN。"""
+    r.set_module("memory_sync_app")
+
+    import memory_sync_app
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        memory_sync_app._log_write_failures = 0
+        # 目标是目录 → open() 必然失败
+        memory_sync_app._append_rotated(tmp, "boom\n")
+        r.assert_eq("失败被计数", memory_sync_app._log_write_failures, 1)
+
+        p = tmp / "app.log"
+        memory_sync_app._append_rotated(p, "recovered\n")
+        text = p.read_text(encoding="utf-8")
+        r.assert_eq("成功后计数归零", memory_sync_app._log_write_failures, 0)
+        r.assert_true("补记了 WARN 行", "WARN" in text)
+        r.assert_true("正常内容仍然写入", text.endswith("recovered\n"))
+    finally:
+        memory_sync_app._log_write_failures = 0
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_log_retention_tool_scan_is_preview_by_default():
+    """tools.log_retention 默认只出报告、不删除；活跃文件永远归到 keep 组。"""
+    r.set_module("tools.log_retention")
+
+    from tools import log_retention
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        active = tmp / "app.log"
+        stale = tmp / "app.20260801-120000.log"
+        active.write_text("ACTIVE", encoding="utf-8")
+        stale.write_text("old", encoding="utf-8")
+        os.utime(stale, (time.time() - 20 * 86400,) * 2)
+
+        recs = []
+        for f in (active, stale):
+            st = f.stat()
+            recs.append({"path": f, "size": st.st_size, "mtime": st.st_mtime,
+                         "age_days": (time.time() - st.st_mtime) / 86400.0, "zone": "local"})
+        keep, drop = log_retention.plan_prune(recs, keep_days=7, keep_count=3)
+        r.assert_eq("活跃文件进 keep 组", [x["path"].name for x in keep], ["app.log"])
+        r.assert_eq("超龄文件进 drop 组", [x["path"].name for x in drop],
+                    ["app.20260801-120000.log"])
+        # 预览模式不应改动磁盘
+        r.assert_true("预览模式未删除文件", stale.exists())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -1937,6 +2064,12 @@ ALL_TESTS = [
     test_merge_pending_files_tree_and_orphan_tmp,
     test_detect_agents_cache_profiles_hash_invalidation,
     test_detect_agents_dsh_memory_scan,
+    # v2.3.0: 日志保留策略（数量+天数 / 轮转不覆盖 / 失败不静默）
+    test_log_rotation_uses_timestamped_names,
+    test_log_prune_by_count_keeps_newest,
+    test_log_prune_by_days_and_never_touches_active,
+    test_log_write_failure_is_surfaced_not_swallowed,
+    test_log_retention_tool_scan_is_preview_by_default,
 ]
 def main():
     print("=" * 60)
