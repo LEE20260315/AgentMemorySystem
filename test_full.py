@@ -1836,6 +1836,211 @@ def test_detect_agents_dsh_memory_scan():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ===========================================================================
+# P1-3: 墓碑机制（tombstones.py）
+# ===========================================================================
+
+def test_tombstone_store_roundtrip():
+    """墓碑库 add/known/persist 往返，重复 add 不新增"""
+    r.set_module("tombstones")
+
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        p = tmp / ".tombstones.json"
+        store = TombstoneStore(path=p)
+        n = store.add(["h1", "h2"], agent_id="claude", reason="reconcile_vanish")
+        r.assert_eq("add returns 2", n, 2)
+        r.assert_true("h1 tombstoned", store.is_tombstoned("h1"))
+        r.assert_true("h3 not tombstoned", not store.is_tombstoned("h3"))
+        r.assert_eq("known subset", sorted(store.known({"h1", "h3"})), ["h1"])
+
+        # 新实例从盘上重读（OneDrive 同步语义）
+        store2 = TombstoneStore(path=p)
+        r.assert_true("persisted h2", store2.is_tombstoned("h2"))
+
+        # 重复 add 幂等
+        n2 = store2.add(["h1"], agent_id="claude", reason="reconcile_vanish")
+        r.assert_eq("re-add returns 0", n2, 0)
+        r.assert_eq("count still 2", store2.count, 2)
+
+        # 空输入
+        r.assert_eq("empty add returns 0", store2.add([]), 0)
+        r.assert_true("empty hash not tombstoned", not store2.is_tombstoned(""))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reconcile_vanish_records_tombstone_after_grace():
+    """reconcile 正常模式 vanish → 过宽限期的记墓碑，宽限期内不记"""
+    r.set_module("tombstones")
+
+    from datetime import datetime, timedelta, timezone
+    from sync_writers import SyncState
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        state = SyncState(state_path=tmp / "state.json")
+        now = datetime.now(timezone.utc)
+        state.state["claude"] = {
+            "h_old": (now - timedelta(hours=48)).isoformat(),
+            "h_fresh": now.isoformat(),
+        }
+        result = state.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=0, target_file_present=True)
+        r.assert_eq("both removed from state", result["removed"], 2)
+        r.assert_eq("only old tombstoned", result.get("tombstoned"), 1)
+        r.assert_true("old hash tombstoned", state.tombstones.is_tombstoned("h_old"))
+        r.assert_true("fresh hash NOT tombstoned",
+                      not state.tombstones.is_tombstoned("h_fresh"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reconcile_conservative_never_tombstones():
+    """保守模式（文件不存在 / legacy-only）绝不产生墓碑"""
+    r.set_module("tombstones")
+
+    from datetime import datetime, timedelta, timezone
+    from sync_writers import SyncState
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        state = SyncState(state_path=tmp / "state.json")
+        old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        state.state["claude"] = {"h1": old}
+
+        r1 = state.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=0, target_file_present=False)
+        r.assert_true("file-missing is conservative", r1.get("conservative") is True)
+        r2 = state.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=5, target_file_present=True)
+        r.assert_true("legacy-only is conservative", r2.get("conservative") is True)
+        r.assert_eq("no tombstones created", state.tombstones.count, 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tombstone_purge_db_removes_rows():
+    """purge_db 从 SQLite 删除命中墓碑的行，并清理 FTS 索引"""
+    r.set_module("tombstones")
+
+    import sqlite3
+    from agent_memory import content_hash
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db = tmp / "shared.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT)")
+        conn.execute("CREATE TABLE memories_fts (id TEXT, content TEXT)")
+        conn.execute("INSERT INTO memories VALUES ('m1', 'keep me')")
+        conn.execute("INSERT INTO memories VALUES ('m2', 'delete me')")
+        conn.execute("INSERT INTO memories_fts VALUES ('m2', 'delete me')")
+        conn.commit()
+        conn.close()
+
+        store = TombstoneStore(path=tmp / ".tombstones.json")
+        store.add([content_hash("delete me")], agent_id="a", reason="test")
+        removed = store.purge_db(db)
+        r.assert_eq("purged 1 row", removed, 1)
+
+        conn = sqlite3.connect(str(db))
+        left = [row[0] for row in conn.execute("SELECT id FROM memories").fetchall()]
+        fts = [row[0] for row in conn.execute("SELECT id FROM memories_fts").fetchall()]
+        conn.close()
+        r.assert_eq("only m1 left", left, ["m1"])
+        r.assert_eq("fts cleaned", fts, [])
+
+        # 无墓碑 / 库不存在 → 0，不抛异常
+        empty_store = TombstoneStore(path=tmp / "empty.json")
+        r.assert_eq("no tombstones -> 0", empty_store.purge_db(db), 0)
+        r.assert_eq("missing db -> 0", store.purge_db(tmp / "nope.db"), 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_load_shared_memories_filters_tombstoned():
+    """写回加载 _load_shared_memories 过滤墓碑（force_refresh 也不豁免）"""
+    r.set_module("tombstones")
+
+    from agent_memory import MemoryDatabase, MemoryEntry, content_hash
+    from sync_engine import SyncEngine
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        engine = SyncEngine()
+        engine.root = tmp
+        engine._shared_db = tmp / "shared.db"
+        engine.tombstones = TombstoneStore(path=tmp / ".tombstones.json")
+        with MemoryDatabase(engine._shared_db) as db:
+            db.insert_memory(MemoryEntry(
+                id="m1", agent_id="alpha", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[], confidence="high",
+                conflict_with=None, content="活着的记忆"))
+            db.insert_memory(MemoryEntry(
+                id="m2", agent_id="beta", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[], confidence="high",
+                conflict_with=None, content="被删除的记忆"))
+        engine.tombstones.add([content_hash("被删除的记忆")],
+                              agent_id="beta", reason="test")
+
+        normal = engine._load_shared_memories("pi")
+        r.assert_eq("normal load 1 entry", [m.id for m in normal], ["m1"])
+
+        forced = engine._load_shared_memories("pi", force_refresh=True)
+        r.assert_eq("force_refresh still filtered", [m.id for m in forced], ["m1"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_sync_shared_to_agent_filters_tombstoned():
+    """DB 级融合 sync_shared_to_agent 跳过墓碑命中的记忆"""
+    r.set_module("tombstones")
+
+    import agent_memory as am
+    from agent_memory import MemoryDatabase, MemoryEntry, MemoryMerger, content_hash
+    import tombstones as tmod
+    from tombstones import TombstoneStore, reset_tombstone_store
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        shared = tmp / "shared.db"
+        agent = tmp / "agent.db"
+        with MemoryDatabase(shared) as db:
+            db.insert_memory(MemoryEntry(
+                id="m1", agent_id="claude", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[], confidence="high",
+                conflict_with=None, content="被删除的记忆"))
+        MemoryDatabase(agent).close()  # 建空库
+
+        store = TombstoneStore(path=tmp / ".tombstones.json")
+        store.add([content_hash("被删除的记忆")], agent_id="claude", reason="test")
+
+        # 注入模块级单例（模拟生产环境 get_tombstone_store 命中）
+        reset_tombstone_store()
+        tmod._store = store
+        try:
+            merger = MemoryMerger(shared_db_path=shared, agent_dbs={"trae": agent})
+            stats = merger.sync_shared_to_agent("trae")
+            r.assert_eq("synced 0 (tombstoned)", stats["synced"], 0)
+            with MemoryDatabase(agent) as db:
+                cnt = db.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            r.assert_eq("agent db still empty", cnt, 0)
+
+            # 对照组：无墓碑时正常同步
+            reset_tombstone_store()
+            stats2 = merger.sync_shared_to_agent("trae")
+            r.assert_eq("synced 1 without tombstone", stats2["synced"], 1)
+        finally:
+            reset_tombstone_store()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -1937,6 +2142,13 @@ ALL_TESTS = [
     test_merge_pending_files_tree_and_orphan_tmp,
     test_detect_agents_cache_profiles_hash_invalidation,
     test_detect_agents_dsh_memory_scan,
+    # P1-3: 墓碑机制（防已删记忆跨设备复活）
+    test_tombstone_store_roundtrip,
+    test_reconcile_vanish_records_tombstone_after_grace,
+    test_reconcile_conservative_never_tombstones,
+    test_tombstone_purge_db_removes_rows,
+    test_load_shared_memories_filters_tombstoned,
+    test_sync_shared_to_agent_filters_tombstoned,
 ]
 def main():
     print("=" * 60)

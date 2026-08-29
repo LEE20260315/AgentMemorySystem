@@ -25,6 +25,7 @@ from agent_memory import (
     MemoryEntry, content_hash, get_logger, get_config,
 )
 from safe_io import _pending_path, _safe_read_text, _safe_write_text
+from tombstones import TOMBSTONE_GRACE_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +115,9 @@ class SyncState:
             from safe_io import get_data_root
             state_path = get_data_root() / ".sync_state.json"
         self.state_path = Path(state_path)
+        # P1-3: 墓碑库与 state 同目录（默认即数据根，OneDrive 同步跨设备生效）
+        from tombstones import TombstoneStore
+        self.tombstones = TombstoneStore(path=self.state_path.parent / ".tombstones.json")
         self.state = self._load()
 
     def _load(self) -> dict:
@@ -266,6 +270,11 @@ class SyncState:
         to_remove = tracked - actual_hashes
         result["actual_only"] = len(actual_hashes - tracked)
         if agent_id in self.state and to_remove:
+            # P1-3: vanish 信号 → 记墓碑（宽限期内的不记，防 pending/写失败误杀）。
+            # 保守模式分支已提前 return，绝不会走到这里。
+            tombed = self._record_tombstones(agent_id, to_remove)
+            if tombed:
+                result["tombstoned"] = tombed
             for h in to_remove:
                 self.state[agent_id].pop(h, None)
         result["removed"] = len(to_remove)
@@ -277,6 +286,36 @@ class SyncState:
         ):
             self.state.pop(agent_id, None)
         return result
+
+    def _record_tombstones(self, agent_id: str, hashes) -> int:
+        """P1-3: 将 vanish 的 hash 记入墓碑（带宽限期安全阀）。
+
+        宽限期内（刚 mark_written 不久）就消失的 hash 视为 pending /
+        写入失败等瞬时状态，不墓碑化 —— 只清 state，保持旧行为。
+        墓碑写入失败不阻断 reconcile。
+        """
+        agent_state = self.state.get(agent_id, {})
+        now = datetime.now(timezone.utc)
+        eligible = []
+        for h in hashes:
+            ts = agent_state.get(h)
+            if ts:
+                try:
+                    t0 = datetime.fromisoformat(str(ts))
+                    if t0.tzinfo is None:
+                        t0 = t0.replace(tzinfo=timezone.utc)
+                    if (now - t0).total_seconds() < TOMBSTONE_GRACE_SECONDS:
+                        continue
+                except ValueError:
+                    pass
+            eligible.append(h)
+        if not eligible:
+            return 0
+        try:
+            return self.tombstones.add(
+                eligible, agent_id=agent_id, reason="reconcile_vanish")
+        except Exception:
+            return 0
 
     def bulk_known_hashes(self, agent_id: str) -> set:
         """返回 SyncState[agent_id] 跟踪的全部 hash 集合（用于比对 / 调试）。"""
