@@ -2,6 +2,14 @@
 
 > 本文件記錄 AgentMemorySystem 未來可能改進的方向，按優先級排序。
 
+## 已完成（v2.3.0，2026-08-30）
+
+- [x] **墓碑機制（P1-3）**：新增 `tombstones.py`，墓碑庫存數據根 `.tombstones.json`（OneDrive 同步跨設備生效）；reconcile 正常模式 vanish 記墓碑（保守模式/24h 寬限期/批量 vanish>50 三重防誤殺）；寫回、memory_shared.md 重建、DB 融合三處復活路徑全過濾；融合後寫回前 purge shared.db 命中行（FTS 同步清理，分塊 500 免疫 SQLite 變量上限）；失敗不阻斷主流程且如實返回 0；`refresh()` 每輪重讀盤保 GUI 常駐進程跨設備可見
+- [x] **日誌保留策略（P1-2）**：輪轉檔名帶時間戳永不覆蓋 +（數量 3，天數 7）雙維裁剪（活躍檔案絕不動）；寫失敗計數、成功後補記 WARN；`tools/log_retention.py` 默認預覽、`--apply` 走回收站
+- [x] **跨進程鎖（P1-1）**：`safe_io.CrossProcessLock` Windows 命名互斥量（真互斥：原子性≠隔離性）+ 遺留 `.lock` 清理
+- [x] **托盤 GUID 接線 + 運行目錄固定（v2.2.3）**：`_NIF_GUID` 綁定顯示偏好、EXE 運行目錄固定 `%LOCALAPPDATA%\AgentMemorySystem\Run`、心跳退出 OneDrive
+- [x] **對抗性審查兩輪**：緩存刷新 / 批量 vanish 保護 / 失敗日誌 / purge_db 分塊 / add 如實返回；測試 305 條（303 斷言全綠，2 條歷史 detect_agents 緩存用例與本版無關）
+
 ## 已完成（v2.2.0，2026-08-13）
 
 - [x] **SQLite 本機化（方案 A）**：shared.db 移出 OneDrive → `%LOCALAPPDATA%\AgentMemorySystem\shared.db` 本機查詢緩存；跨機事實源為 memory_shared.md；緩存缺失自動從 .md 重建；舊 OneDrive shared.db 自動遷移並標記 .migrated
@@ -94,4 +102,4 @@
 
 ---
 
-*最後更新：2026-07-31（v2.0.4）*
+*最後更新：2026-08-30（v2.3.0）*

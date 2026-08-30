@@ -37,8 +37,10 @@ Claude, Hermes, Trae, Cursor, CodePilot — each AI agent keeps its own memory, 
 | **Auto Agent Discovery** | Candidate paths + signature validation, no hardcoded paths |
 | **Native Format Write-back** | Claude sub-files, Trae sections, Hermes §-delimited, generic Markdown |
 | **Merge & Dedup** | SQLite fusion index with content-hash deduplication |
+| **Tombstones** | Deleted shared memories stay deleted across devices (v2.3.0, delete signal synced via data root) |
+| **Log Retention** | Timestamped rotation (never overwrites) + count/age dual-dimension pruning, active files never touched (v2.3.0) |
 | **Tiered Storage** | Hot / Warm / Cold data tiers with auto-archiving |
-| **Security** | Auto-backup, file locks, OneDrive conflict detection, sensitive info filtering |
+| **Security** | Auto-backup, cross-process mutex, file locks, OneDrive conflict detection, sensitive info filtering |
 | **GUI + CLI** | System tray resident app + command-line tools |
 
 ## Supported Agents
@@ -175,6 +177,8 @@ See `config.json` in the repository for the full configuration reference.
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v2.3.0** | 2026-08 | **Tombstones + log retention + cross-process lock**: **tombstone mechanism** (new `tombstones.py`, store lives in the data root and syncs via OneDrive) — deleted shared memories are no longer resurrected: reconcile detects vanish events and records tombstones (conservative mode / 24h grace period / mass-vanish guard), all three resurrection paths filtered (write-back, `memory_shared.md` rebuild, DB-level merge), and shared.db rows purged after merge & before write-back; **log retention**: timestamped rotation names never overwrite + (count=3, days=7) dual-dimension pruning, write-failure counters surface a WARN on recovery, `tools/log_retention.py` preview/recycle-bin cleanup tool; **cross-process lock**: Windows named mutex for true mutual exclusion (atomicity ≠ isolation) + legacy `.lock` cleanup; 305 tests guarding the release |
+| **v2.2.3** | 2026-08 | **Tray GUID wiring + fixed run directory**: tray icon adopts `_NIF_GUID` (identity and display preference permanently bound to the GUID, no longer sinking into the overflow area as self-extract paths drift); EXE run directory moved from a random `%TEMP%` folder to `%LOCALAPPDATA%\AgentMemorySystem\Run` (no more storage-sense wipes or `%RANDOM%` identity drift); heartbeat no longer writes to OneDrive (previously piled up 86 rotated files / 36MB); single-source `__version__` |
 | **v2.2.2** | 2026-08 | **OneDrive conflict-copy root fix + dsh detection**: all writes now strictly atomic (`_safe_write_text` rewritten — the legacy in-place fallback on replace failure was the exact cause of "file in use / conflict copy" errors; per-process unique tmp + backoff retry + `.pending` full-snapshot fallback, readers prefer the newer snapshot, startup merges the whole tree); **dsh (DeepSeek CLI) three-layer root fix** (detection profile + fallback signature; detection cache now stores a `profiles_hash` config fingerprint — config changes invalidate immediately instead of waiting out the 24h TTL; generic discovery now scans `~` dot-folders); credential files (`.credentials.yaml`/`auth.json` etc.) never enter the memory pipeline; 6 new regression tests, 234 assertions total |
 | **v2.2.1** | 2026-08 | **OneDrive runtime decoupling**: engine log moved out of the OneDrive-synced data root to `%LOCALAPPDATA%\AgentMemorySystem\logs`; `get_logger()` never raises; startup path no longer performs synchronous `.writable_test` writes; PowerShell notifications bounded with timeout; tray registration retried once; migration copy switched to robocopy; "Exit" button + content-aware window sizing |
 | **v2.2.0** | 2026-08 | **Architecture: SQLite localization + incremental sync**: `shared.db` moved out of OneDrive (local query cache in `%LOCALAPPDATA%`, cross-machine source of truth is `memory_shared.md`); incremental append for `memory_shared.md`; volume-control packaging fix; rollback rewritten (backup_log.json driven); 20+ fixes; 22 new regression tests |

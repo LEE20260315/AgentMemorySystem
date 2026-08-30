@@ -21,7 +21,7 @@ from __future__ import annotations
 # v2.2.3: 版本号单点定义——此前启动诊断日志里是硬编码字符串 "v2.2.1"，
 # 与 pyproject / CHANGELOG 各自漂移。改动版本只改这里和 pyproject.toml。
 # 注意：必须放在 from __future__ 之后（__future__ 导入须紧随文档字符串）。
-__version__ = "2.2.3"
+__version__ = "2.3.0"
 
 import atexit
 import ctypes

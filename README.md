@@ -38,8 +38,10 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 | **自動發現 Agent** | 候選路徑 + 特徵校驗，不依賴硬編碼路徑 |
 | **原生格式寫回** | Claude 子檔案、Trae 章節、Hermes § 分隔、通用 Markdown |
 | **融合去重** | 基於內容哈希之 SQLite 融合索引（本機緩存，從 memory_shared.md 可重建） |
+| **墓碑機制** | 已刪除的共享記憶跨設備防復活（v2.3.0，刪除信號隨數據根同步） |
+| **日誌保留** | 輪轉永不覆蓋 + 數量/天數雙維裁剪，活躍檔案絕不觸碰（v2.3.0） |
 | **分層儲存** | 熱 / 溫 / 冷三級資料，自動歸檔 |
-| **安全機制** | 自動備份、檔案鎖、OneDrive 衝突檢測、敏感詞過濾 |
+| **安全機制** | 自動備份、跨進程鎖、檔案鎖、OneDrive 衝突檢測、敏感詞過濾 |
 | **GUI + CLI** | 系統匣常駐程式 + 命令列工具 |
 
 ## 支援之 Agent
@@ -193,6 +195,8 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v2.3.0** | 2026-08 | **墓碑機制 + 日誌保留 + 跨進程鎖**：**墓碑機制**（新增 `tombstones.py`，墓碑庫存數據根隨 OneDrive 跨設備生效）——刪除一條已同步記憶後不再被「復活」：reconcile 檢測 vanish 記墓碑（保守模式/24h 寬限期/批量 vanish 三重防誤殺），寫回、`memory_shared.md` 重建、DB 融合三處復活路徑全過濾，並在融合後寫回前從 shared.db 治本性刪除命中行；**日誌保留策略**：輪轉檔名帶時間戳永不覆蓋 +（數量 3，天數 7）雙維裁剪、寫失敗計數補記 WARN、`tools/log_retention.py` 預覽/回收站清理工具；**跨進程鎖**：Windows 命名互斥量實現真互斥（原子性≠隔離性）+ 遺留 .lock 清理；測試 305 條全量護航 |
+| **v2.2.3** | 2026-08 | **托盤 GUID 接線 + 運行目錄固定化**：托盤圖標接入 `_NIF_GUID`（身份與顯示偏好永久綁定 GUID，不再隨自解壓路徑漂移沉入溢出區）；EXE 運行目錄從 `%TEMP%` 隨機目錄遷至 `%LOCALAPPDATA%\AgentMemorySystem\Run`（告別存儲感知誤清與 %RANDOM% 身份漂移）；心跳不再寫 OneDrive（此前實測堆積 86 個輪轉檔 36MB）；版本號單點 `__version__` |
 | **v2.2.2** | 2026-08 | **OneDrive 衝突副本根治 + dsh 識別**：寫入一律原子化（`_safe_write_text` 重寫——舊版 replace 失敗回退 in-place 直寫正是衝突副本元兇；程序唯一 tmp + 退避重試 + `.pending` 完整快照降級，讀端優先新快照、啟動全樹收編）；**dsh（DeepSeek CLI）三層根因全修**（檢測 profile + 備用簽名；檢測緩存新增 `profiles_hash` 配置指紋——配置變更立即失效不再等 24h TTL；通用發現增加 `~` 點目錄掃描）；憑據檔案（`.credentials.yaml`/`auth.json` 等）絕不進入記憶管道；新增 6 個回歸測試，全量 234 斷言 |
 | **v2.2.1** | 2026-08 | **OneDrive 运行时解耦（根治 v2.2.0 事故）**：引擎日志 `agent_memory.log` 移出数据根 `.logs`（OneDrive 同步目录）→ `%LOCALAPPDATA%\AgentMemorySystem\logs`（与 shared.db 同原则），`get_logger()` 永不抛异常、日志故障不再中断同步；`get_data_root()` 启动路径不再做 `.writable_test` 同步写（OneDrive 锁下不再抛错/挂起）；PowerShell 通知带超时且不捕获输出（修复托盘失败后界面假死）；托盘注册失败自动重试一次；诊断日志（迁移/托盘/崩溃/退出）本机 LOCALAPPDATA 优先、数据根尽力而为；迁移复制改用 robocopy（替代在 OneDrive 并发同步下会卡死的 `shutil.copytree`）；"退出程序"按钮 + 窗口内容自适应 |
 | **v2.2.0** | 2026-08 | **架构升级：SQLite 本机化 + 增量同步**：`shared.db` 移出 OneDrive（改为 `%LOCALAPPDATA%` 本机查询缓存，跨机事实源为 `memory_shared.md`）；`memory_shared.md` 增量追加（不再每次全量重写，消除写放大/冲突）；缓存缺失自动从 .md 重建、旧库自动迁移；**体积控制打包失效根治**（tools 变正式包 + 静态导入 + build.py 冒烟检查 + 内置兜底截断）；回滚功能重写（backup_log.json 驱动）；跨机设备解析禁止静默冒名（自动注册当前机器）；FileLock/备份名/时区过期清理/VACUUM 低频化/多语言冲突检测/跨机相对路径注入/日志轮转 等 20 项修复；新增 22 个回归测试 |

@@ -5,6 +5,51 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.3.0] - 2026-08-30
+
+### Added（墓碑机制：防已删记忆跨设备复活，P1-3）
+
+- **问题**：用户/Agent 直接编辑记忆文件删除一条已同步记忆后，`reconcile`
+  （正常模式）把该内容的 hash 当孤儿从 SyncState 清除，下一轮写回时
+  `known_hashes` 过滤失效，shared.db 中仍存在的同内容条目被重新写回——
+  **删除被"复活"**。根因是删除从不传播（同步两个方向均为纯增量）。
+- **方案**（新增 `tombstones.py`，墓碑库存数据根 `.tombstones.json`，
+  OneDrive 同步、跨设备生效）：
+  1. **产生**：reconcile 正常模式检测到 vanish → 按 content_hash 记墓碑。
+     双安全阀：保守模式（文件不存在 / legacy-only）绝不墓碑化；24h 宽限期
+     内的 vanish（刚写入即消失，疑似 pending/写失败）不墓碑化；单轮 vanish
+     超过 50 条视为文件级重置事件，整体跳过。
+  2. **过滤**：三处复活路径全堵——增量写回（`force_refresh` 也不豁免，
+     墓碑语义是"删除"与去重 state 无关）、`memory_shared.md` 重建、DB 级
+     融合 `sync_shared_to_agent`。
+  3. **治本**：每轮同步在融合后、写回前，从 shared.db 删除命中行（含 FTS
+     索引清理；`IN (...)` 分块 500，免疫 SQLite 变量上限）。
+- **工程性质**：幂等 add；FileLock + 原子写；任何环节失败不阻断主同步且
+  如实返回 0；`refresh()` 每轮丢弃缓存重读盘（GUI 常驻进程跨设备墓碑可见）；
+  `prune(keep_days)` 预留保留策略（默认永久，每条约 100 字节）。
+
+### Added（日志保留策略 v2.3.0，P1-2）
+
+- 轮转文件名带时间戳（`<stem>.<YYYYMMDD-HHMMSS>.log`）**永不覆盖**；
+  `(keep_count=3, keep_days=7)` 双维度裁剪，活跃文件绝不动。
+- 写失败计数不再静默：下次成功时补记 `[WARN] 此前有 N 条日志未落盘`。
+- 启动时自动维护（`_startup_log_maintenance`）；新增 `tools/log_retention.py`
+  扫描 local/data/project 三处日志，**默认只出报告**，`--apply` 才删（走回收站）。
+
+### Added（跨进程锁，P1-1）
+
+- `safe_io.CrossProcessLock`：Windows 命名互斥量（`CreateMutexW`，
+  `Local\` 会话命名空间）实现真正的跨进程读-改-写互斥——原子性 ≠ 隔离性，
+  `tmp+fsync+os.replace` 只保证不写坏，互斥靠锁。
+- 含遗留 `.lock` 文件清理（`cleanup_legacy_locks`，文件锁弃用后的收尾）。
+
+### Changed
+
+- 版本号单点 `__version__`（v2.2.3 引入）同步 2.3.0；`pyproject.toml` 对齐。
+- 对抗性审查两轮：缓存刷新 / 批量 vanish 保护 / 失败日志 / purge_db 分块 /
+  add 失败如实返回 0。测试 305 条，303 断言全绿（2 条历史 detect_agents
+  缓存用例与本版无关）。
+
 ## [v2.2.3] - 2026-08-29
 
 ### Fixed（托盘图标反复沉入溢出区：GUID 标识接线）
