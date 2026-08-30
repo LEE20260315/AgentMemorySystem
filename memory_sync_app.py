@@ -420,15 +420,146 @@ def _data_dir() -> Path:
     return get_data_root()
 
 
-def _append_rotated(log_path: Path, line: str, max_bytes: int = 1 * 1024 * 1024):
-    """追加一行日志；文件超过 max_bytes 时滚动为 .old（v2.1.2: 防止无限增长）。"""
+# ---------------------------------------------------------------------------
+# 日志保留策略（v2.3.0）
+# ---------------------------------------------------------------------------
+# v2.1.2 的旧策略是「超过 1MB 就 replace 成单个 .old」。它有三个问题：
+#   1. 历史只有一代——第二次轮转就把第一次的历史覆盖掉了，故障现场留不住；
+#   2. 稳态占用是 2 倍 max_bytes，且没有时间维度，陈旧日志永远不淘汰；
+#   3. 写入失败被 except 静默吞掉，用户完全无感知（v2.2.0 事故里，
+#      OneDrive 锁住文件导致诊断一条都没落盘，排查时无从下手）。
+# v2.3.0 改为 (数量, 天数) 双维度保留 + 失败计数补记。
+LOG_MAX_BYTES = 1 * 1024 * 1024
+LOG_KEEP_COUNT = 3
+LOG_KEEP_DAYS = 7
+
+_log_policy_cache = None
+_log_write_failures = 0  # 静默失败计数：下次写成功时补记一行 WARN
+
+
+def _log_policy() -> dict:
+    """日志保留策略（惰性读取一次；配置缺失时回退到内置默认值）。"""
+    global _log_policy_cache
+    if _log_policy_cache is not None:
+        return _log_policy_cache
+    policy = {
+        "max_bytes": LOG_MAX_BYTES,
+        "keep_count": LOG_KEEP_COUNT,
+        "keep_days": LOG_KEEP_DAYS,
+    }
     try:
-        if log_path.exists() and log_path.stat().st_size > max_bytes:
-            log_path.replace(Path(str(log_path) + ".old"))
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(line)
+        from agent_memory import get_config
+        cfg = get_config()
+        policy["max_bytes"] = int(cfg.get("logging.max_log_size_mb", 2)) * 1024 * 1024
+        policy["keep_count"] = int(cfg.get("logging.max_log_files", LOG_KEEP_COUNT))
+        policy["keep_days"] = int(cfg.get("logging.keep_log_days", LOG_KEEP_DAYS))
     except Exception:
         pass
+    _log_policy_cache = policy
+    return policy
+
+
+def _rotate_path(log_path: Path, when: datetime = None) -> Path:
+    """生成本次轮转的目标路径：``<stem>.<YYYYMMDD-HHMMSS>.log``。
+
+    带时间戳而不是固定的 ``.old``，于是每一次轮转都是新文件：不会互相
+    覆盖，也让「按天数淘汰」有 mtime 可依。
+    """
+    ts = (when or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    candidate = log_path.with_name("{}.{}.log".format(log_path.stem, ts))
+    if not candidate.exists():
+        return candidate
+    # 同一秒内的二次轮转（极端情况）：加序号，仍然不覆盖
+    for n in range(2, 100):
+        alt = log_path.with_name("{}.{}-{}.log".format(log_path.stem, ts, n))
+        if not alt.exists():
+            return alt
+    return candidate
+
+
+def _prune_log_files(log_path: Path, keep_count: int = None, keep_days: int = None) -> int:
+    """裁剪同一份日志的轮转文件，按 (keep_count, keep_days) 双维度淘汰最旧的。
+
+    只认 ``<stem>.<任意>.log`` 这种 :func:`_rotate_path` 自己产生的命名；
+    活跃文件 ``<stem>.log`` 与 ``RotatingFileHandler`` 的 ``.log.1`` 都不在
+    匹配范围内，因此**永远不会误删正在写的文件**。
+
+    Returns
+    -------
+    int
+        实际删除的文件数。
+    """
+    policy = _log_policy()
+    if keep_count is None:
+        keep_count = policy["keep_count"]
+    if keep_days is None:
+        keep_days = policy["keep_days"]
+    try:
+        keep_count = max(0, int(keep_count))
+        keep_days = max(0, int(keep_days))
+    except (TypeError, ValueError):
+        return 0
+
+    def _mt(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    cutoff = time.time() - keep_days * 86400 if keep_days > 0 else None
+    try:
+        rotated = [p for p in log_path.parent.glob("{}.*.log".format(log_path.stem)) if p.is_file()]
+        rotated.sort(key=_mt)  # 最旧的排前面
+    except OSError:
+        return 0
+
+    removed = 0
+    survivors = []
+    # 1) 超龄的先淘汰（不看数量）
+    for p in rotated:
+        if cutoff is not None and _mt(p) < cutoff:
+            try:
+                p.unlink()
+                removed += 1
+                continue
+            except OSError:
+                pass
+        survivors.append(p)
+    # 2) 数量超限的再淘汰最旧的
+    excess = len(survivors) - keep_count
+    if excess > 0:
+        for p in survivors[:excess]:
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                continue
+    return removed
+
+
+def _append_rotated(log_path: Path, line: str, max_bytes: int = None,
+                    keep_count: int = None, keep_days: int = None):
+    """追加一行日志；超过 max_bytes 时轮转，并按 (数量, 天数) 保留历史。
+
+    写入失败不再无声吞掉：累计到 :data:`_log_write_failures`，下次写成功
+    时补记一行 WARN，把「曾经丢过多少条」这件事本身留在日志里。
+    """
+    global _log_write_failures
+    if max_bytes is None:
+        max_bytes = _log_policy()["max_bytes"]
+    try:
+        if log_path.exists() and log_path.stat().st_size > max_bytes:
+            log_path.replace(_rotate_path(log_path))
+            _prune_log_files(log_path, keep_count, keep_days)
+        notice = ""
+        if _log_write_failures:
+            notice = "[WARN] 此前有 {} 条日志写入失败（磁盘满/OneDrive 占用等）\n".format(
+                _log_write_failures)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(notice + line)
+        _log_write_failures = 0
+    except Exception:
+        _log_write_failures += 1
 
 
 def _diag_log_paths() -> list:
@@ -465,6 +596,26 @@ def _write_diag(line: str):
     """把诊断内容写入全部诊断日志路径（任一失败不影响其它）。"""
     for log_path in _diag_log_paths():
         _append_rotated(log_path, line)
+
+
+def _startup_log_maintenance():
+    """启动时做一次日志与锁文件收尾（v2.3.0，尽力而为，绝不抛异常）。
+
+    只处理**本程序自己会写**的日志（诊断日志 + heartbeat/crash）；
+    用户数据与历史诊断文件交给 ``tools/log_retention.py`` 显式处理，
+    不在启动时擅自删除数据根内容。
+    """
+    try:
+        for log_path in _diag_log_paths():
+            _prune_log_files(log_path)
+    except Exception:
+        pass
+    try:
+        local_dir = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "AgentMemorySystem"
+        for name in ("heartbeat.log", "crash.log"):
+            _prune_log_files(local_dir / name)
+    except Exception:
+        pass
 
 
 def _migrate_old_data():
@@ -3013,6 +3164,10 @@ def main():
 
     # 安装崩溃处理器（在写日志之前安装，确保后续异常都能被捕获）
     _setup_crash_handlers()
+
+    # v2.3.0: 写本次启动的第一行日志之前，先按保留策略裁剪历史轮转文件
+    # （顺带确保日志目录存在）
+    _startup_log_maintenance()
 
     # 启动诊断日志（文件可能被锁定，不能因此崩溃）
     _diag_lines = [

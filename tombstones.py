@@ -112,7 +112,11 @@ class TombstoneStore:
     # 写入（FileLock + 读盘合并 + 原子写，模式与 SyncState.save 一致）
     # ------------------------------------------------------------------
     def add(self, hashes: Iterable[str], agent_id: str = "", reason: str = "") -> int:
-        """批量记录墓碑，返回新增条数。任何失败都不抛出（尽力而为）。"""
+        """批量记录墓碑，返回新增条数（写失败返回 0，不抛异常）。
+
+        add 内部始终读盘合并（FileLock 下 _read_disk），不受内存缓存
+        陈旧影响——reconcile 路径的 SyncState 自建实例也由此保证正确。
+        """
         hashes = [h for h in (hashes or []) if h]
         if not hashes:
             return 0
@@ -133,15 +137,20 @@ class TombstoneStore:
                             "reason": reason,
                         }
                         added += 1
-                self._entries = disk
                 content = json.dumps(
                     {"version": TOMBSTONE_VERSION, "tombstones": disk},
                     ensure_ascii=False, indent=2, sort_keys=True,
                 )
-                _safe_write_text(self.path, content)
+                if _safe_write_text(self.path, content):
+                    # 只有真正落盘成功才更新内存缓存并如实计数
+                    self._entries = disk
+                else:
+                    added = 0
+                    logger.warning("墓碑写入失败: _safe_write_text 返回 False")
         except Exception as e:
             # 写失败：丢弃内存缓存，下次重新从盘上读（可能丢本次新增，可接受）
             self._entries = None
+            added = 0
             logger.warning("墓碑写入失败(不阻断主流程): {}".format(e))
         return added
 
@@ -228,18 +237,23 @@ class TombstoneStore:
             hit_ids = [rid for rid, c in rows if content_hash(c or "") in entries]
             if not hit_ids:
                 return 0
-            placeholders = ",".join("?" for _ in hit_ids)
-            try:
+            # 分块 DELETE：SQLite 变量默认上限 999（3.32 之前）/32766（之后），
+            # 不分块在旧绑定库 + 大量命中时会直接 OperationalError
+            CHUNK = 500
+            for i in range(0, len(hit_ids), CHUNK):
+                chunk = hit_ids[i:i + CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                try:
+                    conn.execute(
+                        "DELETE FROM memories_fts WHERE id IN ({})".format(placeholders),
+                        chunk,
+                    )
+                except sqlite3.OperationalError:
+                    pass  # 无 FTS 表
                 conn.execute(
-                    "DELETE FROM memories_fts WHERE id IN ({})".format(placeholders),
-                    hit_ids,
+                    "DELETE FROM memories WHERE id IN ({})".format(placeholders),
+                    chunk,
                 )
-            except sqlite3.OperationalError:
-                pass  # 无 FTS 表
-            conn.execute(
-                "DELETE FROM memories WHERE id IN ({})".format(placeholders),
-                hit_ids,
-            )
             conn.commit()
             return len(hit_ids)
         except Exception:
