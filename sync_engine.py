@@ -153,6 +153,12 @@ class SyncEngine:
             self.logger.addHandler(_logging.NullHandler())
         self.on_progress = on_progress or (lambda msg: None)
         self.sync_state = SyncState()
+        # P1-3: 墓碑库 —— 防止已删除记忆从共享层复活
+        try:
+            from tombstones import get_tombstone_store
+            self.tombstones = get_tombstone_store()
+        except Exception:
+            self.tombstones = None
         self.dry_run = dry_run
 
         # 确定 OneDrive 融合层根目录
@@ -245,6 +251,14 @@ class SyncEngine:
             device=self._resolve_device_name(),
         )
         start_ts = time.time()
+
+        # P1-3: 每轮同步开始时刷新墓碑缓存 —— 数据根在 OneDrive 上，
+        # 其他设备可能新增了墓碑；GUI 常驻进程若用陈旧缓存会漏过滤（复活窗口）
+        try:
+            if self.tombstones is not None:
+                self.tombstones.refresh()
+        except Exception:
+            pass
 
         try:
             # ① 发现 Agent
@@ -374,6 +388,17 @@ class SyncEngine:
                 self._emit("融合完成")
             else:
                 self._emit("只有 {} 个 Agent 有数据库，跳过融合".format(len(agent_dbs)))
+
+            # ④.5 P1-3: 墓碑清理 —— 融合后、写回前，从 shared.db 删除已墓碑的行。
+            # 必须在融合之后（否则 merge 会把其他 agent DB 里的同内容条目再灌回来），
+            # 必须在写回之前（否则 _load_shared_memories / memory_shared.md 重建复活）。
+            try:
+                if self.tombstones is not None:
+                    tombed = self.tombstones.purge_db(shared_db_path)
+                    if tombed:
+                        self._emit("墓碑清理: 从 shared.db 移除 {} 条已删除记忆".format(tombed))
+            except Exception as e:
+                self.logger.warning("墓碑清理失败(不阻断): {}".format(e))
 
             # ⑤ 写回各 Agent
             self._emit("开始写回各 Agent...")
@@ -633,6 +658,15 @@ class SyncEngine:
             self.logger.warning("FTS 修复扫描失败: {}".format(e))
             return {"repaired": 0, "saved_mb": 0.0}
 
+    def _is_tombstoned(self, h: str) -> bool:
+        """P1-3: 查询墓碑。墓碑库不可用时返回 False（不阻断主流程）。"""
+        if self.tombstones is None or not h:
+            return False
+        try:
+            return self.tombstones.is_tombstoned(h)
+        except Exception:
+            return False
+
     def _load_shared_memories(self, agent_id: str, force_refresh: bool = False) -> list:
         """从融合层读取指定 Agent 的共享记忆
         v1.3.7: 增量加载——跳过 SyncState 中已写回的条目，不再 LIMIT 500。
@@ -657,6 +691,10 @@ class SyncEngine:
                     # 增量跳过：已在 sync_state 中且 hash 一致的跳过
                     h = content_hash(entry.content)
                     if h in known_hashes:
+                        continue
+                    # P1-3: 墓碑过滤 —— 已删除的记忆绝不写回（force_refresh 也不豁免：
+                    # 墓碑语义是"删除"，与去重 state 无关）
+                    if self._is_tombstoned(h):
                         continue
                     memories.append(entry)
         except Exception as e:
@@ -739,36 +777,43 @@ class SyncEngine:
             return entry_lines
 
         # ---- 增量路径（文件存在且可解析）----
+        #
+        # v2.3.0: 「解析已有 id → 读原文 → 追加写入」必须整体在锁内完成。
+        # 旧代码这三步全在锁外、且根本没加锁：两个进程（GUI / watchdog / CLI）
+        # 同时增量追加时，各自基于同一份旧内容拼接，后写完的一方会把先写完
+        # 的一方刚追加的条目**整块覆盖**掉 —— 典型的丢失更新。
         if shared_md_path.exists() and shared_md_path.stat().st_size >= 50:
-            existing_ids = self._parse_md_entry_ids(shared_md_path)
-            if existing_ids:
-                new_entries = [m for m in entries if m.id not in existing_ids]
-                if not new_entries:
-                    # 无新增：不写（避免 OneDrive 写放大）
-                    return
-                from safe_io import _safe_read_text, _safe_write_text
-                current = _safe_read_text(
-                    shared_md_path, default="# {} 共享记忆\n\n".format(agent_id))
-                # 预估：现有内容 + 全部新条目是否超限。超限 → 降级全量重建，
-                # 避免"增量追加 → 体积控制截断"的写放大循环。
-                est_lines = len(current.splitlines())
-                est_size = len(current.encode("utf-8"))
-                for mem in new_entries:
-                    blk = _build_entry_block(mem)
-                    est_lines += len(blk)
-                    est_size += len(("\n".join(blk) + "\n").encode("utf-8"))
-                if est_lines <= max_lines and est_size <= max_size_bytes:
-                    # 能完整容纳全部新条目：直接增量追加（最小写放大）
-                    blocks = []
-                    for mem in new_entries:
-                        blocks.extend(_build_entry_block(mem))
-                    new_text = current.rstrip() + "\n\n" + "\n".join(blocks).rstrip() + "\n"
-                    if _safe_write_text(shared_md_path, new_text):
-                        self._emit("  memory_shared.md({}): 增量追加 {} 条（库中共 {} 条）".format(
-                            agent_id, len(new_entries), len(entries)))
+            from safe_io import CrossProcessLock
+            with CrossProcessLock(shared_md_path):
+                existing_ids = self._parse_md_entry_ids(shared_md_path)
+                if existing_ids:
+                    new_entries = [m for m in entries if m.id not in existing_ids]
+                    if not new_entries:
+                        # 无新增：不写（避免 OneDrive 写放大）
                         return
-                    self._emit("  memory_shared.md({}): 增量写入失败，降级全量重建".format(agent_id))
-                # 超限 / 写入失败：降级全量重建
+                    from safe_io import _safe_read_text, _safe_write_text
+                    current = _safe_read_text(
+                        shared_md_path, default="# {} 共享记忆\n\n".format(agent_id))
+                    # 预估：现有内容 + 全部新条目是否超限。超限 → 降级全量重建，
+                    # 避免"增量追加 → 体积控制截断"的写放大循环。
+                    est_lines = len(current.splitlines())
+                    est_size = len(current.encode("utf-8"))
+                    for mem in new_entries:
+                        blk = _build_entry_block(mem)
+                        est_lines += len(blk)
+                        est_size += len(("\n".join(blk) + "\n").encode("utf-8"))
+                    if est_lines <= max_lines and est_size <= max_size_bytes:
+                        # 能完整容纳全部新条目：直接增量追加（最小写放大）
+                        blocks = []
+                        for mem in new_entries:
+                            blocks.extend(_build_entry_block(mem))
+                        new_text = current.rstrip() + "\n\n" + "\n".join(blocks).rstrip() + "\n"
+                        if _safe_write_text(shared_md_path, new_text):
+                            self._emit("  memory_shared.md({}): 增量追加 {} 条（库中共 {} 条）".format(
+                                agent_id, len(new_entries), len(entries)))
+                            return
+                        self._emit("  memory_shared.md({}): 增量写入失败，降级全量重建".format(agent_id))
+                    # 超限 / 写入失败：降级全量重建
 
         # ---- 全量重建路径（文件缺失 / 格式损坏 / 超限降级）----
         lines = ["# {} 共享记忆".format(agent_id), ""]
@@ -1008,9 +1053,6 @@ class SyncEngine:
                 return
 
             marker = "<!-- agent-memory:knowledge-brief -->"
-            existing = _safe_read_text(entry_file, default="")
-            if marker in existing:
-                return  # 已注入，跳过
 
             # v2.1.2: 注入相对路径（相对 Agent 入口文件所在目录）而非绝对路径。
             # 绝对路径在另一台机器上必然失效（尤其入口文件本身在 OneDrive 同步树内）；
@@ -1044,8 +1086,18 @@ class SyncEngine:
                 agent=agent_id,
             )
 
-            new_content = existing.rstrip() + brief_ref
-            if _safe_write_text(entry_file, new_content):
+            # v2.3.0: 「读原文 → 判重 → 追加写入」整体在锁内完成。
+            # 旧代码在锁外读、锁外写，两个进程可同时判定"未注入"并各自追加，
+            # 结果是引用被注入两次，且后写的覆盖掉前一个进程对文件的其它修改。
+            # locked_update 强制**在锁内读取**，调用方无法把顺序写错。
+            from safe_io import locked_update
+
+            def _inject(current: str):
+                if marker in current:
+                    return None  # 已注入：返回 None 表示放弃写入
+                return current.rstrip() + brief_ref
+
+            if locked_update(entry_file, _inject) is not None:
                 self._emit("  📌 已注入共享知识引用 -> {}".format(entry_file))
         except Exception as e:
             self.logger.warning("注入知识引用失败({}): {}".format(agent_id, e))
@@ -1074,6 +1126,9 @@ class SyncEngine:
                 )
                 for row in cursor.fetchall():
                     entry = db._row_to_entry(row)
+                    # P1-3: 墓碑过滤 —— memory_shared.md 重建也不复活已删记忆
+                    if self._is_tombstoned(content_hash(entry.content)):
+                        continue
                     memories.append(entry)
         except Exception as e:
             self.logger.warning("读取全部共享记忆失败({}): {}".format(agent_id, e))

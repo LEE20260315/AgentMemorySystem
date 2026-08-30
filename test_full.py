@@ -19,8 +19,10 @@ AgentMemorySystem 完整测试套件 v2.0
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -926,48 +928,156 @@ def test_integration_rollback_no_crash():
 # ===========================================================================
 
 def test_filelock_acquire_release():
-    """FileLock 正常获取/释放"""
+    """v2.3.0: FileLock 获取/释放正常，且**不在目标目录创建任何文件**。
+
+    旧实现会在 lock_path 指向的位置（数据根 = OneDrive 同步目录）真实创建
+    .lock 文件，同步到另一台机器后，对端看到一个"陈旧锁"就拒绝写入并走
+    fail-open 覆盖分支 —— 这是跨机丢更新的根因之一。新实现只把它当身份令牌。
+    """
     r.set_module("agent_memory")
     from agent_memory import FileLock
     tmp = Path(tempfile.mkdtemp())
     try:
         lock_path = tmp / "test.lock"
         with FileLock(lock_path):
-            r.assert_true("lock file exists", lock_path.exists())
-        r.assert_true("lock released", not lock_path.exists())
+            r.ok("lock acquired")
+        # 关键断言：目标目录保持干净，没有任何锁文件残留
+        leftovers = list(tmp.iterdir())
+        r.assert_true("目标目录无锁文件残留", len(leftovers) == 0)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_filelock_conflict_raises_lockerror():
-    """FileLock 锁冲突时抛 LockError（而非 UnboundLocalError）"""
+def test_filelock_reentrant_same_thread():
+    """v2.3.0: 同线程可重入（旧实现会自己把自己锁死，抛 LockError）"""
     r.set_module("agent_memory")
-    from agent_memory import FileLock, LockError
+    from agent_memory import FileLock
     tmp = Path(tempfile.mkdtemp())
     try:
         lock_path = tmp / "test.lock"
         with FileLock(lock_path):
-            try:
+            with FileLock(lock_path):
                 with FileLock(lock_path):
-                    r.fail("second lock", "should raise")
-            except LockError:
-                r.ok("second lock raises LockError")
-            except UnboundLocalError as e:
-                r.fail("second lock", "UnboundLocalError: {}".format(e))
+                    r.ok("三层嵌套重入成功")
+        # 全部退出后锁必须真的释放：再拿一次应当立刻成功
+        with FileLock(lock_path, timeout=2.0):
+            r.ok("释放后可再次获取")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_filelock_cross_process_mutual_exclusion():
+    """v2.3.0: **跨进程**真互斥（旧实现无法保证，且失败即 fail-open）
+
+    起一个子进程持锁 5 秒；父进程在此期间用 1 秒超时去抢，必须失败。
+    """
+    r.set_module("safe_io")
+    from safe_io import CrossProcessLock, LockTimeout
+    tmp = Path(tempfile.mkdtemp())
+    ready = tmp / "ready.txt"
+    target = tmp / "shared.md"
+    child = None
+    try:
+        code = (
+            "import sys, time\n"
+            "sys.path.insert(0, {!r})\n"
+            "from safe_io import CrossProcessLock\n"
+            "with CrossProcessLock({!r}, timeout=25):\n"
+            "    open({!r}, 'w').write('held')\n"
+            "    time.sleep(5)\n"
+            "print('done')\n"
+        ).format(os.getcwd(), str(target), str(ready))
+
+        child = subprocess.Popen([sys.executable, "-c", code])
+
+        # 等子进程持锁信号
+        waited = 0.0
+        while not ready.exists() and waited < 20.0:
+            time.sleep(0.1)
+            waited += 0.1
+        r.assert_true("子进程已持锁", ready.exists())
+
+        # 父进程抢锁必须超时失败
+        blocked = False
+        try:
+            with CrossProcessLock(target, timeout=1.0):
+                pass
+        except LockTimeout:
+            blocked = True
+        r.assert_true("跨进程争用被正确阻塞", blocked)
+
+        child.wait(timeout=30)
+        child = None
+
+        # 子进程退出后（OS 自动释放）必须能立刻拿到
+        acquired = False
+        with CrossProcessLock(target, timeout=5.0):
+            acquired = True
+        r.assert_true("子进程退出后可获取", acquired)
+    finally:
+        if child is not None:
+            try:
+                child.kill()
+                child.wait(timeout=10)
+            except Exception:
+                pass
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_locked_update_no_lost_update():
+    """v2.3.0 核心回归：并发追加不丢更新（旧实现会整块覆盖）"""
+    r.set_module("safe_io")
+    from safe_io import locked_update
+    tmp = Path(tempfile.mkdtemp())
+    target = tmp / "counter.txt"
+    try:
+        target.write_text("base\n", encoding="utf-8")
+
+        def _append(tag):
+            def _mutator(current):
+                # 刻意放大竞态窗口：读完之后睡一觉再返回
+                time.sleep(0.05)
+                return current + "{}\n".format(tag)
+            return _mutator
+
+        errors = []
+
+        def _worker(tag):
+            try:
+                locked_update(target, _append(tag), timeout=30.0)
+            except Exception as e:  # noqa: BLE001 - 测试里收集所有异常
+                errors.append("{}: {}".format(tag, e))
+
+        threads = [threading.Thread(target=_worker, args=("t%d" % i,))
+                   for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+
+        r.assert_true("无异常", not errors)
+        content = target.read_text(encoding="utf-8")
+        for i in range(8):
+            r.assert_true("t%d 未丢失" % i, ("t%d" % i) in content)
+        r.assert_true("base 仍在", "base" in content)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_filelock_stale_lock_recovered():
-    """FileLock 陈旧锁（超时）自动清理"""
+    """v2.3.0: 旧位置遗留的陈旧锁文件不再阻塞写入
+
+    旧实现若在 lock_path 处发现一个"30 秒内的锁"就直接抛 LockError；
+    升级后这类遗留文件（可能是上一版本同步过来的）不应再影响加锁。
+    """
     r.set_module("agent_memory")
     from agent_memory import FileLock
     tmp = Path(tempfile.mkdtemp())
     try:
         lock_path = tmp / "test.lock"
         lock_path.write_text("2000-01-01T00:00:00", encoding="utf-8")
-        with FileLock(lock_path):
-            r.ok("stale lock recovered")
+        with FileLock(lock_path, timeout=5.0):
+            r.ok("陈旧锁文件不再阻塞")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1837,6 +1947,319 @@ def test_detect_agents_dsh_memory_scan():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ===========================================================================
+# P1-3: 墓碑机制（tombstones.py）
+# ===========================================================================
+
+def test_tombstone_store_roundtrip():
+    """墓碑库 add/known/persist 往返，重复 add 不新增"""
+    r.set_module("tombstones")
+
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        p = tmp / ".tombstones.json"
+        store = TombstoneStore(path=p)
+        n = store.add(["h1", "h2"], agent_id="claude", reason="reconcile_vanish")
+        r.assert_eq("add returns 2", n, 2)
+        r.assert_true("h1 tombstoned", store.is_tombstoned("h1"))
+        r.assert_true("h3 not tombstoned", not store.is_tombstoned("h3"))
+        r.assert_eq("known subset", sorted(store.known({"h1", "h3"})), ["h1"])
+
+        # 新实例从盘上重读（OneDrive 同步语义）
+        store2 = TombstoneStore(path=p)
+        r.assert_true("persisted h2", store2.is_tombstoned("h2"))
+
+        # 重复 add 幂等
+        n2 = store2.add(["h1"], agent_id="claude", reason="reconcile_vanish")
+        r.assert_eq("re-add returns 0", n2, 0)
+        r.assert_eq("count still 2", store2.count, 2)
+
+        # 空输入
+        r.assert_eq("empty add returns 0", store2.add([]), 0)
+        r.assert_true("empty hash not tombstoned", not store2.is_tombstoned(""))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reconcile_vanish_records_tombstone_after_grace():
+    """reconcile 正常模式 vanish → 过宽限期的记墓碑，宽限期内不记"""
+    r.set_module("tombstones")
+
+    from datetime import datetime, timedelta, timezone
+    from sync_writers import SyncState
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        state = SyncState(state_path=tmp / "state.json")
+        now = datetime.now(timezone.utc)
+        state.state["claude"] = {
+            "h_old": (now - timedelta(hours=48)).isoformat(),
+            "h_fresh": now.isoformat(),
+        }
+        result = state.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=0, target_file_present=True)
+        r.assert_eq("both removed from state", result["removed"], 2)
+        r.assert_eq("only old tombstoned", result.get("tombstoned"), 1)
+        r.assert_true("old hash tombstoned", state.tombstones.is_tombstoned("h_old"))
+        r.assert_true("fresh hash NOT tombstoned",
+                      not state.tombstones.is_tombstoned("h_fresh"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reconcile_conservative_never_tombstones():
+    """保守模式（文件不存在 / legacy-only）绝不产生墓碑"""
+    r.set_module("tombstones")
+
+    from datetime import datetime, timedelta, timezone
+    from sync_writers import SyncState
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        state = SyncState(state_path=tmp / "state.json")
+        old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        state.state["claude"] = {"h1": old}
+
+        r1 = state.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=0, target_file_present=False)
+        r.assert_true("file-missing is conservative", r1.get("conservative") is True)
+        r2 = state.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=5, target_file_present=True)
+        r.assert_true("legacy-only is conservative", r2.get("conservative") is True)
+        r.assert_eq("no tombstones created", state.tombstones.count, 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tombstone_refresh_reloads_disk():
+    """refresh() 丢弃内存缓存——跨设备更新的墓碑对本进程可见"""
+    r.set_module("tombstones")
+
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        p = tmp / ".tombstones.json"
+        store_a = TombstoneStore(path=p)
+        r.assert_eq("a initially empty", store_a.count, 0)
+        # 模拟另一设备写入（独立实例直接落盘）
+        store_b = TombstoneStore(path=p)
+        store_b.add(["h_remote"], agent_id="other", reason="test")
+        # a 的进程内缓存仍是旧的（模拟 GUI 常驻）
+        r.assert_eq("a stale cache", store_a.count, 0)
+        # refresh 后可见
+        store_a.refresh()
+        r.assert_eq("a sees remote tombstone after refresh", store_a.count, 1)
+        r.assert_true("h_remote now tombstoned", store_a.is_tombstoned("h_remote"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reconcile_mass_vanish_not_tombstoned():
+    """单轮 vanish 超过阈值视为文件重置，不墓碑化（仅清 state）"""
+    r.set_module("tombstones")
+
+    from datetime import datetime, timedelta, timezone
+    from sync_writers import SyncState
+    from tombstones import TOMBSTONE_MASS_VANISH_LIMIT
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        state = SyncState(state_path=tmp / "state.json")
+        old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        n = TOMBSTONE_MASS_VANISH_LIMIT + 10
+        state.state["claude"] = {"h_{}".format(i): old for i in range(n)}
+        result = state.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=0, target_file_present=True)
+        r.assert_eq("all removed from state", result["removed"], n)
+        r.assert_true("no tombstone on mass vanish",
+                      "tombstoned" not in result)
+        r.assert_eq("tombstone file untouched", state.tombstones.count, 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tombstone_purge_db_chunks_large_hits():
+    """命中数超过分块阈值时 DELETE 分块执行仍完整删除"""
+    r.set_module("tombstones")
+
+    import sqlite3
+    from agent_memory import content_hash
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db = tmp / "shared.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT)")
+        n_tomb, n_keep = 510, 10  # 510 > 500 分块阈值，验证 500+10 两块
+        for i in range(n_tomb + n_keep):
+            conn.execute("INSERT INTO memories VALUES (?, ?)",
+                         ("m{}".format(i), "content_{}".format(i)))
+        conn.commit()
+        conn.close()
+
+        store = TombstoneStore(path=tmp / ".tombstones.json")
+        store.add([content_hash("content_{}".format(i)) for i in range(n_tomb)],
+                  agent_id="a", reason="test")
+        removed = store.purge_db(db)
+        r.assert_eq("chunked purge removes all hits", removed, n_tomb)
+
+        conn = sqlite3.connect(str(db))
+        left = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        conn.close()
+        r.assert_eq("kept rows untouched", left, n_keep)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tombstone_add_returns_zero_on_write_failure():
+    """底层写入失败时 add 如实返回 0（不把未落盘的墓碑当成已记录）"""
+    r.set_module("tombstones")
+
+    import safe_io
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    orig = safe_io._safe_write_text
+    try:
+        p = tmp / ".tombstones.json"
+        safe_io._safe_write_text = lambda *a, **k: False
+        store = TombstoneStore(path=p)
+        n = store.add(["hx"], agent_id="a", reason="test")
+        r.assert_eq("write-failure returns 0", n, 0)
+        r.assert_true("no file written", not p.exists())
+        # 恢复写入函数后重试成功
+        safe_io._safe_write_text = orig
+        n2 = store.add(["hx"], agent_id="a", reason="test")
+        r.assert_eq("retry after failure succeeds", n2, 1)
+        r.assert_true("hx tombstoned after retry", store.is_tombstoned("hx"))
+    finally:
+        safe_io._safe_write_text = orig
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tombstone_purge_db_removes_rows():
+    """purge_db 从 SQLite 删除命中墓碑的行，并清理 FTS 索引"""
+    r.set_module("tombstones")
+
+    import sqlite3
+    from agent_memory import content_hash
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db = tmp / "shared.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT)")
+        conn.execute("CREATE TABLE memories_fts (id TEXT, content TEXT)")
+        conn.execute("INSERT INTO memories VALUES ('m1', 'keep me')")
+        conn.execute("INSERT INTO memories VALUES ('m2', 'delete me')")
+        conn.execute("INSERT INTO memories_fts VALUES ('m2', 'delete me')")
+        conn.commit()
+        conn.close()
+
+        store = TombstoneStore(path=tmp / ".tombstones.json")
+        store.add([content_hash("delete me")], agent_id="a", reason="test")
+        removed = store.purge_db(db)
+        r.assert_eq("purged 1 row", removed, 1)
+
+        conn = sqlite3.connect(str(db))
+        left = [row[0] for row in conn.execute("SELECT id FROM memories").fetchall()]
+        fts = [row[0] for row in conn.execute("SELECT id FROM memories_fts").fetchall()]
+        conn.close()
+        r.assert_eq("only m1 left", left, ["m1"])
+        r.assert_eq("fts cleaned", fts, [])
+
+        # 无墓碑 / 库不存在 → 0，不抛异常
+        empty_store = TombstoneStore(path=tmp / "empty.json")
+        r.assert_eq("no tombstones -> 0", empty_store.purge_db(db), 0)
+        r.assert_eq("missing db -> 0", store.purge_db(tmp / "nope.db"), 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_load_shared_memories_filters_tombstoned():
+    """写回加载 _load_shared_memories 过滤墓碑（force_refresh 也不豁免）"""
+    r.set_module("tombstones")
+
+    from agent_memory import MemoryDatabase, MemoryEntry, content_hash
+    from sync_engine import SyncEngine
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        engine = SyncEngine()
+        engine.root = tmp
+        engine._shared_db = tmp / "shared.db"
+        engine.tombstones = TombstoneStore(path=tmp / ".tombstones.json")
+        with MemoryDatabase(engine._shared_db) as db:
+            db.insert_memory(MemoryEntry(
+                id="m1", agent_id="alpha", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[], confidence="high",
+                conflict_with=None, content="活着的记忆"))
+            db.insert_memory(MemoryEntry(
+                id="m2", agent_id="beta", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[], confidence="high",
+                conflict_with=None, content="被删除的记忆"))
+        engine.tombstones.add([content_hash("被删除的记忆")],
+                              agent_id="beta", reason="test")
+
+        normal = engine._load_shared_memories("pi")
+        r.assert_eq("normal load 1 entry", [m.id for m in normal], ["m1"])
+
+        forced = engine._load_shared_memories("pi", force_refresh=True)
+        r.assert_eq("force_refresh still filtered", [m.id for m in forced], ["m1"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_sync_shared_to_agent_filters_tombstoned():
+    """DB 级融合 sync_shared_to_agent 跳过墓碑命中的记忆"""
+    r.set_module("tombstones")
+
+    import agent_memory as am
+    from agent_memory import MemoryDatabase, MemoryEntry, MemoryMerger, content_hash
+    import tombstones as tmod
+    from tombstones import TombstoneStore, reset_tombstone_store
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        shared = tmp / "shared.db"
+        agent = tmp / "agent.db"
+        with MemoryDatabase(shared) as db:
+            db.insert_memory(MemoryEntry(
+                id="m1", agent_id="claude", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[], confidence="high",
+                conflict_with=None, content="被删除的记忆"))
+        MemoryDatabase(agent).close()  # 建空库
+
+        store = TombstoneStore(path=tmp / ".tombstones.json")
+        store.add([content_hash("被删除的记忆")], agent_id="claude", reason="test")
+
+        # 注入模块级单例（模拟生产环境 get_tombstone_store 命中）
+        reset_tombstone_store()
+        tmod._store = store
+        try:
+            merger = MemoryMerger(shared_db_path=shared, agent_dbs={"trae": agent})
+            stats = merger.sync_shared_to_agent("trae")
+            r.assert_eq("synced 0 (tombstoned)", stats["synced"], 0)
+            with MemoryDatabase(agent) as db:
+                cnt = db.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            r.assert_eq("agent db still empty", cnt, 0)
+
+            # 对照组：无墓碑时正常同步
+            reset_tombstone_store()
+            stats2 = merger.sync_shared_to_agent("trae")
+            r.assert_eq("synced 1 without tombstone", stats2["synced"], 1)
+        finally:
+            reset_tombstone_store()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # v2.3.0: 日志保留策略
 # ---------------------------------------------------------------------------
@@ -2021,8 +2444,10 @@ ALL_TESTS = [
     test_integration_rollback_no_crash,
     # v2.1.2 fixes
     test_filelock_acquire_release,
-    test_filelock_conflict_raises_lockerror,
+    test_filelock_reentrant_same_thread,
+    test_filelock_cross_process_mutual_exclusion,
     test_filelock_stale_lock_recovered,
+    test_locked_update_no_lost_update,
     test_backup_file_agent_id_naming,
     test_backup_log_roundtrip,
     test_resolve_source_device_no_match_raises,
@@ -2064,6 +2489,17 @@ ALL_TESTS = [
     test_merge_pending_files_tree_and_orphan_tmp,
     test_detect_agents_cache_profiles_hash_invalidation,
     test_detect_agents_dsh_memory_scan,
+    # P1-3: 墓碑机制（防已删记忆跨设备复活）
+    test_tombstone_store_roundtrip,
+    test_reconcile_vanish_records_tombstone_after_grace,
+    test_reconcile_conservative_never_tombstones,
+    test_tombstone_refresh_reloads_disk,
+    test_reconcile_mass_vanish_not_tombstoned,
+    test_tombstone_purge_db_chunks_large_hits,
+    test_tombstone_add_returns_zero_on_write_failure,
+    test_tombstone_purge_db_removes_rows,
+    test_load_shared_memories_filters_tombstoned,
+    test_sync_shared_to_agent_filters_tombstoned,
     # v2.3.0: 日志保留策略（数量+天数 / 轮转不覆盖 / 失败不静默）
     test_log_rotation_uses_timestamped_names,
     test_log_prune_by_count_keeps_newest,

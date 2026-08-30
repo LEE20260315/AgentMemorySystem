@@ -566,50 +566,42 @@ def read_file_if_exists(file_path):
 # ---------------------------------------------------------------------------
 
 @contextmanager
-def FileLock(lock_path):
+def FileLock(lock_path, timeout: float = 30.0):
     """
-    文件锁上下文管理器。
+    跨进程文件锁上下文管理器。
 
-    死锁判断阈值: 30 秒。
-    (融合器的 .merge_lock 阈值为 1 小时, 但 Agent 写记忆的锁粒度更小,
-     超过 30 秒即视为死锁。)
+    v2.3.0 重写：底层委托给 safe_io.CrossProcessLock（OS 级锁）。
+
+    旧实现是「锁文件存在性」锁，有四个致命缺陷，任意一个都会导致
+    **静默丢更新**（详见 safe_io.py 的跨进程锁注释）：
+      1. 拿不到锁立刻抛异常，不等待 —— 调用方的 except 分支会降级成
+         「不加锁直接写」，把别人刚写进去的内容整个覆盖掉（fail-open）；
+      2. 锁文件建在数据根（OneDrive 同步目录）里，会被同步到另一台机，
+         对端看到「陈旧锁」就拒绝写入，同样走 fail-open；
+      3. 陈旧判定用 unlink，两个进程可同时判定、同时建锁（TOCTOU）；
+      4. 进程崩溃留下陈旧锁，最长 30 秒内所有写入失败。
+
+    新实现：OS 级锁（Windows LockFile / POSIX flock），锁文件按目标路径
+    哈希落在 %LOCALAPPDATA%（**绝不在数据根创建任何文件**），进程崩溃时
+    由 OS 自动释放，支持同线程重入与超时等待。
+
+    兼容性：拿不到锁时仍抛 LockError（调用方原有的 except LockError
+    分支继续工作），但语义从「立刻失败」变成「等待 timeout 秒后失败」。
+
+    Parameters
+    ----------
+    lock_path : 目标文件路径，或调用方传入的 lock 路径。
+        仅作为**身份令牌**使用，不再在它所在目录创建任何文件。
+    timeout : float
+        最长等待秒数，默认 30 秒。
     """
-    lock_fd = None
-    lock_acquired = False
+    from safe_io import CrossProcessLock, LockTimeout
+
     try:
-        # 死锁检测: 检查已有锁是否超时
-        if lock_path.exists():
-            try:
-                lock_time_str = lock_path.read_text(encoding="utf-8").strip()
-                lock_time = datetime.fromisoformat(lock_time_str)
-                if datetime.now() - lock_time > timedelta(seconds=30):
-                    lock_path.unlink()
-                else:
-                    raise LockError(
-                        "Cannot acquire lock: {} (locked at {})".format(
-                            lock_path, lock_time_str)
-                    )
-            except (ValueError, OSError):
-                lock_path.unlink()
-
-        # 原子创建锁文件 (O_CREAT | O_EXCL 防止 TOCTOU 竞态)
-        try:
-            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(lock_fd, datetime.now().isoformat().encode("utf-8"))
-            os.fsync(lock_fd)
-        except FileExistsError:
-            raise LockError("Cannot acquire lock: {} (already exists)".format(lock_path))
-        lock_acquired = True
-        yield lock_path
-
-    finally:
-        if lock_fd is not None:
-            try:
-                os.close(lock_fd)
-            except OSError:
-                pass
-        if lock_acquired and lock_path.exists():
-            lock_path.unlink()
+        with CrossProcessLock(lock_path, timeout=timeout):
+            yield lock_path
+    except LockTimeout as e:
+        raise LockError(str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -2401,10 +2393,27 @@ class MemoryMerger:
             # 获取共享库中非本 Agent 的记忆
             shared_memories = shared_db.list_memories(limit=10000)
 
+            # P1-3: 墓碑过滤 —— 已删除的记忆不再从共享库回流到 Agent DB
+            _tombs = None
+            try:
+                from tombstones import get_tombstone_store
+                _tombs = get_tombstone_store()
+            except Exception:
+                _tombs = None
+
             for memory in shared_memories:
                 # 跳过自己创建的记忆
                 if memory.agent_id == agent_id:
                     continue
+
+                # P1-3: 墓碑命中则跳过（不计数为 synced）
+                if _tombs is not None:
+                    try:
+                        if _tombs.is_tombstoned(content_hash(memory.content)):
+                            stats["skipped"] += 1
+                            continue
+                    except Exception:
+                        pass
 
                 # 检查是否已存在
                 cursor = agent_db.conn.execute(
@@ -3335,73 +3344,31 @@ class ConcurrentWriteManager:
         """获取锁文件路径"""
         return self.lock_dir / "{}.lock".format(operation)
 
-    def _acquire_lock(self, operation: str) -> bool:
-        """
-        获取锁
-
-        Parameters
-        ----------
-        operation : str
-            操作名称
-
-        Returns
-        -------
-        bool
-            是否成功获取锁
-        """
-        lock_path = self._get_lock_path(operation)
-
-        # 检查现有锁
-        if lock_path.exists():
-            try:
-                lock_time_str = lock_path.read_text(encoding="utf-8").strip()
-                lock_time = datetime.fromisoformat(lock_time_str)
-                if datetime.now() - lock_time > timedelta(seconds=self.lock_timeout):
-                    # 锁超时，删除
-                    lock_path.unlink()
-                else:
-                    return False
-            except (ValueError, OSError):
-                try:
-                    lock_path.unlink()
-                except:
-                    pass
-
-        # 创建锁
-        try:
-            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(lock_fd, datetime.now().isoformat().encode("utf-8"))
-            os.close(lock_fd)
-            return True
-        except FileExistsError:
-            return False
-
-    def _release_lock(self, operation: str):
-        """释放锁"""
-        lock_path = self._get_lock_path(operation)
-        try:
-            if lock_path.exists():
-                lock_path.unlink()
-        except:
-            pass
-
     @contextmanager
-    def write_lock(self, operation: str):
+    def write_lock(self, operation: str, timeout: float = None):
         """
-        写入锁上下文管理器
+        写入锁上下文管理器（v2.3.0：OS 级跨进程锁）
+
+        旧实现用「在数据根 .locks/ 下 O_EXCL 建锁文件」，缺陷与模块级
+        FileLock 完全一致（同步到对端、TOCTOU、崩溃残留、fail-fast）。
+        现统一委托给 safe_io.CrossProcessLock：OS 级锁 + 锁文件落在
+        LOCALAPPDATA，进程崩溃由 OS 自动释放。
 
         Parameters
         ----------
         operation : str
-            操作名称
+            操作名称（仅作为锁的身份标识）
+        timeout : float, optional
+            最长等待秒数，默认用 self.lock_timeout
         """
-        if not self._acquire_lock(operation):
-            raise LockError("无法获取写入锁: {} (可能有其他设备正在写入)".format(operation))
+        from safe_io import CrossProcessLock, LockTimeout
 
+        wait = self.lock_timeout if timeout is None else timeout
         try:
-            yield
-        finally:
-            self._release_lock(operation)
+            with CrossProcessLock(self._get_lock_path(operation), timeout=wait):
+                yield
+        except LockTimeout as e:
+            raise LockError("无法获取写入锁: {} ({})".format(operation, e))
 
     def safe_write(self, operation: str, write_func, max_retries: int = None, retry_delay: float = None):
         """

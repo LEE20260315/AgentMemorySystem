@@ -25,6 +25,7 @@ from agent_memory import (
     MemoryEntry, content_hash, get_logger, get_config,
 )
 from safe_io import _pending_path, _safe_read_text, _safe_write_text
+from tombstones import TOMBSTONE_GRACE_SECONDS, TOMBSTONE_MASS_VANISH_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +115,9 @@ class SyncState:
             from safe_io import get_data_root
             state_path = get_data_root() / ".sync_state.json"
         self.state_path = Path(state_path)
+        # P1-3: 墓碑库与 state 同目录（默认即数据根，OneDrive 同步跨设备生效）
+        from tombstones import TombstoneStore
+        self.tombstones = TombstoneStore(path=self.state_path.parent / ".tombstones.json")
         self.state = self._load()
 
     def _load(self) -> dict:
@@ -166,14 +170,21 @@ class SyncState:
                         logger.warning(
                             "sync_state 主路径写入失败，已保存到备份路径: {}".format(fallback_path))
         except Exception as e:
-            # 锁不可用（如跨机同步延迟）：降级为直接原子写，尽力而为
+            # v2.3.0: 锁不可用时的降级**绝不能再裸写 self.state**。
+            # 旧实现在这里直接 _safe_write_text(self.state, ...)，而 self.state
+            # 是本进程启动时（或更早）读到的快照 —— 会把其他进程/设备刚写进去的
+            # agent 状态整块覆盖掉。这正是「读-改-写无互斥 → 静默丢更新」的
+            # 实际发生点：锁失败后 fail-open。
+            # 降级也要先合并磁盘最新状态，最多丢本轮并发，不会抹掉别人的数据。
             try:
                 from safe_io import _safe_write_text
+                merged = self._merge_states(self._load_raw())
+                self.state = merged
                 content = json.dumps(self.state, ensure_ascii=False, indent=2)
                 _safe_write_text(self.state_path, content)
             except Exception:
                 pass
-            logger.warning("sync_state 保存失败(带锁): {}".format(e))
+            logger.warning("sync_state 保存降级（未持锁，已合并磁盘状态）: {}".format(e))
 
     def _load_raw(self) -> dict:
         """直接读取磁盘上的最新状态（不做 LOCALAPPDATA 回退，用于合并）。"""
@@ -266,6 +277,11 @@ class SyncState:
         to_remove = tracked - actual_hashes
         result["actual_only"] = len(actual_hashes - tracked)
         if agent_id in self.state and to_remove:
+            # P1-3: vanish 信号 → 记墓碑（宽限期内的不记，防 pending/写失败误杀）。
+            # 保守模式分支已提前 return，绝不会走到这里。
+            tombed = self._record_tombstones(agent_id, to_remove)
+            if tombed:
+                result["tombstoned"] = tombed
             for h in to_remove:
                 self.state[agent_id].pop(h, None)
         result["removed"] = len(to_remove)
@@ -277,6 +293,40 @@ class SyncState:
         ):
             self.state.pop(agent_id, None)
         return result
+
+    def _record_tombstones(self, agent_id: str, hashes) -> int:
+        """P1-3: 将 vanish 的 hash 记入墓碑（带宽限期安全阀）。
+
+        宽限期内（刚 mark_written 不久）就消失的 hash 视为 pending /
+        写入失败等瞬时状态，不墓碑化 —— 只清 state，保持旧行为。
+        单轮 vanish 超过 TOMBSTONE_MASS_VANISH_LIMIT 视为文件被重置/
+        重写（如用户清空文件重新同步），同样不墓碑化。
+        墓碑写入失败不阻断 reconcile。
+        """
+        if len(hashes) > TOMBSTONE_MASS_VANISH_LIMIT:
+            return 0  # 批量 vanish：文件级事件，保守跳过
+        agent_state = self.state.get(agent_id, {})
+        now = datetime.now(timezone.utc)
+        eligible = []
+        for h in hashes:
+            ts = agent_state.get(h)
+            if ts:
+                try:
+                    t0 = datetime.fromisoformat(str(ts))
+                    if t0.tzinfo is None:
+                        t0 = t0.replace(tzinfo=timezone.utc)
+                    if (now - t0).total_seconds() < TOMBSTONE_GRACE_SECONDS:
+                        continue
+                except ValueError:
+                    pass
+            eligible.append(h)
+        if not eligible:
+            return 0
+        try:
+            return self.tombstones.add(
+                eligible, agent_id=agent_id, reason="reconcile_vanish")
+        except Exception:
+            return 0
 
     def bulk_known_hashes(self, agent_id: str) -> set:
         """返回 SyncState[agent_id] 跟踪的全部 hash 集合（用于比对 / 调试）。"""

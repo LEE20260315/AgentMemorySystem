@@ -79,7 +79,7 @@ def _write_repo_launcher(project_dir: Path, dist_name: str) -> Path:
     """在项目根目录生成跨设备启动器。
 
     启动器职责：
-    1. 从 OneDrive 同步包 AgentMemorySync/ 同步到本机 TEMP 本地副本
+    1. 从 OneDrive 同步包 AgentMemorySync/ 同步到本机 LOCALAPPDATA 本地副本
     2. 设置 AGENT_MEMORY_DATA_DIR 指向项目根目录下的 data/
     3. 从本地副本启动 EXE，避免直接从 OneDrive 运行触发托盘限制
 
@@ -98,7 +98,13 @@ def _write_repo_launcher(project_dir: Path, dist_name: str) -> Path:
         'if exist "%CURRENT_FILE%" set /p SOURCE_NAME=<"%CURRENT_FILE%"\r\n'
         'if not defined SOURCE_NAME set "SOURCE_NAME=AgentMemorySync"\r\n'
         'set "SOURCE_DIR=%REPO_DIR%\\%SOURCE_NAME%"\r\n'
-        f'set "LOCAL_BASE=%TEMP%\\{dist_name}_Run"\r\n'
+        # v2.2.3: 运行目录固定在 LOCALAPPDATA，不再用 %TEMP%。
+        # 原因一：Windows 存储感知/磁盘清理会清空 %TEMP%，删掉正在运行的程序本体。
+        # 原因二：原实现的主目录被占用时会回退到 %TEMP%\..._Run_%RANDOM%_%RANDOM%，
+        #        路径每次启动都变，导致托盘图标身份反复失效（详见 memory_sync_app
+        #        的 _TRAY_BASE_FLAGS 注释），并在 Temp 留下大量孤儿目录。
+        f'set "LOCAL_BASE=%LOCALAPPDATA%\\AgentMemorySystem\\Run"\r\n'
+        f'set "LOCAL_FALLBACK=%LOCALAPPDATA%\\AgentMemorySystem\\Run_alt"\r\n'
         'set "LOCAL_DIR=%LOCAL_BASE"\r\n'
         f'set "LOCAL_EXE=%LOCAL_DIR%\\{dist_name}.exe"\r\n'
         '\r\n'
@@ -130,13 +136,13 @@ def _write_repo_launcher(project_dir: Path, dist_name: str) -> Path:
         '  set "COPY_RC=0"\r\n'
         '  if exist "!TARGET_DIR!" rmdir /s /q "!TARGET_DIR!" >nul 2>nul\r\n'
         '  if exist "!TARGET_DIR!" (\r\n'
-        '    set "TARGET_DIR=%TEMP%\\AgentMemorySync_Run_%RANDOM%_%RANDOM%"\r\n'
+        '    set "TARGET_DIR=%LOCAL_FALLBACK%"\r\n'
         '    echo [AgentMemorySync] Primary runtime dir is busy, using fallback: !TARGET_DIR!\r\n'
         '  )\r\n'
         '  robocopy "%SOURCE_DIR%" "!TARGET_DIR!" /MIR >nul\r\n'
         '  set "COPY_RC=!ERRORLEVEL!"\r\n'
         '  if not "!COPY_RC!"=="0" if not "!COPY_RC!"=="1" if not "!COPY_RC!"=="2" if not "!COPY_RC!"=="3" if not "!COPY_RC!"=="4" if not "!COPY_RC!"=="5" if not "!COPY_RC!"=="6" if not "!COPY_RC!"=="7" (\r\n'
-        '    set "TARGET_DIR=%TEMP%\\AgentMemorySync_Run_%RANDOM%_%RANDOM%"\r\n'
+        '    set "TARGET_DIR=%LOCAL_FALLBACK%"\r\n'
         '    echo [AgentMemorySync] Primary copy failed, retrying with fallback: !TARGET_DIR!\r\n'
         '    robocopy "%SOURCE_DIR%" "!TARGET_DIR!" /MIR >nul\r\n'
         '    set "COPY_RC=!ERRORLEVEL!"\r\n'
@@ -254,19 +260,28 @@ def _sync_repo_bundle(source_dir: Path, project_dir: Path, dist_name: str) -> Pa
 
 
 def _install_local(source_dir: Path, dist_name: str, project_dir: Path = None) -> Path:
-    """把构建结果复制到可运行位置（优先 Temp，避免 OneDrive 和权限限制）"""
-    temp_base = Path(os.environ.get("TEMP", "."))
-    preferred_dir = temp_base / "AgentMemorySync_Run"
+    """把构建结果复制到可运行位置（LOCALAPPDATA，避开 OneDrive 与磁盘清理）
+
+    v2.2.3: 从 %TEMP% 迁到 %LOCALAPPDATA%\\AgentMemorySystem\\Run。
+      - %TEMP% 会被「存储感知 / 磁盘清理」清空，删掉正在运行的程序本体；
+      - 旧实现的 fallback 用随机数目录名，每次启动路径都变，托盘图标
+        身份随之漂移（Windows 无 GUID 时按路径识别图标）；
+      - 固定路径也让快捷方式图标、快捷方式目标保持稳定。
+    """
+    run_base = Path(os.environ.get(
+        "LOCALAPPDATA", os.path.expanduser("~"))) / "AgentMemorySystem"
+    preferred_dir = run_base / "Run"
     local_dir = preferred_dir
     local_exe = local_dir / f"{dist_name}.exe"
 
     print(f"正在安装到: {preferred_dir}")
     try:
+        preferred_dir.parent.mkdir(parents=True, exist_ok=True)
         _safe_remove_dir(preferred_dir)
         time.sleep(0.5)
         shutil.copytree(source_dir, preferred_dir)
     except Exception as e:
-        local_dir = _next_available_dir(temp_base, "AgentMemorySync_Run")
+        local_dir = _next_available_dir(run_base, "Run_alt")
         local_exe = local_dir / f"{dist_name}.exe"
         print(f"[警告] 固定本地运行目录不可用，改用 fallback: {local_dir.name} ({e})")
         shutil.copytree(source_dir, local_dir)
@@ -274,7 +289,7 @@ def _install_local(source_dir: Path, dist_name: str, project_dir: Path = None) -
     # 创建快捷方式：优先指向项目根目录的 bat（保留 OneDrive 同步能力 + 带图标）
     # bat 不存在时回退到本地 exe（兼容旧场景）
     desktop, start_menu = _get_shortcut_paths()
-    # 图标优先用本地 TEMP 副本（一定在本地磁盘，避免 OneDrive 云占位符导致白底图标）
+    # 图标优先用本地 LOCALAPPDATA 副本（一定在本地磁盘，避免 OneDrive 云占位符导致白底图标）
     # 其次用源构建目录，最后才回退到项目根（OneDrive 路径，可能是云占位符）
     icon = local_dir / "_internal" / "assets" / "app_icon.ico"
     if not icon.exists():
@@ -478,7 +493,7 @@ def build():
             print("=" * 60)
             print("运行模型：")
             print(f"  - OneDrive 项目里只放 {dist_name}/（同步包）+ data/（共享数据）")
-            print(f"  - 实际运行永远是机器本地的 %TEMP%\\{dist_name}_Run\\AgentMemorySync.exe")
+            print(f"  - 实际运行永远是机器本地的 %LOCALAPPDATA%\\AgentMemorySystem\\Run\\AgentMemorySync.exe")
             print(f"  - OneDrive 里的 EXE 请勿直接双击（托盘可能不显示）")
             print()
             print("注意：")

@@ -9,7 +9,8 @@ set "SOURCE_NAME=AgentMemorySync"
 if exist "%CURRENT_FILE%" set /p SOURCE_NAME=<"%CURRENT_FILE%"
 if not defined SOURCE_NAME set "SOURCE_NAME=AgentMemorySync"
 set "SOURCE_DIR=%REPO_DIR%\%SOURCE_NAME%"
-set "LOCAL_BASE=%TEMP%\AgentMemorySync_Run"
+set "LOCAL_BASE=%LOCALAPPDATA%\AgentMemorySystem\Run"
+set "LOCAL_FALLBACK=%LOCALAPPDATA%\AgentMemorySystem\Run_alt"
 set "LOCAL_DIR=%LOCAL_BASE"
 set "LOCAL_EXE=%LOCAL_DIR%\AgentMemorySync.exe"
 
@@ -41,13 +42,13 @@ if "%NEED_COPY%"=="1" (
   set "COPY_RC=0"
   if exist "!TARGET_DIR!" rmdir /s /q "!TARGET_DIR!" >nul 2>nul
   if exist "!TARGET_DIR!" (
-    set "TARGET_DIR=%TEMP%\AgentMemorySync_Run_%RANDOM%_%RANDOM%"
+    set "TARGET_DIR=%LOCAL_FALLBACK%"
     echo [AgentMemorySync] Primary runtime dir is busy, using fallback: !TARGET_DIR!
   )
   robocopy "%SOURCE_DIR%" "!TARGET_DIR!" /MIR >nul
   set "COPY_RC=!ERRORLEVEL!"
   if not "!COPY_RC!"=="0" if not "!COPY_RC!"=="1" if not "!COPY_RC!"=="2" if not "!COPY_RC!"=="3" if not "!COPY_RC!"=="4" if not "!COPY_RC!"=="5" if not "!COPY_RC!"=="6" if not "!COPY_RC!"=="7" (
-    set "TARGET_DIR=%TEMP%\AgentMemorySync_Run_%RANDOM%_%RANDOM%"
+    set "TARGET_DIR=%LOCAL_FALLBACK%"
     echo [AgentMemorySync] Primary copy failed, retrying with fallback: !TARGET_DIR!
     robocopy "%SOURCE_DIR%" "!TARGET_DIR!" /MIR >nul
     set "COPY_RC=!ERRORLEVEL!"

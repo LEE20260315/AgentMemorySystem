@@ -18,6 +18,11 @@
 
 from __future__ import annotations
 
+# v2.2.3: 版本号单点定义——此前启动诊断日志里是硬编码字符串 "v2.2.1"，
+# 与 pyproject / CHANGELOG 各自漂移。改动版本只改这里和 pyproject.toml。
+# 注意：必须放在 from __future__ 之后（__future__ 导入须紧随文档字符串）。
+__version__ = "2.2.3"
+
 import atexit
 import ctypes
 import ctypes.wintypes
@@ -155,6 +160,19 @@ if sys.platform == "win32":
     # 固定 GUID 用于托盘图标识别（Win11 推荐用 GUID 而非 uID）
     _TRAY_GUID = bytes([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
                         0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0])
+    # v2.2.3 托盘标志位基线：必须带 _NIF_GUID。
+    #
+    # 不设 _NIF_GUID 时，Windows 改用「EXE 路径」标识托盘图标，并把用户
+    # 的「是否显示在任务栏」偏好记入注册表 IconStreams（键值绑定路径）。
+    # 打包版每次自解压到不同目录（见 build.py 的 LOCAL_BASE），路径一变，
+    # Windows 就把它当成全新应用，默认塞进溢出区（^ 箭头）——用户手动拖
+    # 出来的设置也随之失效，表现为「托盘图标找不到」。
+    # 带上 _NIF_GUID 后，图标身份与显示偏好永久绑定 GUID，不再随路径漂移。
+    #
+    # 注意：一旦以 GUID 注册，后续 NIM_MODIFY / NIM_DELETE 也必须带
+    # _NIF_GUID，否则 Windows 认不出是同一个图标（会操作失败或产生残影）。
+    _TRAY_BASE_FLAGS = (_NIF_MESSAGE | _NIF_ICON | _NIF_TIP | _NIF_SHOWTIP
+                        | _NIF_GUID)
 
     _user32.UnregisterClassW.argtypes = [ctypes.wintypes.LPWSTR, ctypes.c_void_p]
     _user32.UnregisterClassW.restype = ctypes.wintypes.BOOL
@@ -240,7 +258,10 @@ if sys.platform == "win32":
             ("uTimeout", ctypes.wintypes.UINT),          # 816 (union with uVersion)
             ("szInfoTitle", ctypes.c_wchar * 64),        # 820..947  ← 气泡标题
             ("dwInfoFlags", ctypes.wintypes.DWORD),      # 948
-            ("guidItem", ctypes.c_byte * 16),            # 952..967
+            # c_ubyte 而非 c_byte：GUID 是原始字节而非有符号数。
+            # 两者内存布局一致（c_byte 只是 .value 读成负数，Windows 取到的
+            # 字节相同），改用 c_ubyte 仅为了语义正确、调试时不出现负值。
+            ("guidItem", ctypes.c_ubyte * 16),           # 952..967
         ]
 
     class _WNDCLASSW(ctypes.Structure):
@@ -1277,7 +1298,10 @@ class SyncMainWindow:
 
         v2.1.0 改进：
         - 主心跳写入 LOCALAPPDATA（本地磁盘，避免 OneDrive 锁阻塞主线程）
-        - 额外同步一份到数据根（供跨设备诊断），写入失败不阻塞
+        v2.2.3 改进：
+        - 去掉「额外同步一份到数据根」：那会让两台机器每 5 分钟并发 append
+          同一个 OneDrive 文件，并让日志无上限堆积（实测 86 个 / 36MB）。
+          跨设备诊断信息改由 _write_diag() 在启动/托盘事件时写入数据根。
         """
         try:
             self._heartbeat_counter += 1
@@ -1295,11 +1319,13 @@ class SyncMainWindow:
                 _append_rotated(local_dir / "heartbeat.log", line)
             except Exception:
                 pass
-            # 辅助：数据根（OneDrive）——失败不影响主流程
-            try:
-                _append_rotated(_data_dir() / "tray_error.log", line)
-            except Exception:
-                pass
+            # v2.2.3: 不再把心跳写进数据根（OneDrive 同步目录）。
+            # 原实现每 5 分钟往 OneDrive 里的 tray_error.log 追加一行，导致：
+            #   1) 两台机器并发 append 同一个同步文件，产生冲突副本；
+            #   2) 日志永不清空，实测堆积 86 个轮转文件 / 36MB 并持续上传；
+            #   3) OneDrive 同步占用文件句柄时，这里的写入可能阻塞。
+            # 跨设备诊断需要的启动/托盘信息仍由 _write_diag() 写入数据根，
+            # 心跳这类高频遥测只保留本地副本即可。
         except Exception:
             pass
         # 每 5 分钟一次
@@ -2097,19 +2123,24 @@ class SyncMainWindow:
         self._log("托盘消息窗口已创建")
         _write_diag("DEBUG: message window created hwnd={}\n".format(self._tray_hwnd))
 
-        # 先删除同一 hWnd/uID 的旧图标，避免重复注册或脏状态
+        # 先删除旧图标，避免重复注册或脏状态。
+        # v2.2.3: 按 GUID 删除——图标已改为 GUID 标识，只靠 hWnd/uID 删不掉
+        # 上一次运行（可能来自另一个解压路径）留下的残影。
         del_nid = _NOTIFYICONDATAW()
         del_nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
         del_nid.hWnd = ctypes.wintypes.HWND(self._tray_hwnd)
         del_nid.uID = 1
+        del_nid.uFlags = _NIF_GUID
+        del_nid.guidItem = (ctypes.c_ubyte * 16)(*_TRAY_GUID)
         _shell32.Shell_NotifyIconW(_NIM_DELETE, ctypes.byref(del_nid))
 
-        # 构建 NOTIFYICONDATA（Vista+ 大小 968，使用 uID 标识）
+        # 构建 NOTIFYICONDATA（Vista+ 大小 968，GUID + uID 双重标识）
         nid = _NOTIFYICONDATAW()
         nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
         nid.hWnd = ctypes.wintypes.HWND(self._tray_hwnd)
         nid.uID = 1
-        nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP | _NIF_SHOWTIP
+        nid.uFlags = _TRAY_BASE_FLAGS
+        nid.guidItem = (ctypes.c_ubyte * 16)(*_TRAY_GUID)
         nid.uCallbackMessage = _WM_TRAYICON
         nid.hIcon = ctypes.wintypes.HICON(self._tray_hicon) if self._tray_hicon else None
         nid.szTip = "多Agent记忆融合器"
@@ -2354,15 +2385,16 @@ class SyncMainWindow:
         if self._tray_nid is not None and self._tray_hwnd:
             try:
                 # 复用缓存的 nid，保留 uCallbackMessage 和 hIcon 字段
+                # v2.2.3: 必须带 _NIF_GUID，否则 Windows 认不出以 GUID 注册的图标
                 nid = self._tray_nid
-                nid.uFlags = _NIF_INFO
+                nid.uFlags = _NIF_INFO | _NIF_GUID
                 nid.szInfoTitle = title[:63]
                 nid.szInfo = body[:255]
                 nid.dwInfoFlags = _NIIF_INFO
                 nid.uTimeout = 2000  # 2 秒（Vista+ 系统可能忽略，但设置无害）
                 ok = _shell32.Shell_NotifyIconW(_NIM_MODIFY, ctypes.byref(nid))
-                # 重置 uFlags，避免影响后续操作
-                nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP | _NIF_SHOWTIP
+                # 重置 uFlags，避免影响后续操作（同样要保留 _NIF_GUID）
+                nid.uFlags = _TRAY_BASE_FLAGS
                 if ok:
                     return
             except Exception:
@@ -3139,7 +3171,7 @@ def main():
 
     # 启动诊断日志（文件可能被锁定，不能因此崩溃）
     _diag_lines = [
-        "APP STARTING v2.2.1\n",
+        f"APP STARTING v{__version__}\n",
         f"  _safe_home() = {_home}\n",
         f"  _data_dir() = {_data_dir()}\n",
         f"  _original_home() = {_original_home()}\n",

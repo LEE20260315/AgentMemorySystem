@@ -10,6 +10,7 @@ build/
 AgentMemorySync.exe
 AgentMemorySync/
 AgentMemorySync-*/
+AgentMemorySync_*/
 AgentMemorySync.old_*/
 *.current.txt
 *.bak_polluted*

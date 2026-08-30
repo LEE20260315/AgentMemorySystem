@@ -1,8 +1,10 @@
 """Safe file I/O utilities with retry and atomic write support."""
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -578,7 +580,278 @@ def _safe_read_text(path, default: str = "", encoding: str = "utf-8", max_size: 
 
 
 # ---------------------------------------------------------------------------
+# 跨进程互斥锁（v2.3.0，根治读-改-写丢更新）
+# ---------------------------------------------------------------------------
+#
+# 旧实现（agent_memory.FileLock）是「锁文件存在性」锁，有四个致命缺陷：
+#   1. 拿不到锁**立刻抛异常**，不等待 —— 调用方的 except 分支会降级成
+#      「不加锁直接原子写」，把别的进程刚写进去的内容整个覆盖掉。
+#      这才是真正丢数据的路径：不是没锁，是锁失败后 fail-open。
+#   2. 锁文件建在**数据根**（OneDrive 同步目录）里 —— 会被同步到另一台机器，
+#      对端看到一个「30 秒前创建的锁」就拒绝写入，同样走 fail-open 分支。
+#   3. 30 秒陈旧判定用 unlink 清理 —— 两个进程可同时判定陈旧、同时 unlink、
+#      同时建锁，于是两个进程一起进了临界区（TOCTOU）。
+#   4. 进程崩溃留下陈旧锁文件，最长 30 秒内所有写入都失败。
+#
+# 新实现的四个关键点：
+#   1. **OS 级锁**：Windows 用 msvcrt.locking（LockFile），POSIX 用 fcntl.flock。
+#      进程被杀/崩溃时 OS 自动释放，不需要陈旧判定，也没有 TOCTOU。
+#   2. **锁文件绝不落在数据根**：按目标路径的 sha1 哈希放到
+#      %LOCALAPPDATA%/AgentMemorySystem/locks/，本机互斥，不会被 OneDrive 同步。
+#      （跨机本来就锁不了，那是 .pending + merge 的职责。）
+#   3. **等待而非立即失败**：带超时的重试循环，拿不到才抛 LockTimeout。
+#   4. **同进程可重入**：按线程记录深度，避免自己把自己锁死。
+# ---------------------------------------------------------------------------
+
+class LockTimeout(Exception):
+    """在超时时间内没能拿到跨进程锁。"""
+
+
+# 平台相关的底层锁原语
+if os.name == "nt":
+    import msvcrt
+
+    #
+    # 为什么不用「锁文件 + msvcrt.locking」：
+    # 实测（8 线程并发）两种失败都会出现，而且第二种会让人误以为代码没走重试：
+    #   1. msvcrt.locking(...) 报 EACCES —— 别人持有字节区间锁；
+    #   2. **os.open() 本身就报 EACCES** —— Windows 的 LockFile 是强制锁，
+    #      区间被锁期间，别的句柄连文件都打不开（不只是加不了锁）。
+    # 于是并发争用会以「打开文件失败」的形式冒出来，语义很别扭。
+    #
+    # 改用**命名互斥量**（CreateMutexW）：跨进程、进程崩溃由内核自动释放、
+    # 同线程可递归获取、等待带超时，一次 WaitForSingleObject 就够，不需要轮询。
+    import ctypes
+    from ctypes import wintypes
+
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    _k32.CreateMutexW.restype = wintypes.HANDLE
+    _k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _k32.WaitForSingleObject.restype = wintypes.DWORD
+    _k32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    _k32.ReleaseMutex.restype = wintypes.BOOL
+    _k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _k32.CloseHandle.restype = wintypes.BOOL
+
+    _WAIT_OBJECT_0 = 0x00000000
+    _WAIT_ABANDONED = 0x00000080
+    _WAIT_TIMEOUT = 0x00000102
+
+    def _os_acquire(name: str, timeout: float):
+        """获取命名互斥量。成功返回 handle，失败（超时/出错）返回 None。
+
+        WAIT_ABANDONED 视为成功：上一个持有者进程崩了，内核已把所有权交给我们，
+        这正是「进程崩溃不留陈旧锁」的保障；数据一致性由 _safe_write_text
+        的原子写保证，不依赖锁的持有者是否干净退出。
+        """
+        handle = _k32.CreateMutexW(None, False, name)
+        if not handle:
+            return None
+        ms = int(max(0.0, float(timeout)) * 1000)
+        rc = _k32.WaitForSingleObject(handle, ms)
+        if rc in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+            return handle
+        _k32.CloseHandle(handle)
+        return None
+
+    def _os_release(handle) -> None:
+        try:
+            _k32.ReleaseMutex(handle)
+        finally:
+            _k32.CloseHandle(handle)
+else:
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - 非 POSIX/Windows 的极端情况
+        fcntl = None
+
+    def _os_acquire(name: str, timeout: float):
+        """POSIX：flock 独占锁（轮询等待，带超时）。"""
+        if fcntl is None:
+            return True  # 无锁能力：退化为不加锁（至少不崩）
+        path = _get_locks_dir() / (name.rsplit("\\", 1)[-1] + ".lock")
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            return None
+        deadline = time.time() + timeout
+        delay = 0.02
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except OSError:
+                if time.time() >= deadline:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    return None
+                time.sleep(delay)
+                delay = min(delay * 1.5, 0.25)
+
+    def _os_release(handle) -> None:
+        if fcntl is None or handle is True or handle is None:
+            return
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(handle)
+        except OSError:
+            pass
+
+
+_thread_state = threading.local()  # 每线程持有 (深度, fd)，保证可重入
+_locks_dir: Optional[Path] = None
+_locks_cleaned = False
+
+
+def _get_locks_dir() -> Path:
+    """本机锁目录（LOCALAPPDATA，绝不在 OneDrive 数据根里）。"""
+    global _locks_dir
+    if _locks_dir is None:
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        d = Path(base) / "AgentMemorySystem" / "locks"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        _locks_dir = d
+    return _locks_dir
+
+
+def _lock_key_for(target) -> str:
+    """把任意目标路径（或调用方传入的 lock 路径）映射成本机唯一的锁标识。
+
+    传入的 path 只当作**身份令牌**使用：不再在它所在目录创建任何文件，
+    因此数据根（OneDrive）里不会再出现 .lock 同步文件。
+
+    Windows 上返回互斥量名（``Local\\`` 前缀限定在当前登录会话，避免
+    跨会话互相干扰，也不需要管理员权限）；POSIX 上返回锁文件名。
+    """
+    raw = os.path.abspath(str(target)).lower()
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:32]
+    base = Path(raw).name
+    # 互斥量名不能含反斜杠；只保留安全字符
+    safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in base)[:24]
+    return "Local\\AgentMemorySync-{}-{}".format(safe, digest)
+
+
+def _sweep_stale_lock_files(max_age_days: int = 7) -> None:
+    """清理长期未用的锁文件（每个进程只跑一次，尽力而为）。
+
+    仅 POSIX 需要：Windows 走命名互斥量，不落地任何锁文件。
+    """
+    if os.name == "nt":
+        return
+    try:
+        cutoff = time.time() - max_age_days * 86400
+        for p in _get_locks_dir().glob("*.lock"):
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+class CrossProcessLock:
+    """跨进程互斥锁（上下文管理器）。
+
+    用法::
+
+        with CrossProcessLock(target_path):
+            current = safe_read_text(target_path)
+            safe_write_text(target_path, current + addition)
+
+    参数
+    ----
+    target : 目标文件路径，或调用方传入的 lock 路径（只作身份令牌）
+    timeout : 最长等待秒数，超时抛 LockTimeout
+    poll : 重试间隔秒数
+    """
+
+    def __init__(self, target, timeout: float = 30.0, poll: float = 0.05):
+        self.key = _lock_key_for(target)
+        self.timeout = float(timeout)
+        self.poll = float(poll)  # 仅 POSIX 轮询分支使用
+        self._handle = None
+        self._acquired = False
+
+    def __enter__(self):
+        global _locks_cleaned
+        if not _locks_cleaned:
+            _locks_cleaned = True
+            _sweep_stale_lock_files()
+
+        held = getattr(_thread_state, "held", None)
+        if held is None:
+            held = {}
+            _thread_state.held = held
+        if self.key in held:
+            # 同线程重入：只加深，不重复向 OS 申请（Windows 互斥量本身可
+            # 递归，POSIX flock 不行，统一用深度计数保证语义一致）
+            depth, handle = held[self.key]
+            held[self.key] = (depth + 1, handle)
+            return self
+
+        self._handle = _os_acquire(self.key, self.timeout)
+        if self._handle is None:
+            raise LockTimeout(
+                "等待 {} 秒仍未拿到锁: {}".format(self.timeout, self.key))
+
+        self._acquired = True
+        held[self.key] = (1, self._handle)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        held = getattr(_thread_state, "held", None)
+        handle = self._handle
+        if held and self.key in held:
+            depth, _h = held[self.key]
+            if depth > 1:
+                held[self.key] = (depth - 1, _h)
+                return False  # 仍在更外层的作用域里，不释放
+            del held[self.key]
+        if self._acquired:
+            self._acquired = False
+            self._handle = None
+            if handle is not None:
+                _os_release(handle)
+        return False
+
+
+def locked_update(target, mutator, default: str = "", timeout: float = 30.0):
+    """在锁内完成「读 -> 改 -> 写」，杜绝丢失更新。
+
+    这是本模块推荐的读改写入口：**读取发生在锁内**，调用方不可能把
+    「先读、再加锁、再写」的顺序写错（旧代码正是这么错的）。
+    ``mutator`` 收到当前文件内容，返回新内容；返回 None 表示放弃写入。
+
+    Returns
+    -------
+    str or None
+        写入后的新内容；放弃写入时为 None。
+    """
+    target = Path(target)
+    with CrossProcessLock(target, timeout=timeout):
+        current = _safe_read_text(target, default=default)
+        new_content = mutator(current)
+        if new_content is None:
+            return None
+        if _safe_write_text(target, new_content):
+            return new_content
+        return None
+
+
+# ---------------------------------------------------------------------------
 # 公共 API 别名（v2.2.2）：模块内一律通过别名调用，杜绝新的 in-place 写入
 # ---------------------------------------------------------------------------
 safe_write_text = _safe_write_text
 safe_read_text = _safe_read_text
+safe_lock = CrossProcessLock
+safe_locked_update = locked_update
