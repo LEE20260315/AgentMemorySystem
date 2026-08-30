@@ -2,6 +2,15 @@
 
 > 本文件記錄 AgentMemorySystem 未來可能改進的方向，按優先級排序。
 
+## 已完成（v2.4.0，2026-08-31）
+
+- [x] **融合報告保真**：統計只累加第一階段 `inserted`（第二階段回流不再計入「新增共享」）；報告改為「新增 / 更新」分列，無新增時明確提示
+- [x] **replace churn 根治**：`_resolve_conflict` 前置判定「歸一化內容相同即無變化」（僅置信度更高才改寫）；實測副本回放三輪 synced 由 55 → 0
+- [x] **融合去重兜底**：新增 `_normalize_memory_content`（只消除 CRLF/行尾空白/連續空行）與內容索引，解決同一記憶兩側 id 不同導致漏判
+- [x] **`get_memory()` 寫副作用移除**：新增 `track_access` 參數，融合比對不再累加 `access_count`（該值曾污染到 755 且每輪 +6，現凍結）
+- [x] **Agent 重複登記修復**：新增 `_is_path_related()`，父子目錄不再被當成兩個 Agent（`.trae-cn` vs `.trae-cn\memory`）
+- [x] **`--dry-run` 真正只讀**：提取、融合、墓碑清理全部納入 dry_run 保護（舊版照常寫庫）
+
 ## 已完成（v2.3.0，2026-08-30）
 
 - [x] **墓碑機制（P1-3）**：新增 `tombstones.py`，墓碑庫存數據根 `.tombstones.json`（OneDrive 同步跨設備生效）；reconcile 正常模式 vanish 記墓碑（保守模式/24h 寬限期/批量 vanish>50 三重防誤殺）；寫回、memory_shared.md 重建、DB 融合三處復活路徑全過濾；融合後寫回前 purge shared.db 命中行（FTS 同步清理，分塊 500 免疫 SQLite 變量上限）；失敗不阻斷主流程且如實返回 0；`refresh()` 每輪重讀盤保 GUI 常駐進程跨設備可見
@@ -65,6 +74,15 @@
 - 當前 `_enforce_write_volume_limit` 按 front matter 邊界截斷舊內容，可能丟失重要歷史條目
 - 考慮基於 priority/confidence 的智能保留策略（低優先級先截斷）
 - 加入壓縮歸檔機制：超限內容壓縮後歸檔至 cold tier，而非直接刪除
+- **（v2.4.0 實測）`memory_shared.md` 靜默截斷，優先處理**：`_shared/volume_policy.json`
+  限制 128KB / `truncate_oldest`，實測各檔已頂格（122~132KB），**只裝得下最新 51~55 條**，
+  而庫中有 127~134 條 —— 舊記憶雖在 shared.db，卻永遠進不了 Agent 實際讀取的 md 檔，
+  且日誌只說「重建完成，51 條」，不提示丟了多少。最小改動：截斷時打 WARN + 報告丟棄條數
+- **（v2.4.0 實測）`_resolve_conflict` 從不返回 `"merge"`**，該分支（`agent_memory.py`
+  merge 分支）為死代碼，需確認當初設計意圖後決定補齊或移除
+- **（v2.4.0 實測）`create_merger()` 未傳 `embedding_service`**，向量相似度去重檔位
+  永不生效，去重仍只依賴「id 全等 / content 全等 / 歸一化全等」三檔，語義相近但
+  措辭不同的記憶仍會重複入庫
 
 ## 中優先級
 

@@ -5,6 +5,82 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.4.0] - 2026-08-31
+
+本轮主题：**同步报告的保真度**。不新增功能，只修"系统说的话与它做的事不一致"。
+
+### Fixed（融合报告虚报「新增共享」，实测新增为 0）
+
+- **现象**：稳态下每轮同步恒定报告「融合: 55 条新增共享」，而实际上
+  shared.db 行数、id 集合、timestamp **三轮零变化**——新增数为 0。
+- **根因一（统计口径）**：`run()` 把 `full_sync()` 返回的**全部 14 个结果**
+  （7 个 `*_to_shared` + 7 个 `shared_to_*`）的 `synced` 一并累加进
+  `total_merged`，且不区分 insert 与 replace。改后只统计第一阶段
+  （Agent → 共享库）的 `inserted`，第二阶段的回流不再计入"新增共享"。
+- **根因二（replace churn）**：`_resolve_conflict` 对同一批行每轮都判定
+  `replace`（delete + insert 同一条，净效果为零）。两个来源：
+  - `timestamp newer`（20 次）：同一内容在两侧登记为**不同 id**
+    （如 `mem_20260702_extra` vs `mem_20260629_extra`），id 精确匹配落空后
+    退回 content 匹配，命中的却是"另一条"同内容记录，被当成更新。
+    → 新增 **内容归一化兜底**（`_normalize_memory_content`，只消除 CRLF/
+    行尾空白/连续空行，不做大小写折叠以免误合并），并在
+    `_resolve_conflict` 前置判定：**归一化内容相同即视为无变化**，
+    仅当新版本置信度更高才改写。
+  - `access_count more`（35 次）：**`get_memory()` 有写副作用**——每次查询
+    都 `access_count + 1`，而它正是 `_resolve_conflict` 的最后一条判定依据，
+    形成"读操作驱动写决策"的循环。
+    → `get_memory()` 新增 `track_access` 参数（默认 `True` 保持业务语义），
+    融合比对路径统一传 `False`。
+
+### Fixed（`get_memory` 副作用污染 access_count）
+
+- `access_count` 本意是"记忆热度"，实际变成"被融合引擎查询的次数"，
+  已膨胀到 **755** 且每轮再 +6。修复后该值冻结（实测三轮均为 755）。
+
+### Fixed（Agent 重复登记）
+
+- `C:\Users\Dong\.trae-cn\memory`（profile 命中 → `trae`）与
+  `C:\Users\Dong\.trae-cn`（通用发现 → `generic-.trae-cn`）被当成两个 Agent，
+  同一份记忆扫描两遍、写回两遍，且 `generic-.trae-cn` 没有独立 memories.db
+  （不参与融合，属"半残"登记）。
+- 新增 `_is_path_related()`：候选路径与已登记路径**存在父子目录关系**即判重复；
+  已登记的更具体时跳过其祖先，反之跳过其后代。
+
+### Fixed（`--dry-run` 不保护融合阶段）
+
+- 旧实现只有写回 / 体积控制 / purge / FTS 判断 `dry_run`，**提取与融合照常
+  执行并真实写库**（shared.db + `agent_*/memories.db`），所谓"试运行"一直在
+  污染数据。现提取、融合、墓碑清理全部纳入 dry-run 保护。
+- ⚠️ 需要验证融合效果时，请改用**复制 DB 到临时目录再回放**的办法。
+
+### Changed（报告口径）
+
+- 同步报告 `融合` 行改为 `融合: X 条新增共享, Y 条更新`。
+- 新增一行提示：当 `新增=0 且 更新>0` 时明确说明"本次无新增，N 条为既有
+  记忆的覆盖更新"，避免再被数字误导。
+- `MemoryMerger.sync_agent_to_shared` 的返回值新增 `inserted` / `updated`
+  两个细分项；`synced` 保留为两者之和，兼容既有调用方。
+
+### 已知问题（v2.4.0 未处理，下轮评估）
+
+1. **`memory_shared.md` 静默截断**：`_shared/volume_policy.json` 限制
+   128KB / `truncate_oldest`，实测只装得下最新 51~55 条，而库中有 127~134 条。
+   **旧记忆虽然在 shared.db 里，却永远不会出现在 Agent 能读到的 md 文件中**，
+   且日志不提示丢弃数量。
+2. **`_resolve_conflict` 从不返回 `"merge"`**，该分支为死代码。
+3. **`create_merger()` 未传 `embedding_service`**，向量相似度去重档位永不生效，
+   去重仍只依赖"id 全等 / content 全等 / 归一化全等"三档。
+4. `access_count` 历史积累的 755 等虚高值未清理（已停止增长，不影响功能）。
+
+### 升级注意事项
+
+- **无需数据迁移**，schema 未变更。
+- 升级后**首轮同步的「新增」可能比往常低**——这是修复后的真值，不是漏同步。
+- 若升级后报告仍出现「更新」持续非 0，说明还有 replace churn 未被覆盖，
+  可用「复制 DB 到临时目录回放三轮」的方式复现（三轮结果应完全一致）。
+
+---
+
 ## [v2.3.0] - 2026-08-30
 
 ### Added（墓碑机制：防已删记忆跨设备复活，P1-3）
