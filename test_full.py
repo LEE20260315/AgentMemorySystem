@@ -1213,23 +1213,67 @@ def test_safe_read_text_memory_error():
 # ---------------------------------------------------------------------------
 
 def test_get_local_data_dir_under_localappdata():
-    """本机私有目录应在 LOCALAPPDATA 下，不在 OneDrive 数据根。"""
-    import os
-    from safe_io import get_local_data_dir, get_data_root
-    local = get_local_data_dir()
-    assert local.is_dir()
-    assert "AgentMemorySystem" in str(local)
-    root = str(get_data_root()).lower()
-    assert str(local).lower() != root
+    """本机私有目录应在 LOCALAPPDATA 下，不在数据根。
+
+    hermetic：用临时 LOCALAPPDATA + 显式数据根 env 复现部署形态。
+    全新机器上无注册文件/OneDrive 时数据根兜底到 LOCALAPPDATA\\AgentMemorySystem，
+    与本地目录重合（设计如此），不注入 env 本断言必然失败（此前 CI runner 即是）。
+    """
+    from safe_io import get_local_data_dir, get_data_root, reset_data_root_cache
+    old_la = os.environ.get("LOCALAPPDATA")
+    old_root = os.environ.get("AGENT_MEMORY_DATA_DIR")
+    tmp_la = Path(tempfile.mkdtemp())
+    tmp_root = Path(tempfile.mkdtemp())
+    try:
+        os.environ["LOCALAPPDATA"] = str(tmp_la)
+        os.environ["AGENT_MEMORY_DATA_DIR"] = str(tmp_root)
+        reset_data_root_cache()
+        local = get_local_data_dir()
+        assert local.is_dir()
+        assert "AgentMemorySystem" in str(local)
+        root = str(get_data_root()).lower()
+        assert str(local).lower() != root
+    finally:
+        if old_la is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = old_la
+        if old_root is None:
+            os.environ.pop("AGENT_MEMORY_DATA_DIR", None)
+        else:
+            os.environ["AGENT_MEMORY_DATA_DIR"] = old_root
+        reset_data_root_cache()
+        shutil.rmtree(tmp_la, ignore_errors=True)
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def test_get_shared_db_path_not_in_data_root():
-    """shared.db 本机化：不再位于 OneDrive 数据根。"""
+    """shared.db 本机化：不再位于 OneDrive 数据根（hermetic，env 注入同上）。"""
     from agent_memory import get_shared_db_path
-    from safe_io import get_data_root
-    p = get_shared_db_path()
-    assert p.name == "shared.db"
-    assert str(p).lower() != str(get_data_root() / "shared.db").lower()
+    from safe_io import get_data_root, reset_data_root_cache
+    old_la = os.environ.get("LOCALAPPDATA")
+    old_root = os.environ.get("AGENT_MEMORY_DATA_DIR")
+    tmp_la = Path(tempfile.mkdtemp())
+    tmp_root = Path(tempfile.mkdtemp())
+    try:
+        os.environ["LOCALAPPDATA"] = str(tmp_la)
+        os.environ["AGENT_MEMORY_DATA_DIR"] = str(tmp_root)
+        reset_data_root_cache()
+        p = get_shared_db_path()
+        assert p.name == "shared.db"
+        assert str(p).lower() != str(get_data_root() / "shared.db").lower()
+    finally:
+        if old_la is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = old_la
+        if old_root is None:
+            os.environ.pop("AGENT_MEMORY_DATA_DIR", None)
+        else:
+            os.environ["AGENT_MEMORY_DATA_DIR"] = old_root
+        reset_data_root_cache()
+        shutil.rmtree(tmp_la, ignore_errors=True)
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def test_rebuild_shared_cache_from_md():
@@ -1609,12 +1653,19 @@ def test_log_manager_fallback_on_bad_dir():
 
 
 def test_log_manager_defaults_to_local_logs():
-    """LogManager 默认日志目录在本机 LOCALAPPDATA（而非 OneDrive 数据根）"""
+    """LogManager 默认日志目录在本机 LOCALAPPDATA（而非数据根）——hermetic"""
     r.set_module("agent_memory")
 
     from agent_memory import LogManager
-    from safe_io import get_data_root
+    from safe_io import get_data_root, reset_data_root_cache
+    old_la = os.environ.get("LOCALAPPDATA")
+    old_root = os.environ.get("AGENT_MEMORY_DATA_DIR")
+    tmp_la = Path(tempfile.mkdtemp())
+    tmp_root = Path(tempfile.mkdtemp())
     try:
+        os.environ["LOCALAPPDATA"] = str(tmp_la)
+        os.environ["AGENT_MEMORY_DATA_DIR"] = str(tmp_root)
+        reset_data_root_cache()
         lm = LogManager()
         r.assert_true("log_dir resolved", lm.log_dir is not None)
         r.assert_true("file handler attached", lm.file_handler is not None)
@@ -1624,6 +1675,18 @@ def test_log_manager_defaults_to_local_logs():
         r.assert_true("logs not under data root", data_root not in local_dir)
     except Exception as e:
         r.fail("LogManager default dir", str(e))
+    finally:
+        if old_la is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = old_la
+        if old_root is None:
+            os.environ.pop("AGENT_MEMORY_DATA_DIR", None)
+        else:
+            os.environ["AGENT_MEMORY_DATA_DIR"] = old_root
+        reset_data_root_cache()
+        shutil.rmtree(tmp_la, ignore_errors=True)
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def test_get_logger_never_raises():
