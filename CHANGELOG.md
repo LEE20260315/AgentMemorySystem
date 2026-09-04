@@ -35,6 +35,12 @@
 - **CI 门禁平台修正**：测试套件为 Windows 优先（原生托盘 / 命名互斥量 / Windows 路径语义），
   ubuntu 上有 5 条平台相关用例必然失败，导致 CI 自建立以来全红、门禁形同虚设；
   改为 windows-latest 门禁（Python 3.10/3.11/3.12）+ ubuntu 观察项（`continue-on-error` 不阻断）
+- **分离性测试封闭化**：`test_get_local_data_dir_under_localappdata` 等 3 条用例此前依赖
+  开发机已装状态（有注册文件/OneDrive 时数据根与本地目录分离）；全新机器上数据根
+  兜底到 `LOCALAPPDATA\AgentMemorySystem` 与本地目录重合（设计如此），断言必然失败、
+  以空消息 `UNHANDLED` 呈现。改为临时 LOCALAPPDATA + 显式 `AGENT_MEMORY_DATA_DIR`
+  env 复现部署形态，断言的分离不变量原样保留。**至此 CI 门禁（Windows × 3.10/3.11/3.12）
+  自建立以来首次全绿**（Linux 观察项继续反映平台差异，不阻断）
 - CI 依赖与 `requirements.txt` 对齐：移除 v2.0 起已不需要的 `pystray`，补上真正必需的 `pyyaml`
 - 补交 `tools/__init__.py`：v2.1.2 起 tools 即为正式包且被 `agent_memory.py` /
   `sync_engine.py` / `test_full.py` 静态导入，但该文件从未提交进仓库
