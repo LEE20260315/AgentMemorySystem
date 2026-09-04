@@ -28,6 +28,10 @@
   时间戳硬编码 `2026-08-17`，叠加 24h TTL，自 2026-08-18 起必然失败，长期被误记为
   「历史失败」并随多个版本带过；改为动态生成时间戳（场景 1 陈旧 / 场景 2 新鲜），
   全量测试恢复 **324/324 全绿**
+- **修复 Windows 管道输出的中文编码崩溃**：stdout 为管道时 Python 回落 ANSI 代码页
+  （cp1252），`test_full.py` 打印中文标题直接 `UnicodeEncodeError`（GitHub Actions
+  Windows runner 实测如此）；测试脚本启动时对 stdout/stderr 强制 UTF-8 + 容错，
+  CI 侧同时设 `PYTHONUTF8=1` 双保险
 - **CI 门禁平台修正**：测试套件为 Windows 优先（原生托盘 / 命名互斥量 / Windows 路径语义），
   ubuntu 上有 5 条平台相关用例必然失败，导致 CI 自建立以来全红、门禁形同虚设；
   改为 windows-latest 门禁（Python 3.10/3.11/3.12）+ ubuntu 观察项（`continue-on-error` 不阻断）

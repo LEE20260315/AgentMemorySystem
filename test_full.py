@@ -30,6 +30,12 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# 管道/重定向输出时 Windows 默认用 ANSI 代码页（cp1252 等），打印中文会直接
+# UnicodeEncodeError（GitHub Actions runner 实测如此）。强制 UTF-8 并容错。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 class TestRunner:
     """测试运行器"""

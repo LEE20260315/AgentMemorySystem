@@ -38,7 +38,10 @@ jobs:
 
       - name: Run test suite
         # test_full.py 在失败时以退出码 1 结束，使本步骤失败
+        # PYTHONUTF8：runner 管道输出默认 ANSI 代码页，打印中文会 UnicodeEncodeError
         run: python test_full.py
+        env:
+          PYTHONUTF8: "1"
 
   probe-linux:
     name: Cross-platform probe (Linux, non-blocking)
