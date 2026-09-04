@@ -21,7 +21,7 @@ from __future__ import annotations
 # v2.2.3: 版本号单点定义——此前启动诊断日志里是硬编码字符串 "v2.2.1"，
 # 与 pyproject / CHANGELOG 各自漂移。改动版本只改这里和 pyproject.toml。
 # 注意：必须放在 from __future__ 之后（__future__ 导入须紧随文档字符串）。
-__version__ = "2.3.0"
+__version__ = "2.4.1"
 
 import atexit
 import ctypes
@@ -35,6 +35,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
@@ -157,9 +158,37 @@ if sys.platform == "win32":
     _TRAY_CLASS_NAME = "AgentMemorySyncTray"
     _HWND_MESSAGE = ctypes.wintypes.HWND(-3)  # 消息专用窗口父句柄
     _APP_USER_MODEL_ID = "AgentMemorySync"
-    # 固定 GUID 用于托盘图标识别（Win11 推荐用 GUID 而非 uID）
-    _TRAY_GUID = bytes([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-                        0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0])
+    def _load_or_create_tray_guid() -> bytes:
+        """读取或生成本机托盘 GUID（15/16 字节，Win11 托盘图标身份）。
+
+        v2.4.1: 旧版本用硬编码 GUID，同一台机器上若有多份安装（开发目录 +
+        LOCALAPPDATA 运行副本）会共用同一身份，Win11 的「是否显示在任务栏」
+        偏好相互打架，表现为托盘图标时有时无。改为每机持久化一份随机 GUID，
+        各安装副本仍共用本机同一身份（同一台机器、同一个图标），但与别台机器
+        不再撞车。读取/写入失败一律回退到内置固定 GUID，绝不因 GUID 问题
+        导致托盘不可用。
+        """
+        try:
+            local_dir = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) \
+                / "AgentMemorySystem"
+            guid_file = local_dir / "tray_guid"
+            if guid_file.is_file():
+                raw = guid_file.read_bytes()
+                if len(raw) == 16:
+                    return raw
+            new_guid = uuid.uuid4().bytes_le
+            try:
+                local_dir.mkdir(parents=True, exist_ok=True)
+                guid_file.write_bytes(new_guid)
+            except Exception:
+                pass
+            return new_guid
+        except Exception:
+            return bytes([18, 52, 86, 120, 154, 188, 222, 240,
+                          18, 52, 86, 120, 154, 188, 222, 240])
+
+    # 托盘图标识别 GUID（Win11 推荐用 GUID 而非 uID）
+    _TRAY_GUID = _load_or_create_tray_guid()
     # v2.2.3 托盘标志位基线：必须带 _NIF_GUID。
     #
     # 不设 _NIF_GUID 时，Windows 改用「EXE 路径」标识托盘图标，并把用户
@@ -1241,6 +1270,8 @@ class SyncMainWindow:
         # （若启用 auto_start，启动同步完成后会刷新该值）
         self._last_sync_time = time.time()
         self._tray_ignore_until = 0.0
+        # v2.4.1: 托盘注册自愈重试计数（每次用户主动最小化时重置）
+        self._tray_retry_tries = 0
 
         apply_modern_style(self.root)
         self._build_ui()
@@ -2021,8 +2052,124 @@ class SyncMainWindow:
         except Exception:
             self._log("设置已保存")
 
+    def _finish_minimize_to_tray(self):
+        """托盘已就绪：隐藏主窗口并入托（成功路径与自愈路径共用）。"""
+        # 托盘创建成功后再隐藏主窗口；失败时保留窗口，避免"程序不见了"的错觉
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        self._log("已最小化到托盘")
+        try:
+            self._notify("AgentMemorySync", "I'm here")
+            notify_status = "notify=OK"
+        except Exception as e:
+            notify_status = "notify_fail={}".format(e)
+
+        _write_diag(
+            "OK: tray created\n"
+            "  hwnd={} hicon={} nid={}\n"
+            "  {}\n"
+            "  提示: Win11 托盘图标可能在溢出区(^箭头)，可拖到任务栏可见区域\n".format(
+                self._tray_hwnd, self._tray_hicon, self._tray_nid is not None,
+                notify_status))
+
+    def _show_tray_failed_ui(self):
+        """自动重试耗尽，弹出提示并保持窗口（原失败告知逻辑）。"""
+        try:
+            onedrive = _is_onedrive_path(Path(sys.executable))
+        except Exception:
+            onedrive = False
+        # 托盘失败时不隐藏窗口，让用户能继续操作。
+        # v2.2.1: 先弹提示框（用户反馈），通知放最后且自带超时——
+        # 失败路径绝不执行任何可能阻塞主线程的调用。
+        try:
+            exe = str(Path(sys.executable))
+            if onedrive:
+                reason = (
+                    "当前 EXE 位于 OneDrive 目录（{}），系统限制了托盘 API。".format(exe))
+                solutions = (
+                    "1. 使用 AgentMemorySync.bat 启动"
+                    "（会自动复制到本地临时目录再运行）\n"
+                    "2. 手动复制整个 AgentMemorySync/ 目录到本地非 OneDrive 位置\n"
+                    "3. 从该本地目录双击 AgentMemorySync.exe 启动")
+            else:
+                reason = (
+                    "托盘图标注册失败（Shell_NotifyIconW 返回 E_FAIL / 0x80004005），"
+                    "通常是系统通知区域暂时不可用。"
+                    "本程序已自动重试 30 次（每 1 秒），仍失败。\n"
+                    "当前 EXE 已在本地（{}），与 OneDrive 无关。".format(exe))
+                solutions = (
+                    "1. 重启资源管理器（任务管理器→ 重启 explorer.exe 或注销重登）\n"
+                    "2. 稍后再次最小化（本程序会自动重试托盘注册）\n"
+                    "3. 确认任务栏 / 通知区域可见")
+            msg = (
+                "系统托盘图标创建失败，窗口保持显示。\n\n"
+                "可能原因：{}\n\n"
+                "解决方案（任选其一）：\n"
+                "{}\n\n"
+                "如果仍有问题，请检查\n"
+                "%LOCALAPPDATA%\\AgentMemorySystem\\tray_error.log\n"
+                "并把内容反馈给我。".format(reason, solutions))
+            messagebox.showwarning("托盘图标未创建", msg)
+        except Exception:
+            pass
+        try:
+            self._notify("AgentMemorySync",
+                         "托盘图标创建失败，窗口保持显示。请查看 tray_error.log")
+        except Exception:
+            pass
+        _write_diag("WARN: tray icon unavailable, window stays visible\n")
+
+    def _retry_tray_add(self, max_tries: int = 30):
+        """托盘注册失败后自愈：每 1s 复用现有 hwnd/hIcon 重新 add，直到成功或超限。
+
+        v2.4.1: Win11 通知区域偶尔 E_FAIL 属于临时状态，稍后能恢复。
+        失败后不再立即弹窗，而是转入后台持续重试；成功后自动隐藏主窗口。
+        """
+        if self._tray_nid is not None:
+            self._finish_minimize_to_tray()
+            return
+        tries = self._tray_retry_tries + 1
+        self._tray_retry_tries = tries
+        if tries > max_tries:
+            self._show_tray_failed_ui()
+            return
+        try:
+            # 消息窗口可能已被回收，重建后再 add
+            if self._tray_hwnd is None:
+                self._tray_hwnd = self._create_message_window()
+                if self._tray_hwnd:
+                    _write_diag("DEBUG: tray retry rebuilt hwnd={}\n".format(
+                        self._tray_hwnd))
+            nid = _NOTIFYICONDATAW()
+            nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
+            nid.hWnd = ctypes.wintypes.HWND(self._tray_hwnd)
+            nid.uID = 1
+            nid.uFlags = _TRAY_BASE_FLAGS
+            nid.guidItem = (ctypes.c_ubyte * 16)(*_TRAY_GUID)
+            nid.uCallbackMessage = _WM_TRAYICON
+            nid.hIcon = (ctypes.wintypes.HICON(self._tray_hicon)
+                         if self._tray_hicon else None)
+            nid.szTip = "多Agent记忆融合器"
+            ok, err = _shell_notify_icon_add(nid, retries=1, delay=0.0)
+            _write_diag("DEBUG: tray retry#{} add={} last_error={} hwnd={}\n".format(
+                tries, ok, err, self._tray_hwnd))
+            if ok:
+                self._tray_nid = nid
+                self._tray_ignore_until = time.time() + 2.0
+                self._log("托盘图标已自动重试注册成功（第{}次）".format(tries))
+                self._pump_tray_messages()
+                self._finish_minimize_to_tray()
+                return
+            if tries % 5 == 0:
+                self._log("托盘注册自愈中（第{}次失败）...".format(tries))
+            self.root.after(1000, self._retry_tray_add, max_tries)
+        except Exception as e:
+            _write_diag("WARN: tray retry exception {!r}\n".format(e))
+
     def _minimize_to_tray(self):
-        """最小化到系统托盘（Windows 原生 API）"""
+        """最小化到系统托盘（Windows 原生 API）；首次失败自动转后台重试。"""
         self._log("正在最小化到系统托盘...")
 
         tray_ok = False
@@ -2032,52 +2179,16 @@ class SyncMainWindow:
             import traceback
             _write_diag("FAIL: tray create error: {}\n{}\n".format(e, traceback.format_exc()))
 
-        # 托盘创建成功后再隐藏主窗口；失败时保留窗口，避免"程序不见了"的错觉
         if tray_ok:
-            try:
-                self.root.withdraw()
-            except Exception:
-                pass
-            self._log("已最小化到托盘")
-            try:
-                self._notify("AgentMemorySync", "I'm here")
-                notify_status = "notify=OK"
-            except Exception as e:
-                notify_status = "notify_fail={}".format(e)
+            self._finish_minimize_to_tray()
+            return
 
-            _write_diag(
-                "OK: tray created\n"
-                "  hwnd={} hicon={} nid={}\n"
-                "  {}\n"
-                "  提示: Win11 托盘图标可能在溢出区(^箭头)，可拖到任务栏可见区域\n".format(
-                    self._tray_hwnd, self._tray_hicon, self._tray_nid is not None,
-                    notify_status))
-
-        else:
-            self._log("托盘图标创建失败，窗口保持显示")
-            # 托盘失败时不隐藏窗口，让用户能继续操作。
-            # v2.2.1: 先弹提示框（用户反馈），通知放最后且自带超时——
-            # 失败路径绝不执行任何可能阻塞主线程的调用。
-            try:
-                msg = (
-                    "系统托盘图标创建失败，窗口保持显示。\n\n"
-                    "可能原因：当前 EXE 位于 OneDrive 目录，系统限制了托盘 API。\n\n"
-                    "解决方案（任选其一）：\n"
-                    "1. 使用 AgentMemorySync.bat 启动（会自动复制到本地临时目录再运行）\n"
-                    "2. 手动复制整个 AgentMemorySync/ 目录到本地非 OneDrive 位置\n"
-                    "3. 从该本地目录双击 AgentMemorySync.exe 启动\n\n"
-                    "如果仍有问题，请检查\n%LOCALAPPDATA%\\AgentMemorySystem\\tray_error.log\n"
-                    "并把内容反馈给我。"
-                )
-                messagebox.showwarning("托盘图标未创建", msg)
-            except Exception:
-                pass
-            try:
-                self._notify("AgentMemorySync",
-                             "托盘图标创建失败，窗口保持显示。请查看 tray_error.log")
-            except Exception:
-                pass
-            _write_diag("WARN: tray icon unavailable, window stays visible\n")
+        self._log("首次托盘注册失败，进入后台自动重试（最多30次，每1秒）")
+        self._tray_retry_tries = 0
+        try:
+            self.root.after(1000, self._retry_tray_add, 30)
+        except Exception:
+            self._show_tray_failed_ui()
 
     def _create_tray_icon(self):
         """用 Windows 原生 Shell_NotifyIconW 创建系统托盘图标

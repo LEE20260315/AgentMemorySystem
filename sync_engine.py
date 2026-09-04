@@ -60,6 +60,10 @@ class SyncReport:
     # 汇总
     total_extracted: int = 0
     total_merged: int = 0
+    # v2.4.0: 融合"更新"条数（replace/merge，内容已存在但被改写）。
+    # 旧版本把它混进 total_merged，导致稳态下恒定报"55 条新增共享"，
+    # 而实际新增为 0 —— 报告彻底失真。
+    total_updated: int = 0
     total_written: int = 0
     total_skipped: int = 0
     errors: list = field(default_factory=list)
@@ -78,10 +82,16 @@ class SyncReport:
             "OneDrive 冲突: {} 个".format(len(self.conflicts_found)),
             "",
             "提取: {} 条".format(self.total_extracted),
-            "融合: {} 条新增共享".format(self.total_merged),
+            "融合: {} 条新增共享, {} 条更新".format(
+                self.total_merged, self.total_updated),
             "写回: {} 条".format(self.total_written),
             "跳过(去重): {} 条".format(self.total_skipped),
         ]
+        # v2.4.0: 稳态下"新增"应为 0；若"更新"持续非 0，说明仍有 replace churn
+        if self.total_merged == 0 and self.total_updated > 0:
+            lines.append("")
+            lines.append("提示: 本次无新增共享记忆，{} 条为既有记忆的覆盖更新".format(
+                self.total_updated))
 
         if self.errors:
             lines.append("")
@@ -139,10 +149,13 @@ class SyncEngine:
         on_progress : Callable[[str], None], optional
             进度回调函数，接收日志消息字符串
         dry_run : bool, optional
-            试运行模式：只打印流程，不实际写回 Agent 文件
-            (提取、融合仍执行以验证流程；写回阶段跳过)
+            试运行模式：v2.4.1 起真正只读——提取、融合、检测缓存、
+            .sync_state.json、墓碑、体积控制全部跳过写入，仅打印流程
         """
         self.config = config or get_config()
+        # v2.4.1: dry_run 必须在构造 SyncState 之前就位，
+        # 否则 SyncState/TombstoneStore 拿不到 dry_run，dry-run 会写盘
+        self.dry_run = dry_run
         # v2.2.1: get_logger() 已保证不抛异常，此处再加一层防御——
         # 日志不可用时同步照常进行（进度消息仍走 on_progress 回调）
         try:
@@ -152,14 +165,13 @@ class SyncEngine:
             self.logger = _logging.getLogger("AgentMemory.null")
             self.logger.addHandler(_logging.NullHandler())
         self.on_progress = on_progress or (lambda msg: None)
-        self.sync_state = SyncState()
+        self.sync_state = SyncState(dry_run=dry_run)
         # P1-3: 墓碑库 —— 防止已删除记忆从共享层复活
         try:
             from tombstones import get_tombstone_store
             self.tombstones = get_tombstone_store()
         except Exception:
             self.tombstones = None
-        self.dry_run = dry_run
 
         # 确定 OneDrive 融合层根目录
         # v2.1.0: 统一数据根解析 —— 与 GUI/SyncState/detect_agents 一致走 get_data_root()
@@ -263,7 +275,9 @@ class SyncEngine:
         try:
             # ① 发现 Agent
             self._emit("正在检测本地 Agent...")
-            detected = detect_agents(self.config, force_redetect=False)
+            # v2.4.1: dry-run 下不写 .detected_agents.json（检测缓存），
+            # 保证 dry-run 真正只读（缓存写入由真实同步轮次完成）
+            detected = detect_agents(self.config, force_redetect=False, write_cache=not self.dry_run)
             # v2.2.0: 统一过滤——detected 中不属于本机真实用户的条目（跨机缓存
             # 污染/环境残留）全部丢弃，防止提取/写回指向他人家目录（WinError 5）。
             # 真实用户用 SHGetKnownFolderPath 按进程 token 查，不受环境变量污染。
@@ -326,79 +340,106 @@ class SyncEngine:
 
             # ③ 提取各 Agent 记忆到融合层
             self._emit("融合层目录: {}".format(self.root))
-            self._emit("开始提取各 Agent 记忆...")
-            registry = AgentRegistry(root=self.root)
-
-            for agent_id, agent_info in detected.items():
-                # 去掉 -appdata 后缀用于融合层目录
-                extract_id = agent_id.replace("-appdata", "")
-                agent_path = Path(agent_info["path"])
-                local_files = agent_info.get("memory_files", [])
-
-                # 如果缓存中没有 memory_files，从路径扫描
-                if not local_files:
-                    from agent_memory import _scan_agent_memory_files
-                    local_files = _scan_agent_memory_files(
-                        agent_id, agent_path
-                    )
-
-                self._emit("提取 {} ({}): {} 个文件".format(
-                    agent_id, agent_path, len(local_files)))
-
-                ext_result = extract_local_to_fused(
-                    agent_id=extract_id,
-                    root=self.root,
-                    local_files=local_files,
-                    registry=registry,
-                )
-                report.extract_results[agent_id] = ext_result
-                report.total_extracted += ext_result.get("extracted", 0)
-
-                self._emit("  提取 {} 条, 跳过 {} 条".format(
-                    ext_result.get("extracted", 0),
-                    ext_result.get("skipped", 0)
-                ))
-
-            # ④ 跨 Agent 融合
-            self._emit("开始跨 Agent 融合...")
-            # v2.2.0: shared.db 为本机缓存，融合前确保可用（迁移/重建）
-            shared_db_path = self._ensure_shared_cache()
-            self._emit("共享数据库(本机缓存): {}".format(shared_db_path))
-            agent_dbs = {}
-            for agent_id in detected:
-                extract_id = agent_id.replace("-appdata", "")
-                db_path = self.root / ("agent_" + extract_id) / "memories.db"
-                if db_path.exists():
-                    agent_dbs[extract_id] = db_path
-                    self._emit("  Agent DB: {} -> {}".format(extract_id, db_path))
-
-            if len(agent_dbs) >= 2:
-                merger = create_merger(
-                    shared_db_path=shared_db_path,
-                    agent_configs=agent_dbs,
-                )
-                merge_results = merger.full_sync()
-                report.merge_results = merge_results
-
-                # 统计融合新增
-                for key, val in merge_results.items():
-                    synced = val.get("synced", 0) if isinstance(val, dict) else 0
-                    report.total_merged += synced
-
-                self._emit("融合完成")
+            # v2.4.0: dry-run 必须真正只读。旧版本只有写回阶段判断 dry_run，
+            # 提取与融合照常执行并真实写库（shared.db + agent_*/memories.db），
+            # 所谓"试运行"其实一直在污染数据。想验证融合请用「复制 DB 到
+            # 临时目录再回放」的办法。
+            shared_db_path = self._shared_db
+            if self.dry_run:
+                self._emit("[DRY-RUN] 跳过提取与融合（不写入融合层 / 共享库）")
             else:
-                self._emit("只有 {} 个 Agent 有数据库，跳过融合".format(len(agent_dbs)))
+                self._emit("开始提取各 Agent 记忆...")
+                registry = AgentRegistry(root=self.root)
+
+                for agent_id, agent_info in detected.items():
+                    # 去掉 -appdata 后缀用于融合层目录
+                    extract_id = agent_id.replace("-appdata", "")
+                    agent_path = Path(agent_info["path"])
+                    local_files = agent_info.get("memory_files", [])
+
+                    # 如果缓存中没有 memory_files，从路径扫描
+                    if not local_files:
+                        from agent_memory import _scan_agent_memory_files
+                        local_files = _scan_agent_memory_files(
+                            agent_id, agent_path
+                        )
+
+                    self._emit("提取 {} ({}): {} 个文件".format(
+                        agent_id, agent_path, len(local_files)))
+
+                    ext_result = extract_local_to_fused(
+                        agent_id=extract_id,
+                        root=self.root,
+                        local_files=local_files,
+                        registry=registry,
+                    )
+                    report.extract_results[agent_id] = ext_result
+                    report.total_extracted += ext_result.get("extracted", 0)
+
+                    self._emit("  提取 {} 条, 跳过 {} 条".format(
+                        ext_result.get("extracted", 0),
+                        ext_result.get("skipped", 0)
+                    ))
+
+                # ④ 跨 Agent 融合
+                self._emit("开始跨 Agent 融合...")
+                # v2.2.0: shared.db 为本机缓存，融合前确保可用（迁移/重建）
+                shared_db_path = self._ensure_shared_cache()
+                self._emit("共享数据库(本机缓存): {}".format(shared_db_path))
+                agent_dbs = {}
+                for agent_id in detected:
+                    extract_id = agent_id.replace("-appdata", "")
+                    db_path = self.root / ("agent_" + extract_id) / "memories.db"
+                    if db_path.exists():
+                        agent_dbs[extract_id] = db_path
+                        self._emit("  Agent DB: {} -> {}".format(extract_id, db_path))
+
+                if len(agent_dbs) >= 2:
+                    merger = create_merger(
+                        shared_db_path=shared_db_path,
+                        agent_configs=agent_dbs,
+                    )
+                    merge_results = merger.full_sync()
+                    report.merge_results = merge_results
+
+                    # v2.4.0: 只统计第一阶段（Agent -> 共享库）的新增/更新。
+                    # 旧版本把 full_sync() 返回的全部 14 个结果（含第二阶段
+                    # "共享库 -> Agent DB" 的回流）的 synced 一并累加进
+                    # total_merged，且不区分 insert 与 replace —— 这是稳态下
+                    # 恒定报出"55 条新增共享"的直接原因，实际新增为 0。
+                    for key, val in merge_results.items():
+                        if not isinstance(val, dict):
+                            continue
+                        if not key.endswith("_to_shared"):
+                            continue
+                        inserted = val.get("inserted")
+                        if inserted is None:  # 兼容未升级的 merger 返回值
+                            inserted = val.get("synced", 0)
+                        report.total_merged += inserted or 0
+                        report.total_updated += val.get("updated", 0) or 0
+
+                    if report.total_merged or report.total_updated:
+                        self._emit("融合明细: 新增 {} 条, 更新 {} 条".format(
+                            report.total_merged, report.total_updated))
+
+                    self._emit("融合完成")
+                else:
+                    self._emit("只有 {} 个 Agent 有数据库，跳过融合".format(len(agent_dbs)))
 
             # ④.5 P1-3: 墓碑清理 —— 融合后、写回前，从 shared.db 删除已墓碑的行。
             # 必须在融合之后（否则 merge 会把其他 agent DB 里的同内容条目再灌回来），
             # 必须在写回之前（否则 _load_shared_memories / memory_shared.md 重建复活）。
-            try:
-                if self.tombstones is not None:
-                    tombed = self.tombstones.purge_db(shared_db_path)
-                    if tombed:
-                        self._emit("墓碑清理: 从 shared.db 移除 {} 条已删除记忆".format(tombed))
-            except Exception as e:
-                self.logger.warning("墓碑清理失败(不阻断): {}".format(e))
+            # v2.4.0: 同样纳入 dry-run 保护（purge_db 会写 shared.db）
+            if self.dry_run:
+                self._emit("[DRY-RUN] 跳过墓碑清理")
+            else:
+                try:
+                    if self.tombstones is not None:
+                        tombed = self.tombstones.purge_db(shared_db_path)
+                        if tombed:
+                            self._emit("墓碑清理: 从 shared.db 移除 {} 条已删除记忆".format(tombed))
+                except Exception as e:
+                    self.logger.warning("墓碑清理失败(不阻断): {}".format(e))
 
             # ⑤ 写回各 Agent
             self._emit("开始写回各 Agent...")

@@ -5,6 +5,147 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.4.1] - 2026-09-03
+
+本轮主题：**代码审计收口 + dry-run 只读闭环**。不新增同步功能，清理"写了一半的开关"、
+"永远走不到的分支"和"接不上的参数"，顺带把 9/2 的托盘自愈工作正式纳入版本。
+
+### Fixed（`--dry-run` 仍会写盘）
+
+v2.4.0 声称 dry-run 真正只读，实测仍有四处漏网（提取/融合阶段不受 dry_run 保护）：
+
+- `SyncState.save()`：dry-run 下照写 `.sync_state.json`（含 LOCALAPPDATA 回退路径）
+- `SyncState._record_tombstones()`：dry-run 下照记墓碑（跨设备可见，污染更久）
+- `TraeMemoryWriter.extract_target_info()`：污染检测触发 `_repair_polluted_file()`
+  重建 `user_profile.md` —— 提取阶段在写回守卫**之前**执行，写盘无法被拦住
+- `SyncEngine.run()` 中的 `detect_agents()`：dry-run 下照写 `.detected_agents.json`
+
+改动：`SyncState` 增加 `dry_run` 构造参数（保存/墓碑在触碰磁盘前返回）；
+5 处 `extract_target_info` 增加 `dry_run` 形参（Trae 自愈在 dry-run 下只上报不修复，
+返回 `repair_skipped_dry_run`）；`detect_agents(write_cache=not dry_run)`。
+
+### Fixed（体积档位用错）
+
+`_enforce_write_volume_limit` 硬编码读 `memory_private_md` 档位，Claude 的
+`shared_from_agents.md` 属于共享池却按 private 的 256KB 放行，超过
+`memory_shared_md` 128KB 上限也不截断。新增 `policy_key` 形参，Claude 写回显式传
+`policy_key="memory_shared_md"`。
+
+### Fixed（向量去重永远不生效）
+
+`create_merger()` 工厂方法没有 `embedding_service` 形参，调用方想传也传不了，
+`MemoryMerger` 的语义相似度去重档位（三处判定）永不生效，去重只剩
+「id 全等 / 内容全等 / 归一化全等」。补齐形参并透传，默认仍为 `None`（保持现行为）。
+
+### Fixed（`get_cache_stats()` 命中率恒为 0）
+
+`SearchOptimizer` 从未累计 `_cache_hits` / `_cache_misses`，`hit_rate` 恒为 0。
+补齐计数，`clear_cache()` 一并归零。
+
+### Changed（死代码清理）
+
+- 删除 `_resolve_conflict` 调用处的 `elif conflict_result == "merge":` 分支
+  与 `_merge_memories()` 方法 —— `_resolve_conflict` 从不返回 `"merge"`。
+  merge 冲突策略保留在 TODO #5，实现时以真实可达的调用路径补回。
+- `config.json` 移除从未被任何代码读取的 `agents_md_standard` 整节，以及
+  `sync_tool.auto_interval_days`（真实生效的是 `sync_settings.json` 的
+  `auto_interval_hours`）。
+
+### Added（托盘注册自愈，原 9/2 工作）
+
+- `_retry_tray_add()`：托盘注册失败不再立即弹窗，改为每 1s 复用现有
+  hwnd/hIcon 重新 `NIM_ADD`，最多 30 次；成功后自动隐藏主窗口
+- `_show_tray_failed_ui()`：重试耗尽才提示，并按 EXE 是否在 OneDrive 目录
+  给出不同原因与解决方案
+- `_finish_minimize_to_tray()`：成功路径收口（首次成功与自愈成功共用）
+- `_load_or_create_tray_guid()`：托盘 GUID 由硬编码改为每机持久化随机值
+  （`%LOCALAPPDATA%\AgentMemorySystem\tray_guid`），多安装副本不再共用同一身份、
+  互相顶掉 Win11「是否显示在任务栏」偏好；读取/写入失败回退内置固定 GUID
+
+### Tests
+
+新增 4 条回归测试（dry-run 状态与墓碑、embedding_service 透传、体积档位可选、
+缓存命中率），全量 **322/324** 通过（2 条为既有历史失败：detect_agents 缓存用例，
+与本版无关）。
+
+---
+
+## [v2.4.0] - 2026-08-31
+
+本轮主题：**同步报告的保真度**。不新增功能，只修"系统说的话与它做的事不一致"。
+
+### Fixed（融合报告虚报「新增共享」，实测新增为 0）
+
+- **现象**：稳态下每轮同步恒定报告「融合: 55 条新增共享」，而实际上
+  shared.db 行数、id 集合、timestamp **三轮零变化**——新增数为 0。
+- **根因一（统计口径）**：`run()` 把 `full_sync()` 返回的**全部 14 个结果**
+  （7 个 `*_to_shared` + 7 个 `shared_to_*`）的 `synced` 一并累加进
+  `total_merged`，且不区分 insert 与 replace。改后只统计第一阶段
+  （Agent → 共享库）的 `inserted`，第二阶段的回流不再计入"新增共享"。
+- **根因二（replace churn）**：`_resolve_conflict` 对同一批行每轮都判定
+  `replace`（delete + insert 同一条，净效果为零）。两个来源：
+  - `timestamp newer`（20 次）：同一内容在两侧登记为**不同 id**
+    （如 `mem_20260702_extra` vs `mem_20260629_extra`），id 精确匹配落空后
+    退回 content 匹配，命中的却是"另一条"同内容记录，被当成更新。
+    → 新增 **内容归一化兜底**（`_normalize_memory_content`，只消除 CRLF/
+    行尾空白/连续空行，不做大小写折叠以免误合并），并在
+    `_resolve_conflict` 前置判定：**归一化内容相同即视为无变化**，
+    仅当新版本置信度更高才改写。
+  - `access_count more`（35 次）：**`get_memory()` 有写副作用**——每次查询
+    都 `access_count + 1`，而它正是 `_resolve_conflict` 的最后一条判定依据，
+    形成"读操作驱动写决策"的循环。
+    → `get_memory()` 新增 `track_access` 参数（默认 `True` 保持业务语义），
+    融合比对路径统一传 `False`。
+
+### Fixed（`get_memory` 副作用污染 access_count）
+
+- `access_count` 本意是"记忆热度"，实际变成"被融合引擎查询的次数"，
+  已膨胀到 **755** 且每轮再 +6。修复后该值冻结（实测三轮均为 755）。
+
+### Fixed（Agent 重复登记）
+
+- `C:\Users\Dong\.trae-cn\memory`（profile 命中 → `trae`）与
+  `C:\Users\Dong\.trae-cn`（通用发现 → `generic-.trae-cn`）被当成两个 Agent，
+  同一份记忆扫描两遍、写回两遍，且 `generic-.trae-cn` 没有独立 memories.db
+  （不参与融合，属"半残"登记）。
+- 新增 `_is_path_related()`：候选路径与已登记路径**存在父子目录关系**即判重复；
+  已登记的更具体时跳过其祖先，反之跳过其后代。
+
+### Fixed（`--dry-run` 不保护融合阶段）
+
+- 旧实现只有写回 / 体积控制 / purge / FTS 判断 `dry_run`，**提取与融合照常
+  执行并真实写库**（shared.db + `agent_*/memories.db`），所谓"试运行"一直在
+  污染数据。现提取、融合、墓碑清理全部纳入 dry-run 保护。
+- ⚠️ 需要验证融合效果时，请改用**复制 DB 到临时目录再回放**的办法。
+
+### Changed（报告口径）
+
+- 同步报告 `融合` 行改为 `融合: X 条新增共享, Y 条更新`。
+- 新增一行提示：当 `新增=0 且 更新>0` 时明确说明"本次无新增，N 条为既有
+  记忆的覆盖更新"，避免再被数字误导。
+- `MemoryMerger.sync_agent_to_shared` 的返回值新增 `inserted` / `updated`
+  两个细分项；`synced` 保留为两者之和，兼容既有调用方。
+
+### 已知问题（v2.4.0 未处理，下轮评估）
+
+1. **`memory_shared.md` 静默截断**：`_shared/volume_policy.json` 限制
+   128KB / `truncate_oldest`，实测只装得下最新 51~55 条，而库中有 127~134 条。
+   **旧记忆虽然在 shared.db 里，却永远不会出现在 Agent 能读到的 md 文件中**，
+   且日志不提示丢弃数量。
+2. **`_resolve_conflict` 从不返回 `"merge"`**，该分支为死代码。
+3. **`create_merger()` 未传 `embedding_service`**，向量相似度去重档位永不生效，
+   去重仍只依赖"id 全等 / content 全等 / 归一化全等"三档。
+4. `access_count` 历史积累的 755 等虚高值未清理（已停止增长，不影响功能）。
+
+### 升级注意事项
+
+- **无需数据迁移**，schema 未变更。
+- 升级后**首轮同步的「新增」可能比往常低**——这是修复后的真值，不是漏同步。
+- 若升级后报告仍出现「更新」持续非 0，说明还有 replace churn 未被覆盖，
+  可用「复制 DB 到临时目录回放三轮」的方式复现（三轮结果应完全一致）。
+
+---
+
 ## [v2.3.0] - 2026-08-30
 
 ### Added（墓碑机制：防已删记忆跨设备复活，P1-3）

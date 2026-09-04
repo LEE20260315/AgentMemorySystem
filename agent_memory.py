@@ -1760,7 +1760,7 @@ class MemoryDatabase:
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:limit]
 
-    def get_memory(self, memory_id: str) -> MemoryEntry:
+    def get_memory(self, memory_id: str, track_access: bool = True) -> MemoryEntry:
         """
         按ID获取记忆
 
@@ -1768,6 +1768,18 @@ class MemoryDatabase:
         ----------
         memory_id : str
             记忆ID
+        track_access : bool, optional
+            是否累加 access_count / last_accessed。默认 True（业务读取）。
+
+            v2.4.0: 融合器内部比对（MemoryMerger._find_similar_in_shared）必须传
+            False。旧实现无条件 +1，导致：
+
+            1. `access_count` 变成"被融合引擎查询的次数"而非"记忆热度"，
+               实测已膨胀到 700+ 且每轮再 +6；
+            2. `_resolve_conflict` 的最后一条判定是
+               ``if new.access_count > existing.access_count: return "replace"``，
+               于是"读"操作驱动了"写"决策 —— 每轮对同一批行反复 replace
+               （delete+insert 同一条），行数不变却报出虚假的"新增共享"。
 
         Returns
         -------
@@ -1786,14 +1798,15 @@ class MemoryDatabase:
         if not row:
             raise AgentMemoryError("记忆不存在: {}".format(memory_id))
 
-        # 更新访问计数
-        self.conn.execute("""
-            UPDATE memories
-            SET access_count = access_count + 1,
-                last_accessed = datetime('now')
-            WHERE id = ?
-        """, (memory_id,))
-        self.conn.commit()
+        # 更新访问计数（v2.4.0: 仅业务读取时累加，融合比对不加）
+        if track_access:
+            self.conn.execute("""
+                UPDATE memories
+                SET access_count = access_count + 1,
+                    last_accessed = datetime('now')
+                WHERE id = ?
+            """, (memory_id,))
+            self.conn.commit()
 
         return self._row_to_entry(row)
 
@@ -2272,6 +2285,33 @@ def get_all_device_memories(memory_root: Path = None) -> dict:
 # 融合器 - Phase 2 新增
 # ---------------------------------------------------------------------------
 
+def _normalize_memory_content(content: str) -> str:
+    """归一化记忆内容，供跨 Agent 去重比对使用。
+
+    只消除无语义差异的字符级噪声：CRLF/CR 统一为 LF、行尾空白、连续空行。
+    不做大小写折叠或标点归一 —— 那会把语义不同的记忆误判为重复。
+
+    v2.4.0: 同一条记忆在两侧被重复登记为不同 id（如 ``mem_20260702_extra``
+    与 ``mem_20260629_extra``）时，仅靠 id 全等 / content 全等两档匹配会漏判，
+    导致每轮反复 replace（见 MemoryMerger._find_similar_in_shared）。
+    """
+    if not content:
+        return ""
+    text = content.replace("\r\n", "\n").replace("\r", "\n")
+    out = []
+    blank = False
+    for line in text.split("\n"):
+        line = line.rstrip()
+        if not line.strip():
+            if blank:
+                continue
+            blank = True
+        else:
+            blank = False
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 class MemoryMerger:
     """跨 Agent 记忆融合器"""
 
@@ -2332,10 +2372,23 @@ class MemoryMerger:
             raise AgentMemoryError("未注册的 Agent: {}".format(agent_id))
 
         agent_db_path = self.agent_dbs[agent_id]
-        stats = {"synced": 0, "skipped": 0, "conflicts": 0}
+        # v2.4.0: synced 保留（= inserted + updated）以兼容既有调用方；
+        # 新增 inserted / updated 两个细分项，供报告区分"真新增"与"无谓改写"
+        stats = {"synced": 0, "skipped": 0, "conflicts": 0,
+                 "inserted": 0, "updated": 0}
 
         with MemoryDatabase(agent_db_path) as agent_db, \
              MemoryDatabase(self.shared_db_path) as shared_db:
+
+            # v2.4.0: 一次性构建归一化内容索引，供 _find_similar_in_shared 兜底
+            self._content_index = {}
+            try:
+                for _row in shared_db.conn.execute("SELECT id, content FROM memories"):
+                    self._content_index.setdefault(
+                        _normalize_memory_content(_row["content"]), []
+                    ).append(_row["id"])
+            except Exception:
+                self._content_index = {}
 
             # 获取 Agent 的所有记忆
             agent_memories = agent_db.list_memories(limit=10000)
@@ -2349,23 +2402,34 @@ class MemoryMerger:
 
                 if existing:
                     # 存在相似记忆，处理冲突
+                    # v2.4.1: 移除 "merge" 死分支 —— _resolve_conflict 从不
+                    # 返回 "merge"（详见其 docstring），该分支连同
+                    # _merge_memories() 一起删除。merge 冲突策略属于 TODO
+                    # #5（同步冲突解决策略），实现时再以真实可达的路径补回。
                     conflict_result = self._resolve_conflict(existing, memory)
                     if conflict_result == "keep_existing":
                         stats["skipped"] += 1
                     elif conflict_result == "replace":
                         self._replace_in_shared(shared_db, existing.id, memory)
+                        stats["updated"] += 1
                         stats["synced"] += 1
-                    elif conflict_result == "merge":
-                        merged = self._merge_memories(existing, memory)
-                        self._replace_in_shared(shared_db, existing.id, merged)
-                        stats["synced"] += 1
+                        self._index_add(memory)
                     stats["conflicts"] += 1
                 else:
                     # 无冲突，直接插入
                     shared_db.insert_memory(memory)
+                    stats["inserted"] += 1
                     stats["synced"] += 1
+                    self._index_add(memory)
 
         return stats
+
+    def _index_add(self, memory: MemoryEntry):
+        """把新写入共享库的记忆加入归一化索引（避免同一轮内重复判定为新增）。"""
+        index = getattr(self, "_content_index", None)
+        if index is None:
+            return
+        index.setdefault(_normalize_memory_content(memory.content), []).append(memory.id)
 
     def sync_shared_to_agent(self, agent_id: str) -> dict:
         """
@@ -2480,7 +2544,9 @@ class MemoryMerger:
             "SELECT id FROM memories WHERE id = ?", (memory.id,)
         )
         if cursor.fetchone():
-            return shared_db.get_memory(memory.id)
+            # v2.4.0: track_access=False —— 融合比对不是业务读取，
+            # 不应累加 access_count（否则会反过来驱动 replace 判定）
+            return shared_db.get_memory(memory.id, track_access=False)
 
         # 使用向量相似度搜索（如果有 embedding）
         if memory.embedding and self.embedding_service:
@@ -2498,7 +2564,18 @@ class MemoryMerger:
         )
         row = cursor.fetchone()
         if row:
-            return shared_db.get_memory(row['id'])
+            return shared_db.get_memory(row['id'], track_access=False)
+
+        # v2.4.0 兜底：内容归一化后比对。
+        # 同一条记忆在两侧登记为不同 id、且换行/空白略有出入时，上面三档都
+        # 会漏判，于是每轮被当成"新记忆"反复 replace。索引由
+        # sync_agent_to_shared 在进入循环前一次性构建。
+        index = getattr(self, "_content_index", None)
+        if index:
+            key = _normalize_memory_content(memory.content)
+            ids = index.get(key)
+            if ids:
+                return shared_db.get_memory(ids[0], track_access=False)
 
         return None
 
@@ -2516,12 +2593,22 @@ class MemoryMerger:
         Returns
         -------
         str
-            解决策略: "keep_existing" | "replace" | "merge"
+            解决策略: "keep_existing" | "replace"
+            （v2.4.1: 移除 "merge" —— 该返回值从未产生过，属死代码；
+            merge 冲突策略见 TODO #5，实现时一并补回）
         """
         # 置信度比较
         confidence_order = {"high": 3, "medium": 2, "low": 1}
         existing_conf = confidence_order.get(existing.confidence, 1)
         new_conf = confidence_order.get(new.confidence, 1)
+
+        # v2.4.0: 内容实质相同（归一化后一致）时不再改写。
+        # replace 的语义是"用更新的版本覆盖"，内容一样却执行 delete+insert
+        # 只是写放大，还会让报告虚报"更新"。仅当新版本置信度更高才值得改写。
+        if _normalize_memory_content(existing.content) == _normalize_memory_content(new.content):
+            if new_conf > existing_conf:
+                return "replace"
+            return "keep_existing"
 
         if new_conf > existing_conf:
             return "replace"
@@ -2538,59 +2625,9 @@ class MemoryMerger:
 
         return "keep_existing"
 
-    def _merge_memories(self, existing: MemoryEntry, new: MemoryEntry) -> MemoryEntry:
-        """
-        合并两条记忆
-
-        Parameters
-        ----------
-        existing : MemoryEntry
-            已存在的记忆
-        new : MemoryEntry
-            新记忆
-
-        Returns
-        -------
-        MemoryEntry
-            合并后的记忆
-        """
-        # 合并标签
-        merged_tags = list(set(existing.tags + new.tags))
-
-        # 选择更高的置信度
-        confidence_order = {"high": 3, "medium": 2, "low": 1}
-        if confidence_order.get(new.confidence, 1) > confidence_order.get(existing.confidence, 1):
-            confidence = new.confidence
-        else:
-            confidence = existing.confidence
-
-        # 合并内容（保留更详细的版本）
-        if len(new.content) > len(existing.content):
-            content = new.content
-        else:
-            content = existing.content
-
-        # 创建合并后的记忆
-        merged = MemoryEntry(
-            id=existing.id,
-            agent_id=existing.agent_id,
-            timestamp=max(existing.timestamp, new.timestamp),
-            source_device=existing.source_device,
-            domain=existing.domain,
-            tags=merged_tags,
-            confidence=confidence,
-            conflict_with=None,
-            content=content,
-            embedding=existing.embedding or new.embedding,
-            access_count=max(existing.access_count, new.access_count),
-            last_accessed=max(
-                existing.last_accessed or "",
-                new.last_accessed or ""
-            ) or None,
-            source_memory_id=existing.source_memory_id
-        )
-
-        return merged
+    # v2.4.1: _merge_memories() 已删除 —— 其唯一调用点是 _resolve_conflict
+    # 从不返回的 "merge" 分支，属死代码。实现 TODO #5（merge 冲突策略）时
+    # 从 git 历史恢复或重写。
 
     def _replace_in_shared(self, shared_db: MemoryDatabase, old_id: str, new_memory: MemoryEntry):
         """
@@ -2981,7 +3018,8 @@ def rebuild_shared_cache_from_md(md_files: list, db_path: Path = None) -> int:
 def create_merger(
     shared_db_path: Path,
     agent_configs: dict = None,
-    similarity_threshold: float = 0.85
+    similarity_threshold: float = 0.85,
+    embedding_service: "EmbeddingService" = None
 ) -> MemoryMerger:
     """
     创建融合器实例
@@ -2994,6 +3032,12 @@ def create_merger(
         Agent 配置 {agent_id: db_path}
     similarity_threshold : float
         相似度阈值
+    embedding_service : EmbeddingService, optional
+        Embedding 服务实例。v2.4.1: 之前工厂方法根本没有该形参，调用方
+        想传也传不了，导致 MemoryMerger 的向量相似度去重档位
+        （memory.embedding + embedding_service 的三处判定）永不生效。
+        默认仍为 None（保持现行为）；需要语义去重时显式传入
+        EmbeddingService() 实例。
 
     Returns
     -------
@@ -3002,6 +3046,7 @@ def create_merger(
     """
     merger = MemoryMerger(
         shared_db_path=shared_db_path,
+        embedding_service=embedding_service,
         similarity_threshold=similarity_threshold
     )
 
@@ -4698,6 +4743,9 @@ class SearchOptimizer:
         self.db_path = db_path
         self._query_cache = {}
         self._cache_max_size = 100
+        # v2.4.1: 补上缓存命中统计（get_cache_stats 的 hit_rate 之前恒为 0）
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def optimized_search(
         self,
@@ -4733,7 +4781,10 @@ class SearchOptimizer:
 
         # 检查缓存
         if use_cache and cache_key in self._query_cache:
+            self._cache_hits += 1
             return self._query_cache[cache_key]
+        if use_cache:
+            self._cache_misses += 1
 
         # 执行搜索
         with MemoryDatabase(self.db_path) as db:
@@ -4765,15 +4816,21 @@ class SearchOptimizer:
         self._query_cache[key] = value
 
     def clear_cache(self):
-        """清空缓存"""
+        """清空缓存（同时重置命中统计）"""
         self._query_cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def get_cache_stats(self) -> dict:
         """获取缓存统计"""
+        total = self._cache_hits + self._cache_misses
         return {
             "size": len(self._query_cache),
             "max_size": self._cache_max_size,
-            "hit_rate": 0  # TODO: 实现命中率统计
+            # v2.4.1: 实现命中率统计（此前恒为 0，TODO 已清）
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+            "hit_rate": (self._cache_hits / total) if total else 0,
         }
 
 
@@ -5393,7 +5450,9 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
                 name_lower = item.name.lower()
 
                 # 跳过已检测到的路径
-                if str(item) in detected_paths:
+                # v2.4.0: 含父子目录关系 —— 已有更具体的 Agent 时，
+                # 不再把它的祖先目录登记为 generic-*（详见 _is_path_related）
+                if _is_path_related(item, detected_paths):
                     continue
 
                 # 跳过排除列表
@@ -5421,6 +5480,30 @@ def _discover_generic_agents(found: dict, home: Path, logger) -> dict:
             continue
 
     return found
+
+
+def _is_path_related(candidate: Path, known_paths) -> bool:
+    """判断候选路径与已登记路径是否重复（完全相同或存在父子目录关系）。
+
+    v2.4.0: 旧逻辑只做字符串全等比较，于是 ``C:\\Users\\x\\.trae-cn``
+    （通用发现，登记为 ``generic-.trae-cn``）与 ``C:\\Users\\x\\.trae-cn\\memory``
+    （profile 命中，登记为 ``trae``）被当成两个 Agent：同一份记忆被扫描两遍、
+    写回两遍，且 generic-* 那个还没有独立的 memories.db（不参与融合）。
+
+    约定：已登记路径更具体时，跳过其祖先目录；已登记路径更粗时，跳过其后代。
+    """
+    cand = str(candidate).lower().rstrip("\\/")
+    for known in known_paths:
+        k = str(known).lower().rstrip("\\/")
+        if cand == k:
+            return True
+        # 候选是已登记路径的祖先（如 .trae-cn 之于 .trae-cn\memory）
+        if k.startswith(cand + "\\") or k.startswith(cand + "/"):
+            return True
+        # 候选是已登记路径的后代
+        if cand.startswith(k + "\\") or cand.startswith(k + "/"):
+            return True
+    return False
 
 
 def _scan_generic_memory_files(path: Path) -> list:

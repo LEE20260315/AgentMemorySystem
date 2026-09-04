@@ -40,6 +40,8 @@ Claude、Hermes、Trae、Cursor、CodePilot 諸 Agent，各存其憶，格式互
 | **融合去重** | 基於內容哈希之 SQLite 融合索引（本機緩存，從 memory_shared.md 可重建） |
 | **墓碑機制** | 已刪除的共享記憶跨設備防復活（v2.3.0，刪除信號隨數據根同步） |
 | **日誌保留** | 輪轉永不覆蓋 + 數量/天數雙維裁剪，活躍檔案絕不觸碰（v2.3.0） |
+| **報告保真** | 融合「新增 / 更新」分列統計，穩態不再虛報新增（v2.4.0）；`--dry-run` 全鏈路真正只讀（v2.4.1） |
+| **托盤自愈** | 註冊失敗自動後台重試（最多 30 次），不再一失敗就彈窗；GUID 每機持久化（v2.4.1） |
 | **分層儲存** | 熱 / 溫 / 冷三級資料，自動歸檔 |
 | **安全機制** | 自動備份、跨進程鎖、檔案鎖、OneDrive 衝突檢測、敏感詞過濾 |
 | **GUI + CLI** | 系統匣常駐程式 + 命令列工具 |
@@ -195,6 +197,8 @@ python memory_cli.py --agent claude expire         # 清理過期記憶並歸檔
 
 | 版次 | 日期 | 要目 |
 |------|------|------|
+| **v2.4.1** | 2026-09 | **審計修復 + dry-run 只讀閉環 + 托盤自愈**：① **`--dry-run` 真正只讀**——補上此前遺漏的寫入面：`.sync_state.json` 保存、墓碑記錄、Trae 污染文件自愈重建（`user_profile.md`）、`detect_agents` 檢測緩存（`.detected_agents.json`），dry-run 下全部跳過；② **死代碼清理**——移除 `_resolve_conflict` 從不返回的 `"merge"` 分支與 `_merge_memories()`（merge 衝突策略歸入 TODO #5，實現時以可達路徑補回）；③ **向量去重可達**——`create_merger()` 補上 `embedding_service` 形參並透傳（此前工廠方法無該參數，語義去重檔位永不生效）；④ **體積保護檔位可選**——`_enforce_write_volume_limit` 新增 `policy_key`，Claude 寫共享池改用 `memory_shared_md`（128KB），不再誤用 private 檔 256KB；⑤ **`SearchOptimizer` 命中率統計**（此前 `get_cache_stats()` 的 `hit_rate` 恆為 0）；⑥ **托盤註冊自愈**——註冊失敗不再立即彈窗，改為每 1s 復用 hwnd/hIcon 重試（最多 30 次），成功即自動隱藏主窗口，耗盡才提示並區分 OneDrive / 本機原因；托盤 GUID 由硬編碼改為每機持久化隨機值（多安裝副本不再互相頂掉「是否顯示在任務欄」偏好）；⑦ 清理從未被讀取的 `agents_md_standard`、`sync_tool.auto_interval_days` 配置。新增 4 條回歸測試，全量 322/324（2 條為既有歷史失敗） |
+| **v2.4.0** | 2026-08 | **同步報告保真**（不新增功能，只修「系統說的話與它做的事不一致」）：修復穩態下恆定虛報「融合: 55 條新增共享」而實為 0 的問題——① 統計只累加第一階段（Agent→共享庫）的 `inserted`，第二階段回流不再計入新增；② `_resolve_conflict` 新增「歸一化內容相同即視為無變化」前置判定，杜絕每輪對同一批行的 replace churn（delete+insert 同一條，淨效果為零）；③ 融合去重增加**內容歸一化兜底**（同一記憶在兩側登記為不同 id 時不再漏判）；④ **`get_memory()` 寫副作用移除**（新增 `track_access` 參數，融合比對不再累加 `access_count`——該值已被污染到 755 且每輪 +6，現已凍結）；修復 **Agent 重複登記**（`.trae-cn\memory` 與 `.trae-cn` 父子目錄被當成兩個 Agent，新增 `_is_path_related()`）；修復 **`--dry-run` 不保護融合階段**（舊版提取與融合照常真實寫庫）；報告新增「新增 / 更新」分列與無新增提示。實測副本回放三輪：synced 由 55 → **0**，行數與 id 集合零變化。測試 303/305（2 條為既有歷史失敗） |
 | **v2.3.0** | 2026-08 | **墓碑機制 + 日誌保留 + 跨進程鎖**：**墓碑機制**（新增 `tombstones.py`，墓碑庫存數據根隨 OneDrive 跨設備生效）——刪除一條已同步記憶後不再被「復活」：reconcile 檢測 vanish 記墓碑（保守模式/24h 寬限期/批量 vanish 三重防誤殺），寫回、`memory_shared.md` 重建、DB 融合三處復活路徑全過濾，並在融合後寫回前從 shared.db 治本性刪除命中行；**日誌保留策略**：輪轉檔名帶時間戳永不覆蓋 +（數量 3，天數 7）雙維裁剪、寫失敗計數補記 WARN、`tools/log_retention.py` 預覽/回收站清理工具；**跨進程鎖**：Windows 命名互斥量實現真互斥（原子性≠隔離性）+ 遺留 .lock 清理；測試 305 條全量護航 |
 | **v2.2.3** | 2026-08 | **托盤 GUID 接線 + 運行目錄固定化**：托盤圖標接入 `_NIF_GUID`（身份與顯示偏好永久綁定 GUID，不再隨自解壓路徑漂移沉入溢出區）；EXE 運行目錄從 `%TEMP%` 隨機目錄遷至 `%LOCALAPPDATA%\AgentMemorySystem\Run`（告別存儲感知誤清與 %RANDOM% 身份漂移）；心跳不再寫 OneDrive（此前實測堆積 86 個輪轉檔 36MB）；版本號單點 `__version__` |
 | **v2.2.2** | 2026-08 | **OneDrive 衝突副本根治 + dsh 識別**：寫入一律原子化（`_safe_write_text` 重寫——舊版 replace 失敗回退 in-place 直寫正是衝突副本元兇；程序唯一 tmp + 退避重試 + `.pending` 完整快照降級，讀端優先新快照、啟動全樹收編）；**dsh（DeepSeek CLI）三層根因全修**（檢測 profile + 備用簽名；檢測緩存新增 `profiles_hash` 配置指紋——配置變更立即失效不再等 24h TTL；通用發現增加 `~` 點目錄掃描）；憑據檔案（`.credentials.yaml`/`auth.json` 等）絕不進入記憶管道；新增 6 個回歸測試，全量 234 斷言 |

@@ -2386,6 +2386,141 @@ def test_log_retention_tool_scan_is_preview_by_default():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_dry_run_sync_state_skips_save_and_tombstones():
+    """v2.4.1: dry-run 下 SyncState 不落盘、不记墓碑（与正常模式对照）
+
+    背景：同步引擎的写回阶段早有 dry_run 判断，但 .sync_state.json 保存与
+    墓碑记录没有 —— 干跑一轮仍会污染状态与墓碑库。
+    """
+    r.set_module("sync_writers")
+
+    from datetime import datetime, timedelta, timezone
+    from sync_writers import SyncState
+
+    def _build(base: Path, dry_run: bool) -> "SyncState":
+        base.mkdir(parents=True, exist_ok=True)
+        state = SyncState(state_path=base / ".sync_state.json", dry_run=dry_run)
+        now = datetime.now(timezone.utc)
+        # 48h 前写入 → 远超 24h 宽限期，正常模式必记墓碑
+        state.state["claude"] = {"h_old": (now - timedelta(hours=48)).isoformat()}
+        return state
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        dry = _build(tmp / "dry", True)
+        res_dry = dry.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=0, target_file_present=True)
+        # reconcile 只在 tombstoned > 0 时写入该键（dry-run 下为 0 → 键缺失）
+        r.assert_true("dry-run vanish 未记墓碑", not res_dry.get("tombstoned"))
+        r.assert_true("dry-run 墓碑库为空", not dry.tombstones.is_tombstoned("h_old"))
+        dry.save()
+        r.assert_true("dry-run save 未落盘", not dry.state_path.exists())
+
+        wet = _build(tmp / "wet", False)
+        res_wet = wet.reconcile_with_target_hashes(
+            "claude", actual_hashes=set(), legacy_count=0, target_file_present=True)
+        r.assert_eq("正常模式 vanish 记墓碑", res_wet.get("tombstoned"), 1)
+        r.assert_true("正常模式墓碑已记", wet.tombstones.is_tombstoned("h_old"))
+        wet.save()
+        r.assert_true("正常模式 save 落盘", wet.state_path.exists())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_create_merger_passes_embedding_service():
+    """v2.4.1: create_merger 透传 embedding_service（此前工厂方法无该形参）"""
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db = tmp / "shared.db"
+        sentinel = object()
+        merger = am.create_merger(db, embedding_service=sentinel)
+        r.assert_true("embedding_service 已透传", merger.embedding_service is sentinel)
+
+        merger_default = am.create_merger(db)
+        r.assert_true("默认仍为 None", merger_default.embedding_service is None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_volume_limit_policy_key_selectable():
+    """v2.4.1: 写回体积保护可选档位（shared 128KB / private 256KB）
+
+    修复前 _enforce_write_volume_limit 硬编码读 memory_private_md 档位，
+    Claude 写共享池时误用 256KB 上限，超过 128KB 的共享池策略形同虚设。
+    """
+    r.set_module("sync_writers")
+
+    import json
+    from sync_writers import GenericMarkdownWriter, SyncState
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "_shared").mkdir(parents=True, exist_ok=True)
+        (tmp / "_shared" / "volume_policy.json").write_text(json.dumps({
+            "limits": {
+                "memory_private_md": {"max_size_kb": 256, "max_lines": 3000,
+                                      "action_when_exceeded": "compress_and_truncate"},
+                "memory_shared_md": {"max_size_kb": 128, "max_lines": 2000,
+                                     "action_when_exceeded": "truncate_oldest"},
+            }
+        }), encoding="utf-8")
+
+        writer = GenericMarkdownWriter(
+            sync_state=SyncState(state_path=tmp / ".sync_state.json"))
+
+        content = "# MEMORY\n\n## Shared Knowledge\n\n" + "".join(
+            "- [sync:mem_{}|h:abc{:06d}] 记忆内容测试记忆内容测试记忆内容测试。\n".format(i, i)
+            for i in range(2500)
+        )
+        r.assert_true("构造内容确实超过 128KB", len(content.encode("utf-8")) > 128 * 1024)
+
+        _, trunc_private, _ = writer._enforce_write_volume_limit(
+            tmp / "x.md", content, "generic", preserve_tail=True)
+        r.assert_true("private 档 ~178KB 不截断", not trunc_private)
+
+        shared_content, trunc_shared, _ = writer._enforce_write_volume_limit(
+            tmp / "x.md", content, "generic", preserve_tail=True,
+            policy_key="memory_shared_md")
+        r.assert_true("shared 档 ~178KB 截断", trunc_shared)
+        r.assert_true("截断后低于 128KB 上限",
+                      len(shared_content.encode("utf-8")) <= 128 * 1024)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_cache_hit_rate_stats():
+    """v2.4.1: SearchOptimizer.get_cache_stats 的命中率不再是恒 0"""
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db = tmp / "search.db"
+        opt = am.SearchOptimizer(db)
+        opt.optimized_search("关键词A", limit=5)   # miss
+        opt.optimized_search("关键词A", limit=5)   # hit
+        opt.optimized_search("关键词B", limit=5)   # miss
+
+        stats = opt.get_cache_stats()
+        r.assert_eq("命中 1 次", stats["hits"], 1)
+        r.assert_eq("未命中 2 次", stats["misses"], 2)
+        r.assert_true("命中率计算", abs(stats["hit_rate"] - (1 / 3)) < 1e-6)
+
+        opt.clear_cache()
+        cleared = opt.get_cache_stats()
+        r.assert_eq("清空后命中归零", cleared["hits"], 0)
+        r.assert_eq("清空后未命中归零", cleared["misses"], 0)
+        r.assert_eq("清空后缓存为空", cleared["size"], 0)
+        r.assert_eq("计数归零后命中率为 0", cleared["hit_rate"], 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -2506,6 +2641,11 @@ ALL_TESTS = [
     test_log_prune_by_days_and_never_touches_active,
     test_log_write_failure_is_surfaced_not_swallowed,
     test_log_retention_tool_scan_is_preview_by_default,
+    # v2.4.1: 代码审计回归（dry-run 只读闭环 / 向量去重可达 / 体积档位 / 命中率）
+    test_dry_run_sync_state_skips_save_and_tombstones,
+    test_create_merger_passes_embedding_service,
+    test_volume_limit_policy_key_selectable,
+    test_cache_hit_rate_stats,
 ]
 def main():
     print("=" * 60)

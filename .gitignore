@@ -74,3 +74,13 @@ watchdog.log
 
 # Web 设计原型（未定稿）
 agent-memory-redesign/
+
+# 一次性诊断/探针脚本（排查用，不提交）
+_*
+_*.py
+exe_manifest.txt
+python_manifest.txt
+co_mta
+co_sta
+ole_sta
+none
