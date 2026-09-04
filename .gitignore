@@ -85,5 +85,5 @@ agent-memory-redesign/
 /ole_sta
 /none
 
-# 本地归档（历史探针脚本等，不提交）
-archive/
+# 本地归档（历史探针脚本等，不提交；锚定仓库根，避免误伤 docs/archive/）
+/archive/
