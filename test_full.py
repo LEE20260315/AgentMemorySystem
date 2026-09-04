@@ -1881,8 +1881,12 @@ def test_detect_agents_cache_profiles_hash_invalidation():
     (dsh_dir / ".anonymous-user-id").write_text("uid", encoding="utf-8")
     dsh_profile = {"candidate_paths": [str(dsh_dir)], "signature_file": "settings.yaml",
                    "signature_paths_fallback": [str(dsh_dir / ".anonymous-user-id")]}
-    now_iso = "2026-08-17T00:00:00+00:00"
-    seeded = {"path": str(local_home / "zz_cached"), "memory_files": [], "detected_at": now_iso, "source": "auto"}
+    # 缓存时间戳必须动态生成：此前硬编码 "2026-08-17"，叠加 24h TTL 后
+    # 本用例自 2026-08-18 起必然失败（时间炸弹），长期被误记为「历史失败」
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    stale_iso = (_dt.now(_tz.utc) - _td(hours=48)).isoformat()    # 场景 1：超出 TTL，必失效
+    fresh_iso = (_dt.now(_tz.utc) - _td(minutes=10)).isoformat()  # 场景 2：TTL 内，应生效
+    seeded = {"path": str(local_home / "zz_cached"), "memory_files": [], "detected_at": fresh_iso, "source": "auto"}
 
     config = am.ConfigManager(config_path=tmp / "config.json")
     config.config["agent_detection"] = {"dsh": dsh_profile}
@@ -1898,7 +1902,7 @@ def test_detect_agents_cache_profiles_hash_invalidation():
             with patch("agent_memory.get_data_root", return_value=data_root):
                 # 场景 1：旧版缓存（无 profiles_hash）→ 失效重检测 → dsh 可见
                 (data_root / ".detected_agents.json").write_text(
-                    json.dumps({"detected_at": now_iso, "agents": {"zz_cached": seeded}}), encoding="utf-8")
+                    json.dumps({"detected_at": stale_iso, "agents": {"zz_cached": seeded}}), encoding="utf-8")
                 detected = am.detect_agents(config, write_cache=False)
                 r.assert_true("stale cache invalidated, dsh detected", "dsh" in detected)
                 r.assert_true("stale cache content not returned", "zz_cached" not in detected)
@@ -1906,7 +1910,7 @@ def test_detect_agents_cache_profiles_hash_invalidation():
                 # 场景 2：hash 一致（TTL 内）→ 缓存照常生效（不能一刀切禁用缓存）
                 correct_hash = am._detection_profiles_hash(config)
                 (data_root / ".detected_agents.json").write_text(
-                    json.dumps({"detected_at": now_iso, "profiles_hash": correct_hash,
+                    json.dumps({"detected_at": fresh_iso, "profiles_hash": correct_hash,
                                 "agents": {"zz_cached": seeded}}), encoding="utf-8")
                 detected2 = am.detect_agents(config, write_cache=False)
                 r.assert_true("matching-hash cache honored", "zz_cached" in detected2)

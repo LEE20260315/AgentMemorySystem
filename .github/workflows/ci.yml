@@ -2,6 +2,10 @@ name: CI
 
 # 自动化测试门禁：任何发往 main 的 PR 与 push 都必须跑通测试套件。
 # 测试失败时（python test_full.py 退出码 1）本作业失败，从而阻断合并。
+#
+# 平台说明：本套件为 Windows 优先（托盘为 Windows 原生 API、跨进程锁为命名
+# 互斥量、路径语义按 Windows 设计），门禁作业跑在 windows-latest。
+# ubuntu 作业仅作 CLI 跨平台观察项（continue-on-error，不阻断合并）。
 on:
   push:
     branches: [main]
@@ -9,9 +13,9 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+  test-windows:
+    name: Test (Windows, Python ${{ matrix.python-version }})
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +30,29 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # tkinter 随 CPython Windows 安装包自带，无需额外安装
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml Pillow
+
+      - name: Run test suite
+        # test_full.py 在失败时以退出码 1 结束，使本步骤失败
+        run: python test_full.py
+
+  probe-linux:
+    name: Cross-platform probe (Linux, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       # GUI 导入测试（test_memory_sync_app_imports 等）需要 tkinter
       - name: Install system deps (tk)
         run: sudo apt-get update && sudo apt-get install -y python3-tk
@@ -33,8 +60,7 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml pystray Pillow
+          pip install pyyaml Pillow
 
-      - name: Run test suite
-        # test_full.py 在失败时以退出码 1 结束，使本步骤失败
+      - name: Run test suite (observation only)
         run: python test_full.py

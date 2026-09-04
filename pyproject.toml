@@ -23,4 +23,4 @@ vector = [
 ]
 
 [project.scripts]
-agent-memory = "agent_memory:main"
+agent-memory = "memory_cli:main"

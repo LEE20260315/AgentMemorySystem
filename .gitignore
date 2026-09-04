@@ -75,12 +75,15 @@ watchdog.log
 # Web 设计原型（未定稿）
 agent-memory-redesign/
 
-# 一次性诊断/探针脚本（排查用，不提交）
-_*
-_*.py
-exe_manifest.txt
-python_manifest.txt
-co_mta
-co_sta
-ole_sta
-none
+# 一次性诊断/探针脚本（排查用，不提交；锚定仓库根，避免误伤各级 __init__.py）
+/_*
+/_*.py
+/exe_manifest.txt
+/python_manifest.txt
+/co_mta
+/co_sta
+/ole_sta
+/none
+
+# 本地归档（历史探针脚本等，不提交）
+archive/
