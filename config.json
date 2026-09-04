@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "2.4.1",
   "paths": {
     "memory_root": "auto",
     "shared_root": "auto",
@@ -255,24 +255,10 @@
       "note": "DeepSeek DSH CLI（dsh-code）；根目录 settings.yaml 为签名；会话在 sessions/*/session.jsonl(.zstd)，工作区状态在 storages/*.json；.credentials.yaml 含凭据必须排除"
     }
   },
-  "agents_md_standard": {
-    "enabled": true,
-    "project_level_file": "AGENTS.md",
-    "global_path": "~/.agents/AGENTS.md",
-    "supported_agents": [
-      "codex",
-      "opencode",
-      "cline",
-      "claude",
-      "gemini-cli",
-      "roo-code"
-    ],
-    "note": "AGENTS.md 是 2026 年跨工具标准；AgentMemorySystem 可读取项目级 AGENTS.md 作为记忆源"
-  },
   "agent_overrides": {},
   "sync_tool": {
-    "auto_interval_days": 7,
     "conflict_action": "prompt",
-    "cache_ttl_hours": 24
+    "cache_ttl_hours": 24,
+    "_comment": "v2.4.1: 移除 agents_md_standard 整节与 sync_tool.auto_interval_days —— 前者在源码中从未被读取（AGENTS.md 候选已硬编码于 detect 流程），后者的真实生效配置是数据根 sync_settings.json 的 auto_interval_hours。agent_detection 下的扩展键（memory_file/sqlite_db 等）目前同样无消费方，作为各 Agent 的行为注记保留。"
   }
 }

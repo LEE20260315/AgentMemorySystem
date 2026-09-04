@@ -2,6 +2,16 @@
 
 > 本文件記錄 AgentMemorySystem 未來可能改進的方向，按優先級排序。
 
+## 已完成（v2.4.1，2026-09-03）
+
+- [x] **`--dry-run` 只讀閉環**：補上四處漏網寫入面 —— `SyncState.save()`（`.sync_state.json`）、`SyncState._record_tombstones()`（墓碑）、Trae 污染文件自愈重建（`user_profile.md`，提取階段在寫回守衛之前執行）、`detect_agents()` 檢測緩存（`.detected_agents.json`）；`extract_target_info` 新增 `dry_run` 形參供各 writer 感知
+- [x] **死代碼清理**：移除 `_resolve_conflict` 從不返回的 `"merge"` 分支與 `_merge_memories()`（merge 衝突策略保留在 TODO #5，實現時以可達路徑補回）
+- [x] **向量去重可達**：`create_merger()` 補上 `embedding_service` 形參並透傳（此前工廠方法無該參數，語義去重檔位永不生效）
+- [x] **體積保護檔位可選**：`_enforce_write_volume_limit` 新增 `policy_key`，Claude 寫共享池改用 `memory_shared_md`（128KB）而非誤用 private 檔 256KB
+- [x] **`SearchOptimizer` 命中率統計**：補齊 `_cache_hits` / `_cache_misses`，`get_cache_stats()` 的 `hit_rate` 不再恆為 0
+- [x] **托盤註冊自愈**：`_retry_tray_add()` 每 1s 復用 hwnd/hIcon 重試（最多 30 次），成功即自動隱藏主窗口；`_show_tray_failed_ui()` 重試耗盡才提示且區分 OneDrive / 本機原因；托盤 GUID 改為每機持久化隨機值
+- [x] **配置清理**：移除從未被讀取的 `agents_md_standard`、`sync_tool.auto_interval_days`
+
 ## 已完成（v2.4.0，2026-08-31）
 
 - [x] **融合報告保真**：統計只累加第一階段 `inserted`（第二階段回流不再計入「新增共享」）；報告改為「新增 / 更新」分列，無新增時明確提示
@@ -74,15 +84,16 @@
 - 當前 `_enforce_write_volume_limit` 按 front matter 邊界截斷舊內容，可能丟失重要歷史條目
 - 考慮基於 priority/confidence 的智能保留策略（低優先級先截斷）
 - 加入壓縮歸檔機制：超限內容壓縮後歸檔至 cold tier，而非直接刪除
-- **（v2.4.0 實測）`memory_shared.md` 靜默截斷，優先處理**：`_shared/volume_policy.json`
+- **（v2.4.1 實測，仍未修）`memory_shared.md` 靜默截斷，優先處理**：`_shared/volume_policy.json`
   限制 128KB / `truncate_oldest`，實測各檔已頂格（122~132KB），**只裝得下最新 51~55 條**，
   而庫中有 127~134 條 —— 舊記憶雖在 shared.db，卻永遠進不了 Agent 實際讀取的 md 檔，
   且日誌只說「重建完成，51 條」，不提示丟了多少。最小改動：截斷時打 WARN + 報告丟棄條數
-- **（v2.4.0 實測）`_resolve_conflict` 從不返回 `"merge"`**，該分支（`agent_memory.py`
-  merge 分支）為死代碼，需確認當初設計意圖後決定補齊或移除
-- **（v2.4.0 實測）`create_merger()` 未傳 `embedding_service`**，向量相似度去重檔位
-  永不生效，去重仍只依賴「id 全等 / content 全等 / 歸一化全等」三檔，語義相近但
-  措辭不同的記憶仍會重複入庫
+- **（v2.4.1 已處理）`_resolve_conflict` 的 `"merge"` 死分支已移除**，`_merge_memories()`
+  一併刪除；merge 衝突策略見下方「5. 同步衝突解決策略」
+- **（v2.4.1 已接通，待實裝）`create_merger()` 現可傳 `embedding_service`**，但默認仍為
+  `None`（保持現行為）。要在同步管線真正啟用語義去重，需在 `run_sync`/融合入口構造
+  `EmbeddingService()` 實例並傳入，同時評估其對同步耗時的影響（目前去重僅依賴
+  「id 全等 / content 全等 / 歸一化全等」三檔）
 
 ## 中優先級
 
@@ -120,4 +131,4 @@
 
 ---
 
-*最後更新：2026-08-30（v2.3.0）*
+*最後更新：2026-09-03（v2.4.1）*

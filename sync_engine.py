@@ -149,10 +149,13 @@ class SyncEngine:
         on_progress : Callable[[str], None], optional
             进度回调函数，接收日志消息字符串
         dry_run : bool, optional
-            试运行模式：只打印流程，不实际写回 Agent 文件
-            (提取、融合仍执行以验证流程；写回阶段跳过)
+            试运行模式：v2.4.1 起真正只读——提取、融合、检测缓存、
+            .sync_state.json、墓碑、体积控制全部跳过写入，仅打印流程
         """
         self.config = config or get_config()
+        # v2.4.1: dry_run 必须在构造 SyncState 之前就位，
+        # 否则 SyncState/TombstoneStore 拿不到 dry_run，dry-run 会写盘
+        self.dry_run = dry_run
         # v2.2.1: get_logger() 已保证不抛异常，此处再加一层防御——
         # 日志不可用时同步照常进行（进度消息仍走 on_progress 回调）
         try:
@@ -162,14 +165,13 @@ class SyncEngine:
             self.logger = _logging.getLogger("AgentMemory.null")
             self.logger.addHandler(_logging.NullHandler())
         self.on_progress = on_progress or (lambda msg: None)
-        self.sync_state = SyncState()
+        self.sync_state = SyncState(dry_run=dry_run)
         # P1-3: 墓碑库 —— 防止已删除记忆从共享层复活
         try:
             from tombstones import get_tombstone_store
             self.tombstones = get_tombstone_store()
         except Exception:
             self.tombstones = None
-        self.dry_run = dry_run
 
         # 确定 OneDrive 融合层根目录
         # v2.1.0: 统一数据根解析 —— 与 GUI/SyncState/detect_agents 一致走 get_data_root()
@@ -273,7 +275,9 @@ class SyncEngine:
         try:
             # ① 发现 Agent
             self._emit("正在检测本地 Agent...")
-            detected = detect_agents(self.config, force_redetect=False)
+            # v2.4.1: dry-run 下不写 .detected_agents.json（检测缓存），
+            # 保证 dry-run 真正只读（缓存写入由真实同步轮次完成）
+            detected = detect_agents(self.config, force_redetect=False, write_cache=not self.dry_run)
             # v2.2.0: 统一过滤——detected 中不属于本机真实用户的条目（跨机缓存
             # 污染/环境残留）全部丢弃，防止提取/写回指向他人家目录（WinError 5）。
             # 真实用户用 SHGetKnownFolderPath 按进程 token 查，不受环境变量污染。

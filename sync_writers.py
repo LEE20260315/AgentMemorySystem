@@ -109,13 +109,16 @@ def strip_sync_markers(text: str) -> str:
 class SyncState:
     """管理同步去重状态（.sync_state.json）"""
 
-    def __init__(self, state_path: Path = None):
+    def __init__(self, state_path: Path = None, dry_run: bool = False):
         if state_path is None:
             # 默认存放在数据根目录（兼容开发和打包模式）
             from safe_io import get_data_root
             state_path = get_data_root() / ".sync_state.json"
         self.state_path = Path(state_path)
+        # v2.4.1: dry-run 只读闭环 —— save() 与墓碑记录在 dry-run 下不再落盘
+        self.dry_run = dry_run
         # P1-3: 墓碑库与 state 同目录（默认即数据根，OneDrive 同步跨设备生效）
+        # dry-run 的墓碑写入由 SyncState._record_tombstones 统一拦截
         from tombstones import TombstoneStore
         self.tombstones = TombstoneStore(path=self.state_path.parent / ".tombstones.json")
         self.state = self._load()
@@ -148,6 +151,10 @@ class SyncState:
         """
         import logging
         logger = logging.getLogger(__name__)
+        # v2.4.1: dry-run 真正只读 —— 状态不落盘（在触碰磁盘前返回）
+        if getattr(self, "dry_run", False):
+            logger.info("[dry-run] 跳过 .sync_state.json 写入")
+            return
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             from safe_io import _safe_write_text
@@ -303,6 +310,9 @@ class SyncState:
         重写（如用户清空文件重新同步），同样不墓碑化。
         墓碑写入失败不阻断 reconcile。
         """
+        # v2.4.1: dry-run 只读 —— 墓碑不落盘
+        if getattr(self, "dry_run", False):
+            return 0
         if len(hashes) > TOMBSTONE_MASS_VANISH_LIMIT:
             return 0  # 批量 vanish：文件级事件，保守跳过
         agent_state = self.state.get(agent_id, {})
@@ -443,6 +453,7 @@ class BaseMemoryWriter(ABC):
         self,
         agent_id: str,
         target_path: Path,
+        dry_run: bool = False,
     ) -> dict:
         """扫描目标文件，返回自愈 reconcile 所需的全部信息。
 
@@ -453,6 +464,9 @@ class BaseMemoryWriter(ABC):
 
         子类只需覆盖此方法；老方法 extract_hashes_in_target 仍存在以兼容
         早期调用方，等价于本方法的 hashes 字段。
+
+        v2.4.1: dry_run 参数 —— 自愈钩子在提取阶段运行，任何会写盘的
+        自愈动作（如 Trae 的 user_profile.md 重建）必须在 dry-run 下跳过。
         """
         try:
             text, candidates = self._read_target_text_safe(target_path)
@@ -498,6 +512,7 @@ class BaseMemoryWriter(ABC):
         content: str,
         agent_id: str,
         preserve_tail: bool = True,
+        policy_key: str = "memory_private_md",
     ) -> tuple:
         """写回前体积保护（方案 0.5.6）。
 
@@ -518,6 +533,10 @@ class BaseMemoryWriter(ABC):
         preserve_tail : bool
             True: 超限时保留尾部（最新内容），截断头部（旧内容）
             False: 超限时保留头部，截断尾部
+        policy_key : str
+            v2.4.1: 体积策略档位键（volume_policy.json 的 limits 键名）。
+            追加进 shared 池的 writer（如 Claude memory_shared_md）应传
+            "memory_shared_md"，避免误用 private 档的 256KB 上限。
 
         Returns
         -------
@@ -532,7 +551,7 @@ class BaseMemoryWriter(ABC):
             engine.root = target_file.parent
             policy = engine._load_volume_policy()
             limits = policy.get("limits", {})
-            file_limits = limits.get("memory_private_md", {})
+            file_limits = limits.get(policy_key, {})
             max_size_kb = file_limits.get("max_size_kb", 256)
             max_lines = file_limits.get("max_lines", 3000)
         except Exception:
@@ -1091,6 +1110,12 @@ class ClaudeMemoryWriter(BaseMemoryWriter):
         # 格式化内容
         content = self._format_memories(new_memories)
 
+        # v2.4.1: Claude 写入的是共享池 shared_from_agents.md，
+        # 体积保护必须走 shared 档（memory_shared_md），不再误用 private 档 256KB
+        content, _was_trunc, _vol_info = self._enforce_write_volume_limit(
+            memory_dirs[0] / "shared_from_agents.md", content, agent_id,
+            preserve_tail=True, policy_key="memory_shared_md")
+
         # 写入每个项目的 memory 目录
         for mem_dir in memory_dirs:
             try:
@@ -1166,7 +1191,7 @@ class ClaudeMemoryWriter(BaseMemoryWriter):
         return dirs
 
     # Claude 自愈钩子 v2：返回 dict（含 legacy + file_present）
-    def extract_target_info(self, agent_id: str, target_path: Path) -> dict:
+    def extract_target_info(self, agent_id: str, target_path: Path, dry_run: bool = False) -> dict:
         memory_dirs = self._find_memory_dirs(target_path)
         hashes = set()
         legacy_count = 0
@@ -1391,7 +1416,7 @@ class TraeMemoryWriter(BaseMemoryWriter):
 
     # ------------------------------------------------------------------
     # Trae 自愈钩子 v2：返回 dict（含 legacy + file_present）
-    def extract_target_info(self, agent_id: str, target_path: Path) -> dict:
+    def extract_target_info(self, agent_id: str, target_path: Path, dry_run: bool = False) -> dict:
         if target_path.name == "memory":
             mem_dir = target_path
         else:
@@ -1412,6 +1437,14 @@ class TraeMemoryWriter(BaseMemoryWriter):
         # 避免在 52MB 污染文件里数出 1.7 万个 legacy marker 导致保守误判
         pollution = self._detect_pollution(text)
         if pollution["polluted"]:
+            # v2.4.1: 自愈会真实重建 user_profile.md（写盘），dry-run 下必须跳过，
+            # 只上报污染事实不执行修复
+            if dry_run:
+                self.logger.warning(
+                    "Trae extract: 检测到文件污染 ({}), [dry-run] 跳过自愈重建".format(
+                        pollution["reason"]))
+                return {"hashes": hashes, "legacy": 0, "file_present": True,
+                        "repaired": False, "repair_skipped_dry_run": True}
             self.logger.warning(
                 "Trae extract: 检测到文件污染 ({}), 触发自愈重建".format(pollution["reason"])
             )
@@ -1618,7 +1651,7 @@ class HermesMemoryWriter(BaseMemoryWriter):
         return result
 
     # Hermes 自愈钩子 v2：直接返回 dict（含 legacy + file_present 信号）
-    def extract_target_info(self, agent_id: str, target_path: Path) -> dict:
+    def extract_target_info(self, agent_id: str, target_path: Path, dry_run: bool = False) -> dict:
         md_path = target_path / "MEMORY.md"
         if not md_path.exists():
             return {"hashes": set(), "legacy": 0, "file_present": False}
@@ -1813,7 +1846,7 @@ class GenericMarkdownWriter(BaseMemoryWriter):
         return result
 
     # Generic 自愈钩子 v2：返回 dict（含 legacy + file_present）
-    def extract_target_info(self, agent_id: str, target_path: Path) -> dict:
+    def extract_target_info(self, agent_id: str, target_path: Path, dry_run: bool = False) -> dict:
         candidates = []
         if target_path.is_file():
             candidates.append(target_path)

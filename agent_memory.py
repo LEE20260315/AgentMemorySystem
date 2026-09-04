@@ -2402,6 +2402,10 @@ class MemoryMerger:
 
                 if existing:
                     # 存在相似记忆，处理冲突
+                    # v2.4.1: 移除 "merge" 死分支 —— _resolve_conflict 从不
+                    # 返回 "merge"（详见其 docstring），该分支连同
+                    # _merge_memories() 一起删除。merge 冲突策略属于 TODO
+                    # #5（同步冲突解决策略），实现时再以真实可达的路径补回。
                     conflict_result = self._resolve_conflict(existing, memory)
                     if conflict_result == "keep_existing":
                         stats["skipped"] += 1
@@ -2410,12 +2414,6 @@ class MemoryMerger:
                         stats["updated"] += 1
                         stats["synced"] += 1
                         self._index_add(memory)
-                    elif conflict_result == "merge":
-                        merged = self._merge_memories(existing, memory)
-                        self._replace_in_shared(shared_db, existing.id, merged)
-                        stats["updated"] += 1
-                        stats["synced"] += 1
-                        self._index_add(merged)
                     stats["conflicts"] += 1
                 else:
                     # 无冲突，直接插入
@@ -2595,7 +2593,9 @@ class MemoryMerger:
         Returns
         -------
         str
-            解决策略: "keep_existing" | "replace" | "merge"
+            解决策略: "keep_existing" | "replace"
+            （v2.4.1: 移除 "merge" —— 该返回值从未产生过，属死代码；
+            merge 冲突策略见 TODO #5，实现时一并补回）
         """
         # 置信度比较
         confidence_order = {"high": 3, "medium": 2, "low": 1}
@@ -2625,59 +2625,9 @@ class MemoryMerger:
 
         return "keep_existing"
 
-    def _merge_memories(self, existing: MemoryEntry, new: MemoryEntry) -> MemoryEntry:
-        """
-        合并两条记忆
-
-        Parameters
-        ----------
-        existing : MemoryEntry
-            已存在的记忆
-        new : MemoryEntry
-            新记忆
-
-        Returns
-        -------
-        MemoryEntry
-            合并后的记忆
-        """
-        # 合并标签
-        merged_tags = list(set(existing.tags + new.tags))
-
-        # 选择更高的置信度
-        confidence_order = {"high": 3, "medium": 2, "low": 1}
-        if confidence_order.get(new.confidence, 1) > confidence_order.get(existing.confidence, 1):
-            confidence = new.confidence
-        else:
-            confidence = existing.confidence
-
-        # 合并内容（保留更详细的版本）
-        if len(new.content) > len(existing.content):
-            content = new.content
-        else:
-            content = existing.content
-
-        # 创建合并后的记忆
-        merged = MemoryEntry(
-            id=existing.id,
-            agent_id=existing.agent_id,
-            timestamp=max(existing.timestamp, new.timestamp),
-            source_device=existing.source_device,
-            domain=existing.domain,
-            tags=merged_tags,
-            confidence=confidence,
-            conflict_with=None,
-            content=content,
-            embedding=existing.embedding or new.embedding,
-            access_count=max(existing.access_count, new.access_count),
-            last_accessed=max(
-                existing.last_accessed or "",
-                new.last_accessed or ""
-            ) or None,
-            source_memory_id=existing.source_memory_id
-        )
-
-        return merged
+    # v2.4.1: _merge_memories() 已删除 —— 其唯一调用点是 _resolve_conflict
+    # 从不返回的 "merge" 分支，属死代码。实现 TODO #5（merge 冲突策略）时
+    # 从 git 历史恢复或重写。
 
     def _replace_in_shared(self, shared_db: MemoryDatabase, old_id: str, new_memory: MemoryEntry):
         """
@@ -3068,7 +3018,8 @@ def rebuild_shared_cache_from_md(md_files: list, db_path: Path = None) -> int:
 def create_merger(
     shared_db_path: Path,
     agent_configs: dict = None,
-    similarity_threshold: float = 0.85
+    similarity_threshold: float = 0.85,
+    embedding_service: "EmbeddingService" = None
 ) -> MemoryMerger:
     """
     创建融合器实例
@@ -3081,6 +3032,12 @@ def create_merger(
         Agent 配置 {agent_id: db_path}
     similarity_threshold : float
         相似度阈值
+    embedding_service : EmbeddingService, optional
+        Embedding 服务实例。v2.4.1: 之前工厂方法根本没有该形参，调用方
+        想传也传不了，导致 MemoryMerger 的向量相似度去重档位
+        （memory.embedding + embedding_service 的三处判定）永不生效。
+        默认仍为 None（保持现行为）；需要语义去重时显式传入
+        EmbeddingService() 实例。
 
     Returns
     -------
@@ -3089,6 +3046,7 @@ def create_merger(
     """
     merger = MemoryMerger(
         shared_db_path=shared_db_path,
+        embedding_service=embedding_service,
         similarity_threshold=similarity_threshold
     )
 
@@ -4785,6 +4743,9 @@ class SearchOptimizer:
         self.db_path = db_path
         self._query_cache = {}
         self._cache_max_size = 100
+        # v2.4.1: 补上缓存命中统计（get_cache_stats 的 hit_rate 之前恒为 0）
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def optimized_search(
         self,
@@ -4820,7 +4781,10 @@ class SearchOptimizer:
 
         # 检查缓存
         if use_cache and cache_key in self._query_cache:
+            self._cache_hits += 1
             return self._query_cache[cache_key]
+        if use_cache:
+            self._cache_misses += 1
 
         # 执行搜索
         with MemoryDatabase(self.db_path) as db:
@@ -4852,15 +4816,21 @@ class SearchOptimizer:
         self._query_cache[key] = value
 
     def clear_cache(self):
-        """清空缓存"""
+        """清空缓存（同时重置命中统计）"""
         self._query_cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def get_cache_stats(self) -> dict:
         """获取缓存统计"""
+        total = self._cache_hits + self._cache_misses
         return {
             "size": len(self._query_cache),
             "max_size": self._cache_max_size,
-            "hit_rate": 0  # TODO: 实现命中率统计
+            # v2.4.1: 实现命中率统计（此前恒为 0，TODO 已清）
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+            "hit_rate": (self._cache_hits / total) if total else 0,
         }
 
 
