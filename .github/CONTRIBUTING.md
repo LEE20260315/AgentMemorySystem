@@ -2,8 +2,9 @@
 
 Thanks for your interest in contributing! 🎉
 
-> **本文件为项目硬性协作规范，与 `docs/IMPLEMENTATION_PLAN.md` 第 4 节一致。**
+> **本文件为项目硬性协作规范。**
 > 违反「禁止直推 main」「必须分支 + review + CI」规则的贡献将被拒绝合并。
+> 现行开发计划见根目录 `TODO.md`；历史计划存档于 `docs/archive/2026-08-implementation-plan.md`。
 
 ## 核心红线（必须遵守）
 

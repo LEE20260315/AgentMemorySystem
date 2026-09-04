@@ -5,6 +5,40 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] - 2026-09-04
+
+本轮主题：**全量审计后的仓库治理**。不改动任何同步逻辑，只让仓库结构、文档与元数据回到
+"与代码事实一致"的状态。
+
+### Changed（整理）
+
+- 历史文档归档：`docs/IMPLEMENTATION_PLAN.md` → `docs/archive/2026-08-implementation-plan.md`、
+  `docs/sync_audit_2026-08-31.md` → `docs/archive/2026-08-31-sync-audit.md`，均补归档说明头
+  （逐项标注已修复/未关闭状态）；现行计划唯一权威为根目录 `TODO.md`
+- `TODO.md` 重写为可落地路线图（P0/P1/P2，每项含现状/做法/验收标准/工作量），
+  已完成记录压缩为版本索引；原 9/2 排查托盘问题的一次性探针脚本及其输出
+  （`_*.py`、`co_mta` 等 18 个文件）移出仓库视野（本地归档 `archive/`，本就未被 git 跟踪，
+  结论已沉淀于 v2.4.1 CHANGELOG）
+- README（中/英）：新增 CI 徽章；目录树补齐 `tombstones.py`、`setup_agent.py`、`TODO.md`，
+  更新 `docs/`、`tools/` 说明
+
+### Fixed（元数据与门禁）
+
+- **修复时间炸弹测试**：`test_detect_agents_cache_profiles_hash_invalidation` 场景 2 的缓存
+  时间戳硬编码 `2026-08-17`，叠加 24h TTL，自 2026-08-18 起必然失败，长期被误记为
+  「历史失败」并随多个版本带过；改为动态生成时间戳（场景 1 陈旧 / 场景 2 新鲜），
+  全量测试恢复 **324/324 全绿**
+- **CI 门禁平台修正**：测试套件为 Windows 优先（原生托盘 / 命名互斥量 / Windows 路径语义），
+  ubuntu 上有 5 条平台相关用例必然失败，导致 CI 自建立以来全红、门禁形同虚设；
+  改为 windows-latest 门禁（Python 3.10/3.11/3.12）+ ubuntu 观察项（`continue-on-error` 不阻断）
+- CI 依赖与 `requirements.txt` 对齐：移除 v2.0 起已不需要的 `pystray`，补上真正必需的 `pyyaml`
+- 补交 `tools/__init__.py`：v2.1.2 起 tools 即为正式包且被 `agent_memory.py` /
+  `sync_engine.py` / `test_full.py` 静态导入，但该文件从未提交进仓库
+- `pyproject.toml` 入口修正：`agent-memory = "agent_memory:main"` 指向不存在的函数，
+  改为 `memory_cli:main`
+- `.github/CONTRIBUTING.md` 与 PR 模板中指向 `docs/IMPLEMENTATION_PLAN.md` 的失效引用，
+  改指归档位置与 `TODO.md`
+
 ## [v2.4.1] - 2026-09-03
 
 本轮主题：**代码审计收口 + dry-run 只读闭环**。不新增同步功能，清理"写了一半的开关"、

@@ -1,11 +1,11 @@
 <!--
 合并前必填。任何一项未勾选或 CI 未绿、未获批准，严禁合并至 main。
-详见 docs/IMPLEMENTATION_PLAN.md 第 4 节与 .github/CONTRIBUTING.md。
+详见 docs/archive/2026-08-implementation-plan.md（历史）与 .github/CONTRIBUTING.md。
 -->
 
 ## 关联 TODO / 计划
-- 计划文档：`docs/IMPLEMENTATION_PLAN.md`
-- 对应 TODO 项：`#____` （可选：T1~T9 / P0；多个用逗号分隔）
+- 计划文档：`TODO.md`
+- 对应 TODO 项：`#____` （可选；多个用逗号分隔）
 
 ## 变更摘要
 <!-- 简要说明本次 PR 做了什么、为什么 -->

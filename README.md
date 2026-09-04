@@ -11,6 +11,7 @@
 [English](README_en.md) | **中文**
 
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
+[![CI](https://github.com/LEE20260315/AgentMemorySystem/actions/workflows/ci.yml/badge.svg)](https://github.com/LEE20260315/AgentMemorySystem/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10+-yellow?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey?style=flat-square)
 
@@ -246,19 +247,22 @@ AgentMemorySystem/
 ├── agent_memory.py           # 核心引擎（SQLite、並發、備份、壓縮）
 ├── sync_engine.py            # 同步編排（發現 → 提取 → 融合 → 寫回）
 ├── sync_writers.py           # Agent 寫回適配器
+├── tombstones.py             # 墓碑機制（已刪記憶跨設備防復活，v2.3.0）
 ├── safe_io.py                # 安全讀寫與資料目錄解析
 ├── memory_sync_app.py        # GUI + 系統匣 + CLI
 ├── memory_cli.py             # CLI 入口
-├── watchdog.py               # 看門狗（崩溃自动重启，v2.1.0）
+├── watchdog.py               # 看門狗（崩潰自動重啟）
+├── setup_agent.py            # Agent 初始化腳本
 ├── build.py                  # 封裝腳本（python build.py → EXE）
 ├── AgentMemorySync.bat       # 跨裝置啟動器（由 build.py 生成）
 ├── config.json               # 配置檔
 ├── requirements.txt          # Python 依賴
 ├── pyproject.toml            # 包元資訊
 ├── assets/                   # 圖示資源（app_icon.ico/png）
-├── docs/                     # 文檔（USAGE_EXAMPLE.md + 螢幕截圖）
-├── tools/                    # 工具（shrink_memory_files.py、repair_fts.py、unify_data_root.py）
-├── AgentMemory/              # 統一數據根目錄（agent_*/shared.db/同步狀態）
+├── docs/                     # 文檔（USAGE_EXAMPLE.md + 螢幕截圖；歷史文檔存檔於 docs/archive/）
+├── tools/                    # 工具（shrink_memory_files、repair_fts、log_retention、unify_data_root 等）
+├── AgentMemory/              # 統一數據根目錄（agent_*/shared.db/同步狀態，運行時自動生成）
+├── TODO.md                   # 後續工作計劃（唯一權威）
 ├── CHANGELOG.md              # 變更日誌
 ├── LICENSE                   # MIT 許可證
 └── test_full.py              # 測試套件
