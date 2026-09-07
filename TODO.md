@@ -7,7 +7,7 @@
 
 ## 現狀基線（2026-09-07 更新）
 
-- 版本 v2.5.1，遠端 main 與本地同步；測試套件 331 條，**實測 379/379 全綠**
+- 版本 v2.5.2，遠端 main 與本地同步；測試套件 333 條，**實測 388/388 全綠**
   （2026-09-07 新增語義去重回歸測試）
 - CI 門禁已修復：自建立以來在 ubuntu 上全紅（5 條平台相關用例必然失敗，門禁形同虛設）；
   現改為 windows-latest 門禁（Python 3.10/3.11/3.12）+ ubuntu 觀察項（不阻斷）
@@ -57,12 +57,14 @@
 - **剩餘**：裝 sentence-transformers（~500MB）後真模型灰度實測同步耗時
   與去重率，據此決定是否默認開啟
 
-### 6. 體積保護智能保留 + cold tier 歸檔（原 T3，依賴 #2 先行）
-- **現狀**：截斷按 front matter 邊界從舊內容開始砍，不看 priority/confidence，重要歷史可能先丟
-- **做法**：`_enforce_write_volume_limit` 引入 confidence/priority 排序（低者先截）；
-  超限內容經 `SmartCompressor` 壓縮歸檔至 cold tier 而非直接刪除；擴展 `volume_policy.json` 欄位
-- **驗收**：新增 `test_volume_limit_priority_keep` / `test_volume_archive_to_cold`
-- **工作量**：M
+### 6. ✅ 體積保護智能保留 + cold tier 歸檔（v2.5.2，2026-09-07 完成）
+- **已完成**：`_write_shared_md` 全量重建按（置信度降序、時間新者優先）排序，
+  低置信度舊條目先截（`test_volume_limit_priority_keep` 驗證 10 high + 10 low
+  頂格場景 md 中 low 為 0）；被截斷條目歸檔至 `memory_shared_cold.md`
+  （512KB 檔位，md/cold 無重複、合計覆蓋全庫，`test_volume_archive_to_cold`
+  驗證）；報告註明歸檔去向。全量 388/388 全綠。
+  文本級 `_enforce_write_volume_limit` 維持 truncate_oldest（三形態文本
+  重排序風險高收益低，主截斷點已在對像級實現，見 CHANGELOG 範圍裁剪註記）
 
 ### 7. 插件式 Agent 適配架構（原 T4）
 - **現狀**：新增 Agent 需改 `config.json` + `sync_writers.WRITER_REGISTRY` + 測試三處核心代碼
@@ -103,6 +105,7 @@
 
 | 版本 | 日期 | 一句話摘要 |
 |------|------|-----------|
+| v2.5.2 | 2026-09-07 | 體積保護智能保留 + cold tier 歸檔：置信度優先裝填 + memory_shared_cold.md（TODO P1-6） |
 | v2.5.1 | 2026-09-07 | 語義去重實裝：向量現場生成落庫 + 灰度開關 + 雙重降級保證（TODO P1-5，真模型實測待做） |
 | v2.5.0 | 2026-09-07 | merge 衝突策略真實實現：conflict_strategy 接通 + 自動合併 + 通知鉤子 + 報告可見（TODO P1-4） |
 | v2.4.2 | 2026-09-07 | 體積截斷透明化：memory_shared.md 截斷丟棄條數統計 + WARN + 同步報告可見（TODO P0-1） |
@@ -116,4 +119,4 @@
 
 ---
 
-*最後更新：2026-09-07（v2.5.1：P0 全清 + P1-4/P1-5 完成）*
+*最後更新：2026-09-07（v2.5.2：P0 全清 + P1-4/5/6 完成）*

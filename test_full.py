@@ -2950,6 +2950,109 @@ def test_semantic_dedup_config_default_off():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_volume_limit_priority_keep():
+    """v2.5.2 (TODO P1-6): 智能保留 —— 高置信度优先占用 md 容量。
+
+    修复前：全量重建按库序装填，128KB 顶格时高置信度的重要历史可能
+    先被截掉；修复后按（置信度降序、时间新者优先）排序，装不下的
+    必然是低置信度旧条目。
+    """
+    r.set_module("sync_engine")
+
+    import json
+    from sync_engine import SyncEngine, SyncReport
+    from agent_memory import MemoryDatabase, MemoryEntry
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "agent_pi").mkdir()
+        (tmp / "_shared").mkdir()
+        (tmp / "_shared" / "volume_policy.json").write_text(json.dumps({
+            "limits": {"memory_shared_md": {"max_size_kb": 64, "max_lines": 3000}}
+        }), encoding="utf-8")
+        (tmp / "agent_pi" / "memory_shared.md").write_text(
+            "# pi 共享记忆\n\n", encoding="utf-8")
+
+        engine = SyncEngine()
+        engine.root = tmp
+        engine._shared_db = tmp / "shared.db"
+        # 10 条 high（h00-h09）+ 10 条 low（l00-l09），时间戳交错、内容各 ~8KB
+        with MemoryDatabase(engine._shared_db) as db:
+            for i in range(10):
+                for conf, prefix in (("high", "h"), ("low", "l")):
+                    db.insert_memory(MemoryEntry(
+                        id="{}{:02d}".format(prefix, i), agent_id="alpha",
+                        timestamp="2026-01-01T00:{:02d}:00".format(i if conf == "high" else 9 - i),
+                        source_device="d1", domain="general", tags=[],
+                        confidence=conf, conflict_with=None,
+                        content="记忆{}{} ".format(prefix, i) + "x" * 8192))
+
+        report = SyncReport()
+        engine._write_shared_md("pi", report=report)
+
+        text = (tmp / "agent_pi" / "memory_shared.md").read_text(encoding="utf-8")
+        kept_high = len(__import__("re").findall(r"^id: h\d\d$", text, __import__("re").MULTILINE))
+        kept_low = len(__import__("re").findall(r"^id: l\d\d$", text, __import__("re").MULTILINE))
+        r.assert_true("md 容量顶格（发生截断）", kept_high + kept_low < 20)
+        r.assert_eq("md 中 low 条目为 0（低置信度先截）", kept_low, 0)
+        r.assert_true("md 保留的全部是 high 条目", kept_high > 0)
+        dropped = report.volume_truncations[0]["dropped"] if report.volume_truncations else 0
+        r.assert_eq("dropped = 全部 low + 未装下的 high", dropped, 20 - kept_high)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_volume_archive_to_cold():
+    """v2.5.2 (TODO P1-6): cold tier 归档 —— 被截断条目写入 memory_shared_cold.md。
+
+    修复前：截断即丢弃（仅库中有）；修复后归档文件可见可检索。
+    """
+    r.set_module("sync_engine")
+
+    import json
+    from sync_engine import SyncEngine, SyncReport
+    from agent_memory import MemoryDatabase, MemoryEntry
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "agent_pi").mkdir()
+        (tmp / "_shared").mkdir()
+        (tmp / "_shared" / "volume_policy.json").write_text(json.dumps({
+            "limits": {"memory_shared_md": {"max_size_kb": 64, "max_lines": 3000}}
+        }), encoding="utf-8")
+        (tmp / "agent_pi" / "memory_shared.md").write_text(
+            "# pi 共享记忆\n\n", encoding="utf-8")
+
+        engine = SyncEngine()
+        engine.root = tmp
+        engine._shared_db = tmp / "shared.db"
+        with MemoryDatabase(engine._shared_db) as db:
+            for i in range(20):
+                db.insert_memory(MemoryEntry(
+                    id="m{:02d}".format(i), agent_id="alpha",
+                    timestamp="2026-01-01T00:{:02d}:00".format(i),
+                    source_device="d1", domain="general", tags=[],
+                    confidence="high", conflict_with=None,
+                    content="记忆{} ".format(i) + "x" * 8192))
+
+        report = SyncReport()
+        engine._write_shared_md("pi", report=report)
+
+        cold_path = tmp / "agent_pi" / "memory_shared_cold.md"
+        r.assert_true("cold 归档文件已创建", cold_path.exists())
+        cold_text = cold_path.read_text(encoding="utf-8")
+        md_text = (tmp / "agent_pi" / "memory_shared.md").read_text(encoding="utf-8")
+        in_md = set(__import__("re").findall(r"^id: (m\d\d)$", md_text, __import__("re").MULTILINE))
+        in_cold = set(__import__("re").findall(r"^id: (m\d\d)$", cold_text, __import__("re").MULTILINE))
+        r.assert_true("md 与 cold 无重复", not (in_md & in_cold))
+        r.assert_eq("归档覆盖全部被截断条目", len(in_md) + len(in_cold), 20)
+        r.assert_true("归档含说明头", "cold tier" in cold_text)
+        detail = report.volume_truncations[0]["detail"] if report.volume_truncations else ""
+        r.assert_true("报告注明归档去向", "归档至 memory_shared_cold.md" in detail)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_cache_hit_rate_stats():
     """v2.4.1: SearchOptimizer.get_cache_stats 的命中率不再是恒 0"""
     r.set_module("agent_memory")
@@ -3113,6 +3216,9 @@ ALL_TESTS = [
     test_semantic_dedup_vector_path,
     test_semantic_dedup_degrades_on_model_error,
     test_semantic_dedup_config_default_off,
+    # v2.5.2: 体积保护智能保留 + cold 归档（TODO P1-6）
+    test_volume_limit_priority_keep,
+    test_volume_archive_to_cold,
 ]
 def main():
     print("=" * 60)

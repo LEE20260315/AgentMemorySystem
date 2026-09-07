@@ -823,6 +823,91 @@ class SyncEngine:
     # ------------------------------------------------------------------
     # v2.0: memory_shared.md 写入（完全重建模式）
     # ------------------------------------------------------------------
+    def _build_shared_entry_block(self, mem) -> list:
+        """构造 front matter 条目块（memory_shared.md 与 cold 归档共用）。
+
+        v2.5.2: 从 _write_shared_md 的内部闭包提为方法，供 cold 归档复用。
+        """
+        from sync_writers import strip_sync_markers
+        tags_str = ", ".join('"{}"'.format(t) for t in (mem.tags or []))
+        entry_lines = [
+            "---",
+            "id: {}".format(mem.id),
+            "agent_id: {}".format(mem.agent_id),
+            "timestamp: {}".format(mem.timestamp),
+            "source_device: {}".format(getattr(mem, "source_device", "unknown")),
+            "domain: {}".format(mem.domain or "general"),
+            "tags: [{}]".format(tags_str),
+            "confidence: {}".format(mem.confidence or "medium"),
+            "conflict_with: null",
+            "---",
+        ]
+        content = strip_sync_markers(mem.content or "")
+        # v2.2.0: 正文中独立的 --- 行（markdown 分隔线）会干扰条目边界解析，
+        # 写入时替换为 - - -，读取端无感知
+        import re as _re2
+        content = _re2.sub(r"(?m)^---\s*$", "- - -", content)
+        entry_lines.append(content)
+        entry_lines.append("")
+        return entry_lines
+
+    def _write_cold_archive(self, agent_id: str, dropped: list) -> int:
+        """v2.5.2 (TODO P1-6): 被截断条目归档至 <agent_dir>/memory_shared_cold.md。
+
+        cold tier 而非直接删除 —— 条目在共享库 shared.db 仍有全量，cold 文件
+        是给 Agent 侧检索用的可见归档；不在 Agent 常规加载路径
+        （agent_runtime_manual 只注入 memory_shared.md）。
+        上限走 volume_policy.json 的 memory_shared_cold_md 档
+        （默认 512KB / 8000 行），超限丢最旧。
+
+        Returns
+        -------
+        int: 实际归档条数（0 = 无可归档 / 写入失败）
+        """
+        if not dropped:
+            return 0
+        agent_dir = self.root / ("agent_" + agent_id)
+        if not agent_dir.exists():
+            return 0
+        cold_path = agent_dir / "memory_shared_cold.md"
+
+        try:
+            policy = self._load_volume_policy()
+            cl = policy.get("limits", {}).get("memory_shared_cold_md", {})
+            max_lines = cl.get("max_lines", 8000)
+            max_size_bytes = cl.get("max_size_kb", 512) * 1024
+        except Exception:
+            max_lines, max_size_bytes = 8000, 512 * 1024
+
+        # 归档内按时间新→旧（与 md 阅读习惯一致）
+        ordered = sorted(dropped, key=lambda m: m.timestamp or "", reverse=True)
+        lines = [
+            "# {} 归档记忆（cold tier）".format(agent_id),
+            "",
+            "> 超出 memory_shared.md 容量的旧条目，供检索；不影响 Agent 常规加载。",
+            "",
+        ]
+        current_size = len("\n".join(lines).encode("utf-8"))
+        kept = 0
+        for mem in ordered:
+            blk = self._build_shared_entry_block(mem)
+            add = len(("\n".join(blk) + "\n").encode("utf-8"))
+            if len(lines) + len(blk) > max_lines or current_size + add > max_size_bytes:
+                break
+            lines.extend(blk)
+            current_size += add
+            kept += 1
+        if kept == 0:
+            return 0
+        try:
+            from safe_io import _safe_write_text
+            if _safe_write_text(cold_path, "\n".join(lines).rstrip() + "\n"):
+                return kept
+            self.logger.warning("cold 归档写入失败: {}".format(cold_path))
+        except Exception as e:
+            self.logger.warning("cold 归档失败({}): {}".format(agent_id, e))
+        return 0
+
     def _write_shared_md(self, agent_id: str, shared_memories: list = None,
                          report: SyncReport = None):
         """增量更新 <agent_dir>/memory_shared.md（v2.2.0 方案 A + P3-13 增量同步）。
@@ -838,6 +923,11 @@ class SyncEngine:
         统计丢弃条数、日志升 WARN，并写入 report.volume_truncations
         （此前只打一句 INFO「重建完成，51 条」，不提示库里有 127+ 条，
         Agent 永远读不到被截断的旧记忆）。
+
+        v2.5.2 (TODO P1-6): 智能保留 + cold tier 归档 ——
+        全量重建按（置信度降序、时间新者优先）排序，重要历史优先占用
+        md 容量，低置信度旧条目先被截断；被截断条目经 _write_cold_archive
+        归档至 memory_shared_cold.md 而非直接丢弃。
 
         Parameters
         ----------
@@ -877,30 +967,7 @@ class SyncEngine:
             max_lines = 2000
             max_size_bytes = 128 * 1024
 
-        from sync_writers import strip_sync_markers
-
-        def _build_entry_block(mem) -> list:
-            tags_str = ", ".join('"{}"'.format(t) for t in (mem.tags or []))
-            entry_lines = [
-                "---",
-                "id: {}".format(mem.id),
-                "agent_id: {}".format(mem.agent_id),
-                "timestamp: {}".format(mem.timestamp),
-                "source_device: {}".format(getattr(mem, "source_device", "unknown")),
-                "domain: {}".format(mem.domain or "general"),
-                "tags: [{}]".format(tags_str),
-                "confidence: {}".format(mem.confidence or "medium"),
-                "conflict_with: null",
-                "---",
-            ]
-            content = strip_sync_markers(mem.content or "")
-            # v2.2.0: 正文中独立的 --- 行（markdown 分隔线）会干扰条目边界解析，
-            # 写入时替换为 - - -，读取端无感知
-            import re as _re2
-            content = _re2.sub(r"(?m)^---\s*$", "- - -", content)
-            entry_lines.append(content)
-            entry_lines.append("")
-            return entry_lines
+        from sync_writers import strip_sync_markers  # noqa: F401 (条目块方法内部使用)
 
         # ---- 增量路径（文件存在且可解析）----
         #
@@ -925,14 +992,14 @@ class SyncEngine:
                     est_lines = len(current.splitlines())
                     est_size = len(current.encode("utf-8"))
                     for mem in new_entries:
-                        blk = _build_entry_block(mem)
+                        blk = self._build_shared_entry_block(mem)
                         est_lines += len(blk)
                         est_size += len(("\n".join(blk) + "\n").encode("utf-8"))
                     if est_lines <= max_lines and est_size <= max_size_bytes:
                         # 能完整容纳全部新条目：直接增量追加（最小写放大）
                         blocks = []
                         for mem in new_entries:
-                            blocks.extend(_build_entry_block(mem))
+                            blocks.extend(self._build_shared_entry_block(mem))
                         new_text = current.rstrip() + "\n\n" + "\n".join(blocks).rstrip() + "\n"
                         if _safe_write_text(shared_md_path, new_text):
                             self._emit("  memory_shared.md({}): 增量追加 {} 条（库中共 {} 条）".format(
@@ -942,11 +1009,20 @@ class SyncEngine:
                     # 超限 / 写入失败：降级全量重建
 
         # ---- 全量重建路径（文件缺失 / 格式损坏 / 超限降级）----
+        # v2.5.2 (TODO P1-6): 智能保留 —— 按（置信度降序、时间新者优先）排序，
+        # 重要历史优先占用 md 容量；此前按库序从旧往新装，高置信度的重要
+        # 历史可能先被截掉
+        confidence_order = {"high": 3, "medium": 2, "low": 1}
+        entries_sorted = sorted(
+            entries,
+            key=lambda m: (confidence_order.get(m.confidence, 2), m.timestamp or ""),
+            reverse=True,
+        )
         lines = ["# {} 共享记忆".format(agent_id), ""]
         current_size = len("\n".join(lines).encode("utf-8"))
         written_count = 0
-        for mem in entries:
-            entry_lines = _build_entry_block(mem)
+        for mem in entries_sorted:
+            entry_lines = self._build_shared_entry_block(mem)
             new_lines_count = len(lines) + len(entry_lines)
             new_size = current_size + len(("\n".join(entry_lines) + "\n").encode("utf-8"))
             if new_lines_count > max_lines or new_size > max_size_bytes:
@@ -955,17 +1031,24 @@ class SyncEngine:
             current_size = new_size
             written_count += 1
 
-        # v2.4.2: 截断透明化 —— 丢弃条数必须被看见，不能只报"重建完成，N 条"
-        dropped_count = len(entries) - written_count
+        # v2.5.2: 被截断条目归档至 cold tier 而非直接丢弃
+        dropped_entries = entries_sorted[written_count:]
+        dropped_count = len(dropped_entries)
+        archived_count = 0
+        if dropped_count > 0:
+            archived_count = self._write_cold_archive(agent_id, dropped_entries)
+
         new_text = "\n".join(lines).rstrip() + "\n"
         try:
             from safe_io import _safe_write_text
             if _safe_write_text(shared_md_path, new_text):
                 if dropped_count > 0:
-                    trunc_msg = ("体积保护截断: 库中 {} 条 / 保留 {} 条 / 丢弃 {} 条"
-                                 "（被丢弃的旧记忆 Agent 读不到；"
+                    arch_note = ("，其中 {} 条已归档至 memory_shared_cold.md".format(archived_count)
+                                 if archived_count > 0 else "")
+                    trunc_msg = ("体积保护截断: 库中 {} 条 / 保留 {} 条 / 丢弃 {} 条{}"
+                                 "（被丢弃条目 Agent 主视图读不到；"
                                  "可调大 _shared/volume_policy.json 的 memory_shared_md 上限）"
-                                 ).format(len(entries), written_count, dropped_count)
+                                 ).format(len(entries), written_count, dropped_count, arch_note)
                     self.logger.warning(
                         "memory_shared.md({}): {}".format(agent_id, trunc_msg))
                     self._emit("  ⚠ memory_shared.md({}): {}".format(agent_id, trunc_msg))
@@ -974,8 +1057,8 @@ class SyncEngine:
                             "agent": agent_id,
                             "target": "memory_shared.md",
                             "dropped": dropped_count,
-                            "detail": "库中 {} 条 / 保留 {} 条（128KB 顶格装不下全部）".format(
-                                len(entries), written_count),
+                            "detail": "库中 {} 条 / 保留 {} 条{}".format(
+                                len(entries), written_count, arch_note),
                         })
                 else:
                     self._emit("  memory_shared.md({}): 重建完成，{} 条（库中共 {} 条）".format(

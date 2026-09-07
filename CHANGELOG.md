@@ -5,6 +5,42 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.5.2] - 2026-09-07
+
+本轮主题：**体积保护智能保留 + cold tier 归档（TODO P1-6）**。此前全量重建
+按库序装填 md，128KB 顶格时高置信度的重要历史可能先被截掉；被截断条目
+只存在于 shared.db，Agent 侧完全不可见。
+
+### Added（智能保留 + cold 归档）
+
+- **智能保留**：`_write_shared_md` 全量重建按（置信度降序、时间新者优先）
+  排序后装填 —— 高置信度记忆优先占用 md 容量，装不下的一定是低置信度
+  旧条目；127 条顶格装 55 条的场景下，重要历史不再被先丢
+- **cold tier 归档**：新增 `_write_cold_archive`，被截断条目写入
+  `<agent_dir>/memory_shared_cold.md`（front matter 格式 + 说明头，归档内
+  按时间新→旧），md 与 cold 无重复、两者合计覆盖库中全部条目；
+  cold 文件不在 Agent 常规加载路径，仅作检索
+- **volume_policy.json 新档位** `memory_shared_cold_md`
+  （512KB / 8000 行 / truncate_oldest），代码侧同名默认值兜底
+- 报告 detail 注明归档去向（「其中 N 条已归档至 memory_shared_cold.md」）
+- `_build_entry_block` 闭包提为 `_build_shared_entry_block` 方法（md 与
+  cold 归档共用，行为不变）
+
+### Fixed（测试）
+
+- 新增验收测试 `test_volume_limit_priority_keep`（10 high + 10 low 顶格
+  场景：md 中 low 为 0、保留的全是 high）与 `test_volume_archive_to_cold`
+  （归档覆盖全部被截断条目、md/cold 无重复、报告注明去向）；
+  全量测试 **388/388 全绿**
+
+### 备注（范围裁剪）
+
+- TODO 原文做法含 `_enforce_write_volume_limit` 的 confidence 排序；
+  该函数处理的是**已拼接的文本**（Hermes §/Trae 列表/front matter 三种
+  形态混杂），解析重排序风险高收益低，且实测主要截断点在
+  `_write_shared_md`（对象级、P0-1 已实证），本轮在该处实现完整语义。
+  文本级截断维持 truncate_oldest 不变
+
 ## [v2.5.1] - 2026-09-07
 
 本轮主题：**语义去重实装（TODO P1-5）**。v2.4.1 接通了
