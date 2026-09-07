@@ -2728,9 +2728,9 @@ def test_conflict_merge():
         with am.MemoryDatabase(shared) as db:
             merged = db.get_memory("mem_x", track_access=False)
             total = len(db.list_memories(limit=100))
-        # 注：tags 不做 DB 往返断言 —— MemoryDatabase._row_to_entry 的 tags
-        # 恒为 []（memory_tags 表断链，既有缺陷，见 TODO P2）；标签并集语义
-        # 在下方 _merge_memories 内存级断言中验证。
+        # v2.5.4: tags 断链已修（TODO P2-8），此处补上 DB 往返断言。
+        # 合并语义（并集去重）另在下方 _merge_memories 内存级断言中验证。
+        r.assert_eq("DB 往返: 标签并集", sorted(merged.tags), sorted(["部署", "运维"]))
         r.assert_eq("置信度取高者", merged.confidence, "high")
         r.assert_true("内容取更详细版本", "PyInstaller" in (merged.content or ""))
         r.assert_eq("时间戳取较新", merged.timestamp, "2026-01-02T00:00:00")
@@ -3233,6 +3233,147 @@ def test_cache_hit_rate_stats():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_tags_roundtrip_get_memory():
+    """v2.5.4: get_memory 读得回入库标签（TODO P2-8 断链）。"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db_path = tmp / "tags.db"
+        with am.MemoryDatabase(db_path) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="mem_tag_001", agent_id="claude",
+                timestamp="2026-09-07T10:00:00+00:00", source_device="d1",
+                domain="general", tags=["部署", "共享"], confidence="high",
+                conflict_with=None, content="带标签的记忆",
+            ))
+
+            got = db.get_memory("mem_tag_001")
+            r.assert_eq("get_memory 读回标签", sorted(got.tags), sorted(["共享", "部署"]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tags_roundtrip_list_and_search():
+    """v2.5.4: list_memories / search_memory 标签仍然读得回（防回归）。"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db_path = tmp / "tags2.db"
+        with am.MemoryDatabase(db_path) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="mem_tag_002", agent_id="trae",
+                timestamp="2026-09-07T11:00:00+00:00", source_device="d1",
+                domain="general", tags=["alpha"], confidence="high",
+                conflict_with=None, content="关键词XYZ 的记忆",
+            ))
+
+            listed = db.list_memories(limit=10)
+            r.assert_eq("list_memories 读回标签",
+                        [e.tags for e in listed], [["alpha"]])
+
+            found = db.search_by_keyword("关键词XYZ", limit=10)
+            r.assert_eq("search_by_keyword 读回标签",
+                        [e.tags for e in found], [["alpha"]])
+
+            # 标签过滤仍然可用
+            r.assert_eq("按标签过滤命中", len(db.list_memories(tags=["alpha"])), 1)
+            r.assert_eq("无此标签不命中", len(db.list_memories(tags=["nope"])), 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tags_replace_drops_stale():
+    """v2.5.4: 同 id 重插（REPLACE）后旧标签不再残留。"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db_path = tmp / "tags3.db"
+        with am.MemoryDatabase(db_path) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="mem_tag_003", agent_id="claude",
+                timestamp="2026-09-07T12:00:00+00:00", source_device="d1",
+                domain="general", tags=["旧标签", "保留"], confidence="high",
+                conflict_with=None, content="原始内容",
+            ))
+            db.insert_memory(am.MemoryEntry(
+                id="mem_tag_003", agent_id="claude",
+                timestamp="2026-09-07T12:00:00+00:00", source_device="d1",
+                domain="general", tags=["保留", "新标签"], confidence="high",
+                conflict_with=None, content="更新后的内容",
+            ))
+
+            got = db.get_memory("mem_tag_003")
+            r.assert_eq("内容已更新", got.content, "更新后的内容")
+            r.assert_eq("旧标签已移除", sorted(got.tags), sorted(["保留", "新标签"]))
+            r.assert_true("旧标签不在结果中", "旧标签" not in got.tags)
+
+            orphan = db.conn.execute("""
+                SELECT COUNT(*) FROM memory_tags mt
+                JOIN tags t ON mt.tag_id = t.id
+                WHERE t.name = '旧标签'
+            """).fetchone()[0]
+            r.assert_eq("旧标签关联已清理", orphan, 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tags_no_orphan_after_delete_and_purge():
+    """v2.5.4: 删除记忆 / 墓碑清理后 memory_tags 不留孤儿。"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+    from tombstones import TombstoneStore
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db_path = tmp / "tags4.db"
+        with am.MemoryDatabase(db_path) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="mem_tag_004", agent_id="claude",
+                timestamp="2026-09-07T13:00:00+00:00", source_device="d1",
+                domain="general", tags=["待删"], confidence="high",
+                conflict_with=None, content="会被删除的内容",
+            ))
+            db.insert_memory(am.MemoryEntry(
+                id="mem_tag_005", agent_id="claude",
+                timestamp="2026-09-07T13:01:00+00:00", source_device="d1",
+                domain="general", tags=["待清理"], confidence="high",
+                conflict_with=None, content="会被墓碑清理的内容",
+            ))
+
+            def orphan_count():
+                return db.conn.execute("""
+                    SELECT COUNT(*) FROM memory_tags mt
+                    WHERE mt.memory_id NOT IN (SELECT id FROM memories)
+                """).fetchone()[0]
+
+            r.assert_eq("删除前无孤儿", orphan_count(), 0)
+            db.delete_memory("mem_tag_004")
+            r.assert_eq("delete_memory 后无孤儿", orphan_count(), 0)
+
+        # 墓碑清理路径（此前只清 memories / memories_fts）
+        store = TombstoneStore(tmp / "tombstones.json")
+        store.add([am.content_hash("会被墓碑清理的内容")])
+        store.purge_db(db_path)
+
+        with am.MemoryDatabase(db_path) as db:
+            left = db.conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE id='mem_tag_005'").fetchone()[0]
+            r.assert_eq("墓碑清理已删主表行", left, 0)
+            orphan = db.conn.execute("""
+                SELECT COUNT(*) FROM memory_tags mt
+                WHERE mt.memory_id NOT IN (SELECT id FROM memories)
+            """).fetchone()[0]
+            r.assert_eq("墓碑清理后无标签孤儿", orphan, 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -3377,6 +3518,11 @@ ALL_TESTS = [
     test_detector_plugin_appends,
     test_load_plugins_from_dir,
     test_builtin_plugins_registered,
+    # v2.5.4: 标签存取断链修复（TODO P2-8）
+    test_tags_roundtrip_get_memory,
+    test_tags_roundtrip_list_and_search,
+    test_tags_replace_drops_stale,
+    test_tags_no_orphan_after_delete_and_purge,
 ]
 def main():
     print("=" * 60)

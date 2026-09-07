@@ -250,6 +250,15 @@ class TombstoneStore:
                     )
                 except sqlite3.OperationalError:
                     pass  # 无 FTS 表
+                # v2.5.4: 补删 memory_tags —— 此前只清 memories/memories_fts，
+                # 墓碑清理后标签关联成孤儿（与 v2.1.0 的 FTS 孤儿同源）
+                try:
+                    conn.execute(
+                        "DELETE FROM memory_tags WHERE memory_id IN ({})".format(placeholders),
+                        chunk,
+                    )
+                except sqlite3.OperationalError:
+                    pass  # 无标签表（旧库）
                 conn.execute(
                     "DELETE FROM memories WHERE id IN ({})".format(placeholders),
                     chunk,

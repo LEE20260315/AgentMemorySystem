@@ -7,8 +7,8 @@
 
 ## 現狀基線（2026-09-07 更新）
 
-- 版本 v2.5.3，遠端 main 與本地同步；測試套件 333 條，**實測 407/407 全綠**
-  （2026-09-07 新增插件架構回歸測試 5 條）
+- 版本 v2.5.4，遠端 main 與本地同步；測試套件 333 條，**實測 421/421 全綠**
+  （2026-09-07 新增標籤斷鏈回歸測試 4 條 + 插件架構 5 條）
 - CI 門禁已修復：自建立以來在 ubuntu 上全紅（5 條平台相關用例必然失敗，門禁形同虛設）；
   現改為 windows-latest 門禁（Python 3.10/3.11/3.12）+ ubuntu 觀察項（不阻斷）
 - 首個 Release 已上線：`AgentMemorySync v2.4.2` 附預編譯 zip（2026-09-07，見 P0 #2）；
@@ -80,10 +80,13 @@
 
 ## P2 —— 平台與體驗
 
-### 8. MemoryDatabase tags 存取斷鏈修復（2026-09-07 發現）
-- `_row_to_entry` 的 tags 恒為 `[]`（註釋「單獨獲取」但 `get_memory` /
-  `list_memories` 均未查 `memory_tags` 表），入庫標籤讀不回來
-- 修復涉及 schema 與全部調用方；當前 merge 測試以內存級斷言繞開
+### 8. ✅ MemoryDatabase tags 存取斷鏈修復（v2.5.4，2026-09-07 完成）
+- **已完成**：`_row_to_entry(row, tags=None)` 默認自查標籤（此前寫死 `[]`），
+  `get_memory` / `search_by_vector` 不再拿到空標籤；新增 `_fetch_tags_bulk`
+  按 900 分片，`list_memories` 由逐條 50 次查詢降為 1 次；標籤按名稱升序。
+  另修兩處同源缺陷：`INSERT OR REPLACE` 不清 `memory_tags` 導致舊標籤刪不掉、
+  墓碑 `purge_db` 漏刪 `memory_tags` 造成孤兒。回歸測試 4 條 +
+  `test_conflict_merge` 補 DB 往返標籤並集斷言，全量 **421/421 全綠**
 
 ### 9. macOS / Linux GUI 支援（原 T2，長週期分支）
 - 托盤後端抽象（`WindowsTrayBackend` / `PystrayBackend` 按平台選擇）；macOS `.app` 打包、
@@ -108,6 +111,7 @@
 
 | 版本 | 日期 | 一句話摘要 |
 |------|------|-----------|
+| v2.5.4 | 2026-09-07 | 標籤存取斷鏈修復：`_row_to_entry` 默認自查標籤 + 批量取標籤 + REPLACE/墓碑清理不再留 `memory_tags` 孤兒（TODO P2-8） |
 | v2.5.3 | 2026-09-07 | 插件式 Agent 適配架構：`WriterPlugin`/`DetectorPlugin` + 註冊表 + 目錄加載（默認關閉），新增 Agent 零改核心代碼（TODO P1-7） |
 | v2.5.2 | 2026-09-07 | 體積保護智能保留 + cold tier 歸檔：置信度優先裝填 + memory_shared_cold.md（TODO P1-6） |
 | v2.5.1 | 2026-09-07 | 語義去重實裝：向量現場生成落庫 + 灰度開關 + 雙重降級保證（TODO P1-5，真模型實測待做） |
@@ -123,4 +127,4 @@
 
 ---
 
-*最後更新：2026-09-07（v2.5.3：P0 全清 + P1 全清（4/5/6/7 完成）；剩餘 P2 平台與體驗）*
+*最後更新：2026-09-07（v2.5.4：P0/P1 全清 + P2-8 標籤斷鏈修復；剩餘 P2-9~12 平台與體驗，均為長週期）*

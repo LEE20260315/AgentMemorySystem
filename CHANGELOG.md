@@ -5,6 +5,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.5.4] - 2026-09-07
+
+本轮主题：**标签（tags）存取断链修复（TODO P2-8）**。入库的标签读不回来：
+`_row_to_entry` 一律返回 `tags=[]`，只有 `list_memories` 那条路径会补；
+`get_memory` / `search_by_vector` 直接调它，于是标签对调用方恒为空。
+
+### Fixed
+
+- `_row_to_entry(row, tags=None)`：**默认自行查询标签**（此前写死 `tags=[]  # 单独获取`）。
+  调用方无需再记得补；显式传入（批量结果）则直接用，不重复查库
+- 新增 `_fetch_tags()` / `_fetch_tags_bulk()`：后者按 900 条分片，
+  `list_memories`（默认 50 条）从**逐条 50 次查询降为 1 次**；
+  `search_by_vector` 同样改为一次性取，顺带修掉它拿空标签的问题
+- `insert_memories_batch`：`INSERT OR REPLACE` 只换主表行、不清 `memory_tags`
+  旧关联 —— 改标签后**旧标签删不掉**。现在写标签前先 `DELETE FROM memory_tags`
+- `TombstoneStore.purge_db`：墓碑清理此前只清 `memories` / `memories_fts`，
+  **漏删 `memory_tags`** → 孤儿累积（与 v2.1.0 的 FTS 孤儿同源）。现补上，
+  并用 `OperationalError` 保护（旧库无标签表时跳过）
+- 标签结果统一按名称升序（此前无 `ORDER BY`，顺序取决于查询计划）
+
+### Tests
+
+- 新增 4 条：`test_tags_roundtrip_get_memory`（get_memory 读回）、
+  `test_tags_roundtrip_list_and_search`（list/search 防回归 + 标签过滤）、
+  `test_tags_replace_drops_stale`（REPLACE 后旧标签不残留）、
+  `test_tags_no_orphan_after_delete_and_purge`（删除与墓碑清理后无孤儿）
+- `test_conflict_merge` 补**DB 往返标签并集断言**（此前因断链只能做内存级）；
+  全量测试 **421/421 全绿**
+
+---
+
 ## [v2.5.3] - 2026-09-07
 
 本轮主题：**插件式 Agent 适配架构（TODO P1-7）**。此前新增一个 Agent 要同时

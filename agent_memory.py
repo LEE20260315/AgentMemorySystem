@@ -24,6 +24,8 @@ from typing import Callable, Optional
 
 from safe_io import _safe_write_text, get_data_root
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # 配置管理器 - 新增
@@ -1492,6 +1494,10 @@ class MemoryDatabase:
                         "INSERT OR REPLACE INTO memories_fts (id, content, domain) VALUES (?, ?, ?)",
                         (entry.id, entry.content, entry.domain),
                     )
+                    # v2.5.4: INSERT OR REPLACE 只替换主表行，memory_tags 的旧
+                    # 关联会残留 —— 同一条记忆改标签后旧标签删不掉。先清空再写。
+                    self.conn.execute(
+                        "DELETE FROM memory_tags WHERE memory_id = ?", (entry.id,))
                     for tag in entry.tags:
                         if tag not in tag_cache:
                             self.conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
@@ -1753,6 +1759,9 @@ class MemoryDatabase:
         import numpy as np
         query_vec = np.frombuffer(query_embedding, dtype=np.float32)
 
+        # v2.5.4: 一次性取标签（此前逐条 _row_to_entry 会拿到空标签）
+        tags_map = self._fetch_tags_bulk([row['id'] for row in rows])
+
         results = []
         for row in rows:
             if row['embedding']:
@@ -1763,7 +1772,8 @@ class MemoryDatabase:
                         np.linalg.norm(query_vec) * np.linalg.norm(memory_vec) + 1e-8
                     )
                     if similarity >= similarity_threshold:
-                        entry = self._row_to_entry(row)
+                        entry = self._row_to_entry(
+                            row, tags=tags_map.get(str(row['id']), []))
                         results.append((entry, float(similarity)))
                 except Exception:
                     continue
@@ -1879,32 +1889,82 @@ class MemoryDatabase:
         cursor = self.conn.execute(sql, params)
         return self._rows_to_entries(cursor.fetchall())
 
-    def _rows_to_entries(self, rows) -> list:
-        """将数据库行转换为 MemoryEntry 列表"""
-        entries = []
-        for row in rows:
-            entry = self._row_to_entry(row)
+    # SQLite 单次查询变量上限（默认 999），批量取标签按此分片
+    _SQL_MAX_VARS = 900
 
-            # 获取标签
-            cursor = self.conn.execute("""
-                SELECT t.name FROM tags t
+    def _fetch_tags_bulk(self, memory_ids) -> dict:
+        """批量取标签：``{memory_id: [tag, ...]}``。
+
+        v2.5.4: 以一次查询替代逐条查询（``list_memories`` 默认 50 条即 50 次
+        → 1 次）。分片是为了不撞 SQLite 变量上限；单段失败只记 Warning，
+        不影响其他段与调用方。
+        """
+        ids = [str(i) for i in memory_ids if i]
+        result = {i: [] for i in ids}
+        if not ids:
+            return result
+
+        for start in range(0, len(ids), self._SQL_MAX_VARS):
+            chunk = ids[start:start + self._SQL_MAX_VARS]
+            placeholders = ",".join(["?"] * len(chunk))
+            sql = """
+                SELECT mt.memory_id, t.name FROM tags t
                 JOIN memory_tags mt ON t.id = mt.tag_id
-                WHERE mt.memory_id = ?
-            """, (entry.id,))
-            entry.tags = [r[0] for r in cursor.fetchall()]
+                WHERE mt.memory_id IN ({})
+                ORDER BY t.name
+            """.format(placeholders)
+            try:
+                for mid, name in self.conn.execute(sql, chunk).fetchall():
+                    result.setdefault(str(mid), []).append(name)
+            except Exception as e:
+                logger.warning("批量取标签失败（跳过该段）: %s", e)
+        return result
 
-            entries.append(entry)
-        return entries
+    def _fetch_tags(self, memory_id: str) -> list:
+        """取单条记忆的标签名列表（按标签名升序）。"""
+        if not memory_id:
+            return []
+        return self._fetch_tags_bulk([memory_id]).get(str(memory_id), [])
 
-    def _row_to_entry(self, row) -> MemoryEntry:
-        """将单个数据库行转换为 MemoryEntry"""
+    def _rows_to_entries(self, rows) -> list:
+        """将数据库行转换为 MemoryEntry 列表（含标签，一次批量查询）"""
+        rows = list(rows)
+        tags_map = self._fetch_tags_bulk([row['id'] for row in rows])
+        return [
+            self._row_to_entry(row, tags=tags_map.get(str(row['id']), []))
+            for row in rows
+        ]
+
+    def _row_to_entry(self, row, tags=None) -> MemoryEntry:
+        """将单个数据库行转换为 MemoryEntry。
+
+        Parameters
+        ----------
+        row : sqlite3.Row
+            主表行
+        tags : list, optional
+            标签名列表。**None 时由本方法自行查询**（v2.5.4 修复）。
+
+            v2.5.4 之前的写法是 ``tags=[]  # 单独获取``，但只有
+            ``_rows_to_entries`` 会补；``get_memory`` 与 ``search_by_vector``
+            直接调本方法，于是入库的标签读不回来（TODO P2-8 断链）。
+            现在默认即查，调用方无需记得补；已有调用方若显式传入
+            （如 `_rows_to_entries` 的批量结果）则直接使用，不重复查库。
+
+        Returns
+        -------
+        MemoryEntry
+            标签按名称升序
+        """
+        if tags is None:
+            tags = self._fetch_tags(row['id'])
         return MemoryEntry(
             id=row['id'],
             agent_id=row['agent_id'],
             timestamp=row['timestamp'],
             source_device=row['source_device'],
             domain=row['domain'],
-            tags=[],  # 单独获取
+            tags=list(tags),
             confidence=row['confidence'],
             conflict_with=row['conflict_with'],
             content=row['content'],
