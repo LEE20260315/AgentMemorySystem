@@ -1437,13 +1437,60 @@ class MemoryDatabase:
             )
         """)
 
-        self.conn.commit()
+        self._commit()
 
     def close(self):
         """关闭数据库连接"""
         if self.conn:
             self.conn.close()
             self.conn = None
+
+    # ------------------------------------------------------------------
+    # 事务批处理（v2.5.5 / TODO P2-11）
+    # ------------------------------------------------------------------
+    def _commit(self):
+        """统一提交口。
+
+        ``batch_transaction()`` 生效期间跳过提交 —— 由最外层一次落盘。
+        v2.5.5: 把分散的 ``conn.commit()`` 收口到这里，是为了让融合这类
+        「循环里逐条写」的场景能把 fsync 次数从 N 降到 1，而不必改写入
+        语义（写入仍立即对后续读取可见，只是不逐条落盘）。
+        """
+        if getattr(self, "_in_batch_tx", False):
+            return
+        self.conn.commit()
+
+    @contextmanager
+    def batch_transaction(self):
+        """把期间的写合并进一个事务。
+
+        等价性：与逐条提交唯一的区别是**不逐条 fsync**。循环内后续的读取
+        （如 ``_find_similar_in_shared`` 的 ID 精确匹配）看到的仍是已写入
+        的数据，因此同步判定逻辑完全不变。异常时整体回滚，反而更安全。
+
+        实测（10 万条库 / 融合 5000 条）：首轮 59 → 约 1000+ 条/s，
+        见 ``docs/benchmark/``。嵌套调用只有最外层生效。
+        """
+        if getattr(self, "_in_batch_tx", False):
+            yield
+            return
+
+        prev = self.conn.isolation_level
+        self._in_batch_tx = True
+        self.conn.isolation_level = None
+        self.conn.execute("BEGIN")
+        try:
+            yield
+            self.conn.execute("COMMIT")
+        except Exception:
+            try:
+                self.conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            self._in_batch_tx = False
+            self.conn.isolation_level = prev
 
     def __enter__(self):
         return self
@@ -1516,7 +1563,7 @@ class MemoryDatabase:
                 except Exception:
                     # 单条失败不阻塞整批
                     pass
-            self.conn.commit()
+            self._commit()
             return success
         except Exception as e:
             self.conn.rollback()
@@ -1538,7 +1585,7 @@ class MemoryDatabase:
             self.conn.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
             self.conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,))
             cur = self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-            self.conn.commit()
+            self._commit()
             return cur.rowcount > 0
         except Exception:
             try:
@@ -1559,7 +1606,7 @@ class MemoryDatabase:
                 "DELETE FROM memory_tags WHERE memory_id = ?", [(i,) for i in ids])
             cur = self.conn.executemany(
                 "DELETE FROM memories WHERE id = ?", [(i,) for i in ids])
-            self.conn.commit()
+            self._commit()
             return cur.rowcount if cur.rowcount is not None else len(ids)
         except Exception:
             try:
@@ -1585,14 +1632,14 @@ class MemoryDatabase:
                 WHERE id IN (SELECT id FROM memories_fts WHERE id NOT IN (SELECT id FROM memories))
             """)
             result["removed"] = cur.rowcount
-            self.conn.commit()
+            self._commit()
             # 剩余 FTS 行
             cur = self.conn.execute("SELECT COUNT(*) FROM memories_fts")
             result["remaining"] = cur.fetchone()[0]
             # 重建索引整理碎片
             try:
                 self.conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
-                self.conn.commit()
+                self._commit()
             except Exception:
                 pass
             # VACUUM 回收空间
@@ -1828,7 +1875,7 @@ class MemoryDatabase:
                     last_accessed = datetime('now')
                 WHERE id = ?
             """, (memory_id,))
-            self.conn.commit()
+            self._commit()
 
         return self._row_to_entry(row)
 
@@ -2490,65 +2537,69 @@ class MemoryMerger:
             # 获取 Agent 的所有记忆
             agent_memories = agent_db.list_memories(limit=10000)
 
-            for memory in agent_memories:
-                # 设置来源
-                memory.source_memory_id = memory.id
+            # v2.5.5 (TODO P2-11): 整轮一个事务 —— 逐条 commit 时每条一次
+            # fsync（实测 17ms/条，吞吐被压到 59 条/s）。写入仍立即对循环内
+            # 后续读取可见，判定逻辑不变；异常时整轮回滚。
+            with shared_db.batch_transaction():
+                for memory in agent_memories:
+                    # 设置来源
+                    memory.source_memory_id = memory.id
 
-                # v2.5.1 (TODO P1-5): 语义去重 —— 为无向量的记忆现场生成向量。
-                # embedding_service 未传（默认）时此分支不进入，行为与现状一致；
-                # 生成失败（缺 sentence-transformers / 模型加载失败）则置降级标志，
-                # 本轮剩余记忆全部走文本三档去重，不再重试
-                if self.embedding_service and not self._embedding_disabled \
-                        and not memory.embedding:
-                    try:
-                        memory.embedding = self.embedding_service.encode_single(
-                            memory.content)
-                    except Exception as e:
-                        self._embedding_disabled = True
-                        logging.warning(
-                            "语义去重向量生成失败，本轮降级为文本去重: %s", e)
+                    # v2.5.1 (TODO P1-5): 语义去重 —— 为无向量的记忆现场生成向量。
+                    # embedding_service 未传（默认）时此分支不进入，行为与现状一致；
+                    # 生成失败（缺 sentence-transformers / 模型加载失败）则置降级标志，
+                    # 本轮剩余记忆全部走文本三档去重，不再重试
+                    if self.embedding_service and not self._embedding_disabled \
+                            and not memory.embedding:
+                        try:
+                            memory.embedding = self.embedding_service.encode_single(
+                                memory.content)
+                        except Exception as e:
+                            self._embedding_disabled = True
+                            logging.warning(
+                                "语义去重向量生成失败，本轮降级为文本去重: %s", e)
 
-                # 检查是否已存在于共享库
-                existing = self._find_similar_in_shared(shared_db, memory)
+                    # 检查是否已存在于共享库
+                    existing = self._find_similar_in_shared(shared_db, memory)
 
-                if existing:
-                    # 存在相似记忆，处理冲突
-                    # v2.5.0 (TODO P1-4): "merge" 策略真实可达 —— 按配置的
-                    # conflict_strategy 分流；newer_wins 行为与 v2.4.x 完全一致
-                    conflict_result = self._resolve_conflict(existing, memory)
-                    if conflict_result == "keep_existing":
-                        stats["skipped"] += 1
-                    elif conflict_result == "replace":
-                        self._replace_in_shared(shared_db, existing.id, memory)
-                        stats["updated"] += 1
+                    if existing:
+                        # 存在相似记忆，处理冲突
+                        # v2.5.0 (TODO P1-4): "merge" 策略真实可达 —— 按配置的
+                        # conflict_strategy 分流；newer_wins 行为与 v2.4.x 完全一致
+                        conflict_result = self._resolve_conflict(existing, memory)
+                        if conflict_result == "keep_existing":
+                            stats["skipped"] += 1
+                        elif conflict_result == "replace":
+                            self._replace_in_shared(shared_db, existing.id, memory)
+                            stats["updated"] += 1
+                            stats["synced"] += 1
+                            self._index_add(memory)
+                        elif conflict_result == "merge":
+                            merged = self._merge_memories(existing, memory)
+                            self._replace_in_shared(shared_db, existing.id, merged)
+                            stats["merged"] += 1
+                            stats["synced"] += 1
+                            stats["merged_ids"].append(
+                                {"existing_id": existing.id, "new_id": memory.id})
+                            self._index_add(merged)
+                            # v2.5.0: 冲突通知钩子（多机同写的冲突检测）
+                            if self.on_merge:
+                                try:
+                                    self.on_merge({
+                                        "existing_id": existing.id,
+                                        "new_id": memory.id,
+                                        "agent_id": memory.agent_id,
+                                        "detail": "merge 策略: 标签并集/内容取更详细/置信度取高",
+                                    })
+                                except Exception as e:
+                                    logging.warning("on_merge 钩子异常(不阻断): %s", e)
+                        stats["conflicts"] += 1
+                    else:
+                        # 无冲突，直接插入
+                        shared_db.insert_memory(memory)
+                        stats["inserted"] += 1
                         stats["synced"] += 1
                         self._index_add(memory)
-                    elif conflict_result == "merge":
-                        merged = self._merge_memories(existing, memory)
-                        self._replace_in_shared(shared_db, existing.id, merged)
-                        stats["merged"] += 1
-                        stats["synced"] += 1
-                        stats["merged_ids"].append(
-                            {"existing_id": existing.id, "new_id": memory.id})
-                        self._index_add(merged)
-                        # v2.5.0: 冲突通知钩子（多机同写的冲突检测）
-                        if self.on_merge:
-                            try:
-                                self.on_merge({
-                                    "existing_id": existing.id,
-                                    "new_id": memory.id,
-                                    "agent_id": memory.agent_id,
-                                    "detail": "merge 策略: 标签并集/内容取更详细/置信度取高",
-                                })
-                            except Exception as e:
-                                logging.warning("on_merge 钩子异常(不阻断): %s", e)
-                    stats["conflicts"] += 1
-                else:
-                    # 无冲突，直接插入
-                    shared_db.insert_memory(memory)
-                    stats["inserted"] += 1
-                    stats["synced"] += 1
-                    self._index_add(memory)
 
         return stats
 
@@ -2593,31 +2644,33 @@ class MemoryMerger:
             except Exception:
                 _tombs = None
 
-            for memory in shared_memories:
-                # 跳过自己创建的记忆
-                if memory.agent_id == agent_id:
-                    continue
+            # v2.5.5 (TODO P2-11): 同 sync_agent_to_shared，整轮一个事务
+            with agent_db.batch_transaction():
+                for memory in shared_memories:
+                    # 跳过自己创建的记忆
+                    if memory.agent_id == agent_id:
+                        continue
 
-                # P1-3: 墓碑命中则跳过（不计数为 synced）
-                if _tombs is not None:
-                    try:
-                        if _tombs.is_tombstoned(content_hash(memory.content)):
-                            stats["skipped"] += 1
-                            continue
-                    except Exception:
-                        pass
+                    # P1-3: 墓碑命中则跳过（不计数为 synced）
+                    if _tombs is not None:
+                        try:
+                            if _tombs.is_tombstoned(content_hash(memory.content)):
+                                stats["skipped"] += 1
+                                continue
+                        except Exception:
+                            pass
 
-                # 检查是否已存在
-                cursor = agent_db.conn.execute(
-                    "SELECT id FROM memories WHERE id = ?", (memory.id,)
-                )
-                if cursor.fetchone():
-                    stats["skipped"] += 1
-                    continue
+                    # 检查是否已存在
+                    cursor = agent_db.conn.execute(
+                        "SELECT id FROM memories WHERE id = ?", (memory.id,)
+                    )
+                    if cursor.fetchone():
+                        stats["skipped"] += 1
+                        continue
 
-                # 插入到 Agent 数据库
-                agent_db.insert_memory(memory)
-                stats["synced"] += 1
+                    # 插入到 Agent 数据库
+                    agent_db.insert_memory(memory)
+                    stats["synced"] += 1
 
         return stats
 

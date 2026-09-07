@@ -1,0 +1,70 @@
+{
+  "env": {
+    "python": "3.14.2",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "sqlite": "3.50.4",
+    "app_version": "2.5.5",
+    "timestamp": "2026-09-07T09:09:47.170341+00:00"
+  },
+  "config": {
+    "n": 100000,
+    "merge_n": 5000,
+    "samples": 200,
+    "seed": 20260907,
+    "batch": 1000
+  },
+  "results": [
+    {
+      "scenario": "写入（分批 1000 条/批）",
+      "items": 100000,
+      "seconds": 5.65,
+      "per_sec": 17699.4,
+      "note": "库 100000 条 / FTS 100000 行 / 文件 52.47 MB",
+      "db_rows": 100000,
+      "fts_rows": 100000,
+      "db_size_mb": 52.47
+    },
+    {
+      "scenario": "get_memory（主键，200 次）",
+      "items": 200,
+      "seconds": 0.851,
+      "per_sec": 235.1,
+      "note": "含标签查询"
+    },
+    {
+      "scenario": "list_memories（尾页 50 条）",
+      "items": 50,
+      "seconds": 0.017,
+      "per_sec": 2963.3,
+      "note": "OFFSET 99950 深翻页"
+    },
+    {
+      "scenario": "search_by_keyword（LIKE）",
+      "items": 20,
+      "seconds": 0.024,
+      "per_sec": 837.9,
+      "note": "埋点命中约 100 条"
+    },
+    {
+      "scenario": "list_memories（按标签过滤）",
+      "items": 50,
+      "seconds": 0.106,
+      "per_sec": 469.6,
+      "note": "memory_tags JOIN"
+    },
+    {
+      "scenario": "融合 首轮（空共享库）",
+      "items": 5000,
+      "seconds": 1.848,
+      "per_sec": 2705.1,
+      "note": "5000 条入库"
+    },
+    {
+      "scenario": "融合 稳态（无变化）",
+      "items": 5000,
+      "seconds": 0.375,
+      "per_sec": 13341.5,
+      "note": "本轮变动 0 条（应为 0）"
+    }
+  ]
+}

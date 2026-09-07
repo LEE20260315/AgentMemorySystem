@@ -3374,6 +3374,103 @@ def test_tags_no_orphan_after_delete_and_purge():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_batch_transaction_semantics():
+    """v2.5.5: batch_transaction 合并提交 + 写入立即可见 + 异常回滚。"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        db_path = tmp / "tx.db"
+        with am.MemoryDatabase(db_path) as db:
+            def make(mid, content):
+                return am.MemoryEntry(
+                    id=mid, agent_id="claude",
+                    timestamp="2026-09-07T14:00:00+00:00", source_device="d1",
+                    domain="general", tags=[], confidence="high",
+                    conflict_with=None, content=content,
+                )
+
+            # 1) 事务内写入后，同一连接立即可见（同步判定的依赖前提）
+            with db.batch_transaction():
+                db.insert_memory(make("tx_1", "事务内写入"))
+                visible = db.conn.execute(
+                    "SELECT COUNT(*) FROM memories WHERE id='tx_1'").fetchone()[0]
+                r.assert_eq("事务内写入立即可见", visible, 1)
+
+            # 2) 退出事务后已落盘（换新连接读得到）
+            with am.MemoryDatabase(db_path) as other:
+                r.assert_eq("退出后已落盘", other.get_memory("tx_1").content, "事务内写入")
+
+            # 3) 异常时整体回滚
+            try:
+                with db.batch_transaction():
+                    db.insert_memory(make("tx_2", "应被回滚"))
+                    raise RuntimeError("boom")
+            except RuntimeError:
+                pass
+            left = db.conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE id='tx_2'").fetchone()[0]
+            r.assert_eq("异常已回滚", left, 0)
+
+            # 4) 回滚后仍可正常写入（连接状态未损坏）
+            db.insert_memory(make("tx_3", "事务后继续写"))
+            r.assert_eq("回滚后连接可用", db.get_memory("tx_3").content, "事务后继续写")
+
+            # 5) 嵌套只有最外层生效
+            with db.batch_transaction():
+                db.insert_memory(make("tx_4", "嵌套写入"))
+                with db.batch_transaction():
+                    db.insert_memory(make("tx_5", "内层写入"))
+            r.assert_eq("嵌套内层不提前提交",
+                        db.conn.execute(
+                            "SELECT COUNT(*) FROM memories WHERE id IN ('tx_4','tx_5')"
+                        ).fetchone()[0], 2)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_merge_uses_single_transaction():
+    """v2.5.5: 融合首轮把整轮写合并到一个事务（吞吐提升一个数量级）。"""
+    r.set_module("agent_memory")
+    import agent_memory as am
+    import time
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        agent_db = tmp / "a.db"
+        shared_db = tmp / "shared.db"
+        n = 300
+        with am.MemoryDatabase(agent_db) as db:
+            db.insert_memories_batch([
+                am.MemoryEntry(
+                    id="m{:04d}".format(i), agent_id="alpha",
+                    timestamp="2026-09-07T15:{:02d}:00+00:00".format(i % 60),
+                    source_device="d1", domain="general", tags=[],
+                    confidence="high", conflict_with=None,
+                    content="融合事务测试内容 {}".format(i),
+                ) for i in range(n)
+            ])
+
+        merger = am.create_merger(shared_db, agent_configs={"alpha": agent_db},
+                                  conflict_strategy="newer_wins")
+        t0 = time.perf_counter()
+        first = merger.full_sync()
+        elapsed = time.perf_counter() - t0
+
+        r.assert_eq("首轮全部入库", first["alpha_to_shared"]["inserted"], n)
+        # 逐条 commit 时实测约 17ms/条（300 条 ≈ 5s+）；合并后应远低于此
+        r.assert_true("融合耗时已降至亚秒级（实测 {:.3f}s）".format(elapsed),
+                      elapsed < 1.0)
+
+        # 数据确实落盘（换连接可读）
+        with am.MemoryDatabase(shared_db) as db:
+            r.assert_eq("共享库行数", db.conn.execute(
+                "SELECT COUNT(*) FROM memories").fetchone()[0], n)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 ALL_TESTS = [
     # safe_io
     test_safe_io_get_data_root_dev_mode,
@@ -3523,6 +3620,9 @@ ALL_TESTS = [
     test_tags_roundtrip_list_and_search,
     test_tags_replace_drops_stale,
     test_tags_no_orphan_after_delete_and_purge,
+    # v2.5.5: 性能基准 + 融合事务批处理（TODO P2-11）
+    test_batch_transaction_semantics,
+    test_merge_uses_single_transaction,
 ]
 def main():
     print("=" * 60)
