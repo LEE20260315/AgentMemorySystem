@@ -1,0 +1,95 @@
+name: Release
+
+# P0-2（TODO）：发布预编译 EXE。推送 v* tag 时自动打包并创建 GitHub Release。
+#
+# 链路：tag push → 测试门禁 → python build.py（PyInstaller onedir）
+#       → zip 分发包 → gh release create 上传。
+#
+# 说明：
+# - zip 内容为顶层 AgentMemorySync/ 目录（EXE + _internal 依赖，解压即用）。
+#   双击 AgentMemorySync.exe 即可运行（v2.1.1 起 EXE 副本自动收敛到
+#   %LOCALAPPDATA% 本机运行目录，无需 OneDrive pointer）。
+# - SmartScreen "未签名"提示属常态，README FAQ 有指引；代码签名（付费证书）暂缓。
+# - workflow_dispatch 手动触发仅用于调试构建，不会创建 Release。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # gh release create 需要
+
+jobs:
+  build-exe:
+    name: Build EXE & Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # tkinter 随 CPython Windows 安装包自带，无需额外安装
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml Pillow "pyinstaller==6.22.2"
+
+      # 测试门禁：与 CI 同一套件，坏代码不打 tag 发布
+      - name: Run test suite (gate)
+        run: python test_full.py
+        env:
+          PYTHONUTF8: "1"
+
+      # build.py：PyInstaller 打包到 %TEMP%\AgentMemoryBuild\AgentMemorySync，
+      # 冒烟检查后同步回项目根 <repo>/AgentMemorySync/（OneDrive 分发包）。
+      # _install_local（装 LOCALAPPDATA 副本/快捷方式）在 CI 上可能告警，无害。
+      - name: Build EXE
+        run: python build.py
+        env:
+          PYTHONUTF8: "1"
+
+      - name: Verify & package zip
+        shell: pwsh
+        run: |
+          # 主路径：build.py 同步回项目根的 AgentMemorySync/
+          if (-not (Test-Path "AgentMemorySync/AgentMemorySync.exe")) {
+            # 回退：直接取 PyInstaller 原始产物
+            $src = Join-Path $env:TEMP "AgentMemoryBuild/AgentMemorySync"
+            if (Test-Path "$src/AgentMemorySync.exe") {
+              Copy-Item -Recurse -Force $src "AgentMemorySync"
+            } else {
+              throw "bundle not found (neither repo/AgentMemorySync nor TEMP build output)"
+            }
+          }
+          $exe = Get-Item "AgentMemorySync/AgentMemorySync.exe"
+          Write-Host "EXE: $($exe.FullName) ($([math]::Round($exe.Length/1MB,1)) MB)"
+          $zipName = "AgentMemorySync-$($env:GITHUB_REF_NAME)-windows-x64.zip"
+          Compress-Archive -Path "AgentMemorySync" -DestinationPath $zipName -Force
+          Write-Host "zip: $zipName ($([math]::Round((Get-Item $zipName).Length/1MB,1)) MB)"
+          "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $zip = $env:ZIP_NAME
+          $notes = @'
+          预编译分发包（Windows x64）：解压后双击 AgentMemorySync\AgentMemorySync.exe 即可。
+          - 首次运行自动迁移到本机 %LOCALAPPDATA%\AgentMemorySystem\Run（OneDrive/项目目录只作分发源）
+          - SmartScreen 提示"未签名"属常态：点"更多信息 - 仍要运行"，详见 README FAQ
+          - 数据根默认 OneDrive 共享目录（跨设备同步），运行期写入全部在本机 LOCALAPPDATA
+          - 源码运行/自行打包见 README
+
+          构建信息：windows-latest + Python 3.12 + PyInstaller 6.22.2（onedir）
+          '@
+          gh release create $tag $zip --title "AgentMemorySync $tag" --notes $notes

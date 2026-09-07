@@ -95,7 +95,8 @@ The first `python build.py` run also creates desktop and start-menu shortcuts (p
 
 Each time you rebuild with `python build.py`, the next launch of `AgentMemorySync.bat` automatically refreshes the local runtime copy — no manual copying needed.
 
-> **No pre-built EXE is published on the Releases page yet.** Until an official binary is released, please use "Run from Source" above, or run `python build.py` yourself to package it.
+> **Recommended: download the pre-built EXE (no Python needed)** — grab `AgentMemorySync-vX.Y.Z-windows-x64.zip` from the [Releases page](https://github.com/LEE20260315/AgentMemorySystem/releases/latest), extract it, and double-click `AgentMemorySync\AgentMemorySync.exe`. On first run the app copies itself to the machine-local `%LOCALAPPDATA%\AgentMemorySystem\Run` (this does not conflict with the "don't double-click" note above, which applies to running straight off OneDrive). The SmartScreen "unsigned" warning is expected — click "More info → Run anyway"; see the FAQ.
+> If the Releases page is still empty, use "Run from Source" above or package it yourself with `python build.py`.
 
 ### Common Commands
 

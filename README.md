@@ -98,7 +98,8 @@ python memory_sync_app.py --cli    # 啟動 CLI
 
 之後每次 `python build.py` 重新打包，下次啟動 `AgentMemorySync.bat` 會自動刷新本地副本，無需手動複製。
 
-> **目前 Releases 頁面尚未發布預編譯 EXE。** 在官方 EXE 釋出前，請用上節「源碼執行」或自行 `python build.py` 打包。
+> **推薦：直接下載預編譯 EXE（免裝 Python）** —— 到 [Releases 頁面](https://github.com/LEE20260315/AgentMemorySystem/releases/latest) 下載 `AgentMemorySync-vX.Y.Z-windows-x64.zip`，解壓後雙擊 `AgentMemorySync\AgentMemorySync.exe` 即可。首次執行會自動把程序複製到本機 `%LOCALAPPDATA%\AgentMemorySystem\Run` 運行（與上節 OneDrive 場景的「不要直接雙擊」不衝突：zip 解壓在本地目錄，雙擊即安全）。SmartScreen「未簽名」提示點「更多資訊 → 仍要執行」，詳見 FAQ。
+> 若 Releases 頁面尚為空，請用上節「源碼執行」或自行 `python build.py` 打包。
 
 ### 常用之命
 
