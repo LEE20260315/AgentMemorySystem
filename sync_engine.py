@@ -431,11 +431,24 @@ class SyncEngine:
                 if len(agent_dbs) >= 2:
                     # v2.5.0 (TODO P1-4): 冲突策略从配置读取（sync.conflict_strategy，
                     # 默认 newer_wins 行为不变）；merge 发生时经钩子转发到同步日志
+                    # v2.5.1 (TODO P1-5): 语义去重灰度开关（sync.semantic_dedup，
+                    # 默认 False 行为不变）。EmbeddingService 构造是惰性的
+                    # （首次 encode 才加载模型），缺 sentence-transformers /
+                    # numpy 时融合器内自动降级文本去重
+                    embedding_service = None
+                    if self.config.get("sync.semantic_dedup", False):
+                        try:
+                            from agent_memory import EmbeddingService
+                            embedding_service = EmbeddingService()
+                            self._emit("语义去重: 已启用（模型将在首次调用时加载）")
+                        except Exception as e:
+                            self._emit("语义去重: 构造失败，降级文本去重 ({})".format(e))
                     merger = create_merger(
                         shared_db_path=shared_db_path,
                         agent_configs=agent_dbs,
                         conflict_strategy=self.config.get(
                             "sync.conflict_strategy", "newer_wins"),
+                        embedding_service=embedding_service,
                         on_merge=lambda info: self._emit(
                             "  ⚠ 冲突自动合并(merge): {} ← {} — {}".format(
                                 info.get("existing_id"), info.get("new_id"),

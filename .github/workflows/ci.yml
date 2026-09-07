@@ -34,7 +34,7 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml Pillow
+          pip install pyyaml Pillow numpy
 
       - name: Run test suite
         # test_full.py 在失败时以退出码 1 结束，使本步骤失败
@@ -63,7 +63,7 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml Pillow
+          pip install pyyaml Pillow numpy
 
       - name: Run test suite (observation only)
         run: python test_full.py

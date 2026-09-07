@@ -80,6 +80,11 @@ class ConfigManager:
         },
         "sync": {
             "conflict_strategy": "newer_wins",
+            # v2.5.1 (TODO P1-5): 语义去重灰度开关。true 时融合管线构造
+            # EmbeddingService（lazy 加载模型），措辞不同语义相近的记忆
+            # 经向量比对命中去重；缺 sentence-transformers/numpy 时自动
+            # 降级为文本三档去重，行为与 false 完全一致
+            "semantic_dedup": False,
             "retry_count": 3,
             "retry_delay_seconds": 1,
             "lock_timeout_seconds": 30
@@ -2359,6 +2364,11 @@ class MemoryMerger:
             conflict_strategy = "newer_wins"
         self.conflict_strategy = conflict_strategy
         self.on_merge = on_merge
+        # v2.5.1 (TODO P1-5): 语义去重降级标志。
+        # 向量生成/搜索一旦失败（缺 sentence-transformers / numpy / 模型加载失败），
+        # 本轮直接禁用向量路径，避免每条记忆重复抛异常重试；
+        # 行为回落文本三档去重（id 全等 / content 全等 / 归一化全等）
+        self._embedding_disabled = False
 
     def register_agent(self, agent_id: str, db_path: Path):
         """
@@ -2416,6 +2426,20 @@ class MemoryMerger:
             for memory in agent_memories:
                 # 设置来源
                 memory.source_memory_id = memory.id
+
+                # v2.5.1 (TODO P1-5): 语义去重 —— 为无向量的记忆现场生成向量。
+                # embedding_service 未传（默认）时此分支不进入，行为与现状一致；
+                # 生成失败（缺 sentence-transformers / 模型加载失败）则置降级标志，
+                # 本轮剩余记忆全部走文本三档去重，不再重试
+                if self.embedding_service and not self._embedding_disabled \
+                        and not memory.embedding:
+                    try:
+                        memory.embedding = self.embedding_service.encode_single(
+                            memory.content)
+                    except Exception as e:
+                        self._embedding_disabled = True
+                        logging.warning(
+                            "语义去重向量生成失败，本轮降级为文本去重: %s", e)
 
                 # 检查是否已存在于共享库
                 existing = self._find_similar_in_shared(shared_db, memory)
@@ -2586,14 +2610,19 @@ class MemoryMerger:
             return shared_db.get_memory(memory.id, track_access=False)
 
         # 使用向量相似度搜索（如果有 embedding）
-        if memory.embedding and self.embedding_service:
-            results = shared_db.search_by_vector(
-                query_embedding=memory.embedding,
-                limit=1,
-                similarity_threshold=self.similarity_threshold
-            )
-            if results:
-                return results[0][0]  # 返回最相似的记忆
+        # v2.5.1: 搜索失败（如缺 numpy）不炸同步 —— 记 warning 后落文本三档
+        if memory.embedding and self.embedding_service and not self._embedding_disabled:
+            try:
+                results = shared_db.search_by_vector(
+                    query_embedding=memory.embedding,
+                    limit=1,
+                    similarity_threshold=self.similarity_threshold
+                )
+                if results:
+                    return results[0][0]  # 返回最相似的记忆
+            except Exception as e:
+                self._embedding_disabled = True
+                logging.warning("向量相似度搜索失败，本轮降级为文本去重: %s", e)
 
         # 降级到内容相似度检查
         cursor = shared_db.conn.execute(

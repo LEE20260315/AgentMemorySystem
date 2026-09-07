@@ -2818,6 +2818,138 @@ def test_conflict_newer_wins():
                 "merge")
 
 
+def test_semantic_dedup_vector_path():
+    """v2.5.1 (TODO P1-5): 语义去重向量路径 —— 无向量记忆现场生成 + 向量命中去重。
+
+    stub service 返回 float32×2 向量：同前缀内容 → [1,0]，其他 → [0,1]。
+    语义相近的两条记忆（不同措辞）经向量比对命中，不重复入库。
+    需要 numpy（search_by_vector 依赖），缺则跳过（vector extras 未装场景）。
+    """
+    r.set_module("agent_memory")
+
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        r.ok("跳过: 未装 numpy（vector extras 未装，语义路径不参与）")
+        return
+
+    import struct
+    import agent_memory as am
+
+    class _StubEmbeddingService:
+        def __init__(self):
+            self.calls = 0
+
+        def encode_single(self, text):
+            self.calls += 1
+            if text.startswith("项目部署"):
+                return struct.pack("2f", 1.0, 0.0)
+            return struct.pack("2f", 0.0, 1.0)
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        shared = tmp / "shared.db"
+        db_a = tmp / "a.db"
+        db_b = tmp / "b.db"
+        with am.MemoryDatabase(db_a) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="s1", agent_id="alpha", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[],
+                confidence="medium", conflict_with=None,
+                content="项目部署在 windows 服务器"))
+        with am.MemoryDatabase(db_b) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="s2", agent_id="beta", timestamp="2026-01-02T00:00:00",
+                source_device="d2", domain="general", tags=[],
+                confidence="medium", conflict_with=None,
+                content="项目部署在 windows 服务器，使用 onedir 打包"))
+
+        svc = _StubEmbeddingService()
+        merger = am.create_merger(shared, agent_configs={"alpha": db_a, "beta": db_b},
+                                  embedding_service=svc, similarity_threshold=0.85)
+        results = merger.full_sync()
+
+        # alpha 首插（s1 带向量落库）；beta 的 s2 措辞不同但语义相近 → 向量命中
+        r.assert_eq("alpha 插入 1 条", results["alpha_to_shared"]["inserted"], 1)
+        r.assert_true("beta 侧向量生成被调用", svc.calls >= 1)
+        # 语义命中后进入冲突解决（newer_wins: s2 时间戳更新 → replace s1），
+        # 关键不变量：不重复入库（inserted=0，库中总数恒 1）
+        r.assert_eq("beta 侧无新增", results["beta_to_shared"]["inserted"], 0)
+        r.assert_eq("beta 侧走冲突处理", results["beta_to_shared"]["updated"], 1)
+        with am.MemoryDatabase(shared) as db:
+            total = len(db.list_memories(limit=100))
+            row = db.conn.execute(
+                "SELECT COUNT(*) AS n FROM memories WHERE embedding IS NOT NULL"
+            ).fetchone()
+        r.assert_eq("共享库不重复入库", total, 1)
+        r.assert_eq("向量已随条目落库（replace 后仍 1 行带向量）", row["n"], 1)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_semantic_dedup_degrades_on_model_error():
+    """v2.5.1 (TODO P1-5): 模型不可用时降级 —— 行为与未传 service 完全一致。
+
+    sentence-transformers 未装时 EmbeddingService.encode_single 抛
+    AgentMemoryError；融合器必须捕获、置降级标志、继续纯文本同步。
+    """
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    class _BrokenEmbeddingService:
+        def encode_single(self, text):
+            raise am.AgentMemoryError(
+                "sentence-transformers 未安装。请运行: pip install sentence-transformers")
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        shared = tmp / "shared.db"
+        db_a = tmp / "a.db"
+        db_b = tmp / "b.db"
+        with am.MemoryDatabase(db_a) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="d1", agent_id="alpha", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="general", tags=[],
+                confidence="medium", conflict_with=None, content="记忆甲"))
+        with am.MemoryDatabase(db_b) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="d2", agent_id="beta", timestamp="2026-01-02T00:00:00",
+                source_device="d2", domain="general", tags=[],
+                confidence="medium", conflict_with=None, content="记忆乙"))
+
+        merger = am.create_merger(shared, agent_configs={"alpha": db_a, "beta": db_b},
+                                  embedding_service=_BrokenEmbeddingService())
+        results = merger.full_sync()  # 不得抛异常
+
+        r.assert_eq("降级后 alpha 正常插入", results["alpha_to_shared"]["inserted"], 1)
+        r.assert_eq("降级后 beta 正常插入", results["beta_to_shared"]["inserted"], 1)
+        r.assert_true("降级标志已置位", merger._embedding_disabled)
+        with am.MemoryDatabase(shared) as db:
+            rows = db.conn.execute(
+                "SELECT COUNT(*) AS n FROM memories WHERE embedding IS NOT NULL"
+            ).fetchone()
+        r.assert_eq("无向量落库", rows["n"], 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_semantic_dedup_config_default_off():
+    """v2.5.1 (TODO P1-5): 灰度开关默认关闭 —— 不构造 service，行为与现状一致。"""
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    r.assert_eq("默认配置 semantic_dedup=False",
+                am.ConfigManager.DEFAULT_CONFIG["sync"]["semantic_dedup"], False)
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        merger = am.create_merger(tmp / "s.db")
+        r.assert_true("默认不传 embedding_service", merger.embedding_service is None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_cache_hit_rate_stats():
     """v2.4.1: SearchOptimizer.get_cache_stats 的命中率不再是恒 0"""
     r.set_module("agent_memory")
@@ -2977,6 +3109,10 @@ ALL_TESTS = [
     # v2.5.0: merge 冲突策略真实实现（TODO P1-4）
     test_conflict_merge,
     test_conflict_newer_wins,
+    # v2.5.1: 语义去重实装（TODO P1-5）
+    test_semantic_dedup_vector_path,
+    test_semantic_dedup_degrades_on_model_error,
+    test_semantic_dedup_config_default_off,
 ]
 def main():
     print("=" * 60)

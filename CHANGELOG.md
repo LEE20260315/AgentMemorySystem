@@ -5,6 +5,43 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.5.1] - 2026-09-07
+
+本轮主题：**语义去重实装（TODO P1-5）**。v2.4.1 接通了
+`create_merger(embedding_service=...)` 形参，但同步管线默认传 None，且
+`MemoryEntry.embedding` 恒为 None —— 向量分支 `if memory.embedding and
+self.embedding_service` 实际永不命中，语义去重仍是死的。本轮把管线打通。
+
+### Added（语义去重管线）
+
+- **向量现场生成**：`MemoryMerger.sync_agent_to_shared` 在冲突检测前为无
+  向量的记忆调用 `embedding_service.encode_single()` 生成并随条目落库，
+  使后续记忆可与之做向量比对（此前库中无任何行带向量，搜索必然落空）
+- **灰度开关** `sync.semantic_dedup`（默认 False，行为与现状完全一致）：
+  开启时融合入口构造 `EmbeddingService()`（lazy 加载，构造零开销，
+  首次 encode 才拉模型）；`DEFAULT_CONFIG` 同步登记
+- **双重降级保证**：向量生成失败（缺 sentence-transformers / 模型加载
+  失败）或向量搜索失败（缺 numpy）均置降级标志、WARN 一次、本轮剩余
+  记忆走文本三档去重，不再逐条重试炸同步
+- `_find_similar_in_shared` 向量分支补异常防护（此前 search_by_vector
+  的 ImportError 会直接炸掉 sync_agent_to_shared）
+- CI 依赖补 numpy（`build.py` 本就 `--exclude-module numpy`，不影响
+  EXE 体积），使 CI 可运行语义路径测试
+
+### Fixed（测试）
+
+- 新增 3 条：`test_semantic_dedup_vector_path`（stub 向量：语义相近的
+  异措辞记忆命中去重、不重复入库、向量落库）、
+  `test_semantic_dedup_degrades_on_model_error`（模型不可用时正常完成
+  纯文本同步、无向量落库）、`test_semantic_dedup_config_default_off`
+  （默认关闭）；全量 **379/379 全绿**
+
+### 备注（真模型灰度实测）
+
+- 代码链路已就绪并有 stub 级测试覆盖；真实 sentence-transformers 模型
+  的同步耗时与去重率实测需在装有 vector extras（~500MB）的环境进行，
+  本机未装，标注为待验证项（TODO P1-5 保留灰度实测条目）
+
 ## [v2.5.0] - 2026-09-07
 
 本轮主题：**merge 冲突策略真实实现（TODO P1-4）**。`conflict_strategy` 此前
