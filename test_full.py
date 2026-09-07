@@ -2565,6 +2565,119 @@ def test_volume_limit_policy_key_selectable():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_truncation_reports_dropped_count():
+    """v2.4.2 (TODO P0-1): memory_shared.md 截断时丢弃条数必须可见。
+
+    修复前：全量重建只打一句 INFO「重建完成，51 条」，不提示库中有 127+ 条，
+    Agent 永远读不到被截断的旧记忆（静默丢数据）。
+    修复后：日志升 WARN；report.volume_truncations 记录
+    「库中 M 条 / 保留 N 条 / 丢弃 K 条」；summary_text 摘要可见。
+    """
+    r.set_module("sync_engine")
+
+    import json
+    from sync_engine import SyncEngine, SyncReport
+    from agent_memory import MemoryDatabase, MemoryEntry
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "agent_pi").mkdir()
+        (tmp / "_shared").mkdir()
+        # 64KB 上限，每条 ~8KB → 只装得下 ~7 条，必然触发截断
+        (tmp / "_shared" / "volume_policy.json").write_text(json.dumps({
+            "limits": {"memory_shared_md": {"max_size_kb": 64, "max_lines": 3000}}
+        }), encoding="utf-8")
+        (tmp / "agent_pi" / "memory_shared.md").write_text(
+            "# pi 共享记忆\n\n", encoding="utf-8")
+
+        engine = SyncEngine()
+        engine.root = tmp
+        engine._shared_db = tmp / "shared.db"
+        n = 20
+        with MemoryDatabase(engine._shared_db) as db:
+            for i in range(n):
+                db.insert_memory(MemoryEntry(
+                    id="m{:02d}".format(i), agent_id="alpha",
+                    timestamp="2026-01-01T00:{:02d}:00".format(i),
+                    source_device="d1", domain="general", tags=[],
+                    confidence="high", conflict_with=None,
+                    content="记忆{} ".format(i) + "x" * 8192))
+
+        report = SyncReport()
+        engine._write_shared_md("pi", report=report)
+
+        text = (tmp / "agent_pi" / "memory_shared.md").read_text(encoding="utf-8")
+        kept = text.count("id: m")
+        r.assert_true("64KB 上限下确实发生截断", kept < n)
+        r.assert_eq("volume_truncations 恰记录 1 条", len(report.volume_truncations), 1)
+        t = report.volume_truncations[0]
+        r.assert_eq("dropped = 库中 - 保留", t["dropped"], n - kept)
+        r.assert_true("target 正确", t["target"] == "memory_shared.md")
+
+        summary = report.summary_text()
+        r.assert_true("报告摘要含体积截断告警", "体积保护截断" in summary)
+        r.assert_true("报告摘要含丢弃条数", "丢弃 {}".format(n - kept) in summary)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_volume_truncation_writer_reports_dropped():
+    """v2.4.2 (TODO P0-1): writer 体积截断 → info 含丢弃条数并写入 WriteBackResult。
+
+    修复前：_enforce_write_volume_limit 只打 INFO，截断信息被调用方丢弃
+    （变量名 _vol_info），WriteBackResult 无从体现。
+    """
+    r.set_module("sync_writers")
+
+    import json
+    from sync_writers import GenericMarkdownWriter, SyncState
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "_shared").mkdir(parents=True, exist_ok=True)
+        (tmp / "_shared" / "volume_policy.json").write_text(json.dumps({
+            "limits": {
+                "memory_shared_md": {"max_size_kb": 64, "max_lines": 3000,
+                                     "action_when_exceeded": "truncate_oldest"},
+            }
+        }), encoding="utf-8")
+
+        writer = GenericMarkdownWriter(
+            sync_state=SyncState(state_path=tmp / ".sync_state.json"))
+
+        # 1200 条带 marker 的记忆（~75 bytes/条 ≈ 90KB → 超过 64KB 上限）
+        content = "# MEMORY\n\n" + "".join(
+            "- [sync:mem_{}|h:abc{:06d}] 记忆内容测试记忆内容测试记忆内容测试记忆内容。\n".format(i, i)
+            for i in range(1200)
+        )
+        r.assert_true("构造内容确实超过 64KB", len(content.encode("utf-8")) > 64 * 1024)
+
+        from sync_writers import WriteBackResult
+        result = WriteBackResult(agent_id="generic", target_path=str(tmp / "x.md"),
+                                 written=0, skipped=0, errors=[])
+
+        truncated_content, was_trunc, info = writer._enforce_write_volume_limit(
+            tmp / "x.md", content, "generic", preserve_tail=True,
+            policy_key="memory_shared_md")
+
+        r.assert_true("确实发生截断", was_trunc)
+        r.assert_true("info 含条目统计口径", "记忆条目: 共 1200" in info)
+        r.assert_true("info 含丢弃数", "丢弃 " in info)
+
+        writer._record_truncation(result, was_trunc, info)
+        r.assert_true("result 标记截断", result.volume_truncated)
+        r.assert_true("dropped 数为正整数", 0 < result.volume_dropped < 1200)
+        r.assert_true("info 已存入 result", result.volume_info == info)
+
+        # 不截断时不得污染 result
+        result2 = WriteBackResult(agent_id="generic", target_path=str(tmp / "x.md"),
+                                  written=0, skipped=0, errors=[])
+        writer._record_truncation(result2, False, "未超限，无需截断")
+        r.assert_true("未截断时 result 保持干净", not result2.volume_truncated)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_cache_hit_rate_stats():
     """v2.4.1: SearchOptimizer.get_cache_stats 的命中率不再是恒 0"""
     r.set_module("agent_memory")
@@ -2719,6 +2832,9 @@ ALL_TESTS = [
     test_create_merger_passes_embedding_service,
     test_volume_limit_policy_key_selectable,
     test_cache_hit_rate_stats,
+    # v2.4.2: 体积截断透明化（TODO P0-1，memory_shared.md 静默丢数据）
+    test_truncation_reports_dropped_count,
+    test_volume_truncation_writer_reports_dropped,
 ]
 def main():
     print("=" * 60)

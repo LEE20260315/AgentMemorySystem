@@ -68,6 +68,13 @@ class SyncReport:
     total_skipped: int = 0
     errors: list = field(default_factory=list)
 
+    # v2.4.2 (TODO P0-1): 体积保护截断透明化。
+    # 每项: {"agent": str, "target": str, "dropped": int, "detail": str}
+    # 背景: memory_shared.md 按 volume_policy 128KB 顶格只能装下最新 51~55 条，
+    # 而库中有 127~134 条 —— 旧记忆静默不进 md，Agent 永远读不到。
+    # 此前日志只有一句 INFO「重建完成，51 条」，不提示丢了多少。
+    volume_truncations: list = field(default_factory=list)
+
     def summary_text(self) -> str:
         """生成人类可读的汇总文本"""
         lines = [
@@ -92,6 +99,20 @@ class SyncReport:
             lines.append("")
             lines.append("提示: 本次无新增共享记忆，{} 条为既有记忆的覆盖更新".format(
                 self.total_updated))
+
+        # v2.4.2: 体积截断透明化 —— 让用户看见丢了多少条，据此决定调大上限
+        if self.volume_truncations:
+            total_dropped = sum(int(t.get("dropped", 0)) for t in self.volume_truncations
+                                if int(t.get("dropped", 0) or 0) > 0)
+            lines.append("")
+            lines.append("⚠ 体积保护截断: 共丢弃 {} 条（被丢弃的旧记忆 Agent 读不到，"
+                         "可调大 _shared/volume_policy.json 上限）:".format(total_dropped))
+            for t in self.volume_truncations:
+                dropped = int(t.get("dropped", 0) or 0)
+                dropped_str = str(dropped) if dropped >= 0 else "条数未知"
+                lines.append("  - {} ({}): 丢弃 {} — {}".format(
+                    t.get("agent", "?"), t.get("target", "?"),
+                    dropped_str, t.get("detail", "")))
 
         if self.errors:
             lines.append("")
@@ -522,6 +543,15 @@ class SyncEngine:
                         if wb_result.errors:
                             report.errors.extend(wb_result.errors)
 
+                        # v2.4.2: 写回时发生体积截断 → 汇入报告（丢弃条数可见）
+                        if wb_result.volume_truncated:
+                            report.volume_truncations.append({
+                                "agent": agent_id,
+                                "target": wb_result.target_path,
+                                "dropped": getattr(wb_result, "volume_dropped", 0),
+                                "detail": wb_result.volume_info,
+                            })
+
                         self._emit("  写入 {} 条, 跳过 {} 条".format(
                             wb_result.written, wb_result.skipped
                         ))
@@ -534,7 +564,8 @@ class SyncEngine:
                 # 完全重建模式：从 shared.db 取最新 N 条，确保一致性。
                 # 注意：即使无新记忆，也重建以修复可能的格式损坏。
                 if not self.dry_run:
-                    self._write_shared_md(extract_id)
+                    # v2.4.2: 传 report 以记录 memory_shared.md 截断丢弃数
+                    self._write_shared_md(extract_id, report=report)
                     # v2.1.0: 生成精简知识简报，供 Agent 轻量加载
                     self._write_knowledge_brief(extract_id)
                     # v2.1.0: 在 Agent 本地入口注入知识引用（幂等）
@@ -746,7 +777,8 @@ class SyncEngine:
     # ------------------------------------------------------------------
     # v2.0: memory_shared.md 写入（完全重建模式）
     # ------------------------------------------------------------------
-    def _write_shared_md(self, agent_id: str, shared_memories: list = None):
+    def _write_shared_md(self, agent_id: str, shared_memories: list = None,
+                         report: SyncReport = None):
         """增量更新 <agent_dir>/memory_shared.md（v2.2.0 方案 A + P3-13 增量同步）。
 
         v2.2.0 相比 v2.0 完全重建的改进：
@@ -756,12 +788,19 @@ class SyncEngine:
         - 跳过本 Agent 自己写的记忆（agent_id 匹配）
         - 剥离 sync 标记防止污染
 
+        v2.4.2 (TODO P0-1): 截断透明化 —— 全量重建装不下全部条目时，
+        统计丢弃条数、日志升 WARN，并写入 report.volume_truncations
+        （此前只打一句 INFO「重建完成，51 条」，不提示库里有 127+ 条，
+        Agent 永远读不到被截断的旧记忆）。
+
         Parameters
         ----------
         agent_id : str
             当前 Agent ID
         shared_memories : list, optional
             共享记忆列表。若为 None，则从共享库完整加载。
+        report : SyncReport, optional
+            同步报告；截断发生时记录 volume_truncations 条目。
         """
         agent_dir = self.root / ("agent_" + agent_id)
         if not agent_dir.exists():
@@ -870,12 +909,31 @@ class SyncEngine:
             current_size = new_size
             written_count += 1
 
+        # v2.4.2: 截断透明化 —— 丢弃条数必须被看见，不能只报"重建完成，N 条"
+        dropped_count = len(entries) - written_count
         new_text = "\n".join(lines).rstrip() + "\n"
         try:
             from safe_io import _safe_write_text
             if _safe_write_text(shared_md_path, new_text):
-                self._emit("  memory_shared.md({}): 重建完成，{} 条（库中共 {} 条）".format(
-                    agent_id, written_count, len(entries)))
+                if dropped_count > 0:
+                    trunc_msg = ("体积保护截断: 库中 {} 条 / 保留 {} 条 / 丢弃 {} 条"
+                                 "（被丢弃的旧记忆 Agent 读不到；"
+                                 "可调大 _shared/volume_policy.json 的 memory_shared_md 上限）"
+                                 ).format(len(entries), written_count, dropped_count)
+                    self.logger.warning(
+                        "memory_shared.md({}): {}".format(agent_id, trunc_msg))
+                    self._emit("  ⚠ memory_shared.md({}): {}".format(agent_id, trunc_msg))
+                    if report is not None:
+                        report.volume_truncations.append({
+                            "agent": agent_id,
+                            "target": "memory_shared.md",
+                            "dropped": dropped_count,
+                            "detail": "库中 {} 条 / 保留 {} 条（128KB 顶格装不下全部）".format(
+                                len(entries), written_count),
+                        })
+                else:
+                    self._emit("  memory_shared.md({}): 重建完成，{} 条（库中共 {} 条）".format(
+                        agent_id, written_count, len(entries)))
             else:
                 self._emit("  memory_shared.md({}): 写入失败（权限？）".format(agent_id))
         except Exception as e:
@@ -1423,6 +1481,16 @@ class SyncEngine:
                         r["before_size_kb"], r["after_size_kb"],
                         r["action"],
                     ))
+                    # v2.4.2: 收缩截断同样汇入报告（条数口径未知，记 -1）
+                    report.volume_truncations.append({
+                        "agent": agent_id,
+                        "target": fname,
+                        "dropped": -1,
+                        "detail": "{} → {} 行, {} → {} KB ({})".format(
+                            r["before_lines"], r["after_lines"],
+                            r["before_size_kb"], r["after_size_kb"],
+                            r["action"]),
+                    })
                 # action == "ok" / "skipped_no_entries" 不打印
 
         # 2. shared.db 过期清理 + VACUUM（v2.2.0: 本机缓存）

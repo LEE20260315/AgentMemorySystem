@@ -42,6 +42,10 @@ class WriteBackResult:
     errors: list
     backup_path: Optional[str] = None
     pending: int = 0  # 因主文件锁定而写入 .pending 的文件数
+    # v2.4.2 (TODO P0-1): 体积截断透明化
+    volume_truncated: bool = False  # 写回时发生体积保护截断
+    volume_dropped: int = 0         # 截断丢弃的记忆条数（sync marker 口径）
+    volume_info: str = ""           # 截断详情（原始/截断后大小 + 库中/保留/丢弃）
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +510,20 @@ class BaseMemoryWriter(ABC):
             return set()
 
     # ----------------------- helpers -----------------------
+    def _record_truncation(self, result: "WriteBackResult", was_truncated, vol_info):
+        """v2.4.2: 把体积截断事实记入 WriteBackResult，供 SyncReport 汇总展示。
+
+        dropped 数从 info 串解析（_enforce_write_volume_limit 统一口径：
+        "记忆条目: 共 M / 保留 N / 丢弃 K"）。
+        """
+        if not was_truncated:
+            return
+        import re as _re_rec
+        m = _re_rec.search(r"丢弃 (\d+)", vol_info or "")
+        result.volume_truncated = True
+        result.volume_dropped = int(m.group(1)) if m else 0
+        result.volume_info = vol_info or ""
+
     def _enforce_write_volume_limit(
         self,
         target_file: Path,
@@ -541,6 +559,10 @@ class BaseMemoryWriter(ABC):
         Returns
         -------
         tuple (adjusted_content: str, was_truncated: bool, info: str)
+
+        info 结构（v2.4.2）:
+            "体积保护: 原始 {KB}/{行} → 截断后 {KB}/{行} (限 {KB}/{行}); "
+            "记忆条目: 共 {M} / 保留 {N} / 丢弃 {K}"
         """
         # 读取体积策略
         try:
@@ -579,16 +601,31 @@ class BaseMemoryWriter(ABC):
             # 保留头部：从后面截断
             truncated = self._truncate_at_boundary(content, target_bytes)
 
-        info = "体积保护: {}KB/{}行 → {}KB/{}行 (限 {}KB/{}行)".format(
+        # v2.4.2: 统计丢弃的记忆条数 —— 以 sync marker 为口径
+        # （每条写回条目都携带 [sync:<id>|h:<hash>|src:<agent>] 标记）
+        import re as _re_vol
+        total_entries = len(_re_vol.findall(r"\[sync:[^\]]+\]", content))
+        kept_entries = len(_re_vol.findall(r"\[sync:[^\]]+\]", truncated))
+        dropped_entries = max(0, total_entries - kept_entries)
+
+        info = ("体积保护: 原始 {}KB/{}行 → 截断后 {}KB/{}行 (限 {}KB/{}行); "
+                "记忆条目: 共 {} / 保留 {} / 丢弃 {}").format(
             content_size // 1024,
             content_lines,
             len(truncated.encode("utf-8")) // 1024,
             len(truncated.splitlines()),
             max_size_kb,
-            max_lines
+            max_lines,
+            total_entries,
+            kept_entries,
+            dropped_entries,
         )
 
-        self.logger.info("{} 体积保护触发: {}".format(agent_id, info))
+        # v2.4.2: INFO → WARN。截断意味着旧记忆永久离开 Agent 视野，
+        # 必须显眼到让用户决定是否调大 volume_policy.json 上限
+        self.logger.warning(
+            "{} 体积保护触发（丢弃 {} 条记忆）: {}".format(
+                agent_id, dropped_entries, info))
         return (truncated, True, info)
 
     def _truncate_head_at_boundary(self, text: str, target_bytes: int) -> str:
@@ -1112,9 +1149,11 @@ class ClaudeMemoryWriter(BaseMemoryWriter):
 
         # v2.4.1: Claude 写入的是共享池 shared_from_agents.md，
         # 体积保护必须走 shared 档（memory_shared_md），不再误用 private 档 256KB
-        content, _was_trunc, _vol_info = self._enforce_write_volume_limit(
+        content, was_trunc, vol_info = self._enforce_write_volume_limit(
             memory_dirs[0] / "shared_from_agents.md", content, agent_id,
             preserve_tail=True, policy_key="memory_shared_md")
+        # v2.4.2: 截断事实写入 result → SyncReport 摘要可见丢弃条数
+        self._record_truncation(result, was_trunc, vol_info)
 
         # 写入每个项目的 memory 目录
         for mem_dir in memory_dirs:
@@ -1381,6 +1420,7 @@ class TraeMemoryWriter(BaseMemoryWriter):
             )
             if was_truncated:
                 self.logger.info("Trae: {}".format(vol_info))
+            self._record_truncation(result, was_truncated, vol_info)
 
             # 写入（用 _safe_write_text 绕过文件锁）
             if not _safe_write_text(profile_path, content):
@@ -1609,6 +1649,7 @@ class HermesMemoryWriter(BaseMemoryWriter):
             )
             if was_truncated:
                 self.logger.info("Hermes: {}".format(vol_info))
+            self._record_truncation(result, was_truncated, vol_info)
 
             # 写入（用 _safe_write_text 绕过文件锁）
             if not _safe_write_text(md_path, content):
@@ -1798,6 +1839,7 @@ class GenericMarkdownWriter(BaseMemoryWriter):
             )
             if was_truncated:
                 self.logger.info("通用 Writer ({}): {}".format(agent_id, vol_info))
+            self._record_truncation(result, was_truncated, vol_info)
 
             # 用 _safe_write_text 写入（绕过文件锁）
             if not _safe_write_text(md_path, content):

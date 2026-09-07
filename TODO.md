@@ -5,11 +5,10 @@
 > 歷史實證審計存檔於 [docs/archive/2026-08-31-sync-audit.md](docs/archive/2026-08-31-sync-audit.md)；
 > 各版本完成明細見 [CHANGELOG.md](CHANGELOG.md)。
 
-## 現狀基線（2026-09-04 審計結論）
+## 現狀基線（2026-09-07 更新）
 
-- 版本 v2.4.1，遠端 main 與本地同步；測試套件 324 條，**實測 324/324 全綠**
-  （2026-09-04 修復時間炸彈測試後首次全綠，此前兩條長期「歷史失敗」實為硬編碼
-  時間戳 + 24h TTL 所致）
+- 版本 v2.4.2，遠端 main 與本地同步；測試套件 326 條，**實測 338/338 全綠**
+  （2026-09-07 新增 2 條截斷透明化回歸測試，v2.4.1 起維持全綠）
 - CI 門禁已修復：自建立以來在 ubuntu 上全紅（5 條平台相關用例必然失敗，門禁形同虛設）；
   現改為 windows-latest 門禁（Python 3.10/3.11/3.12）+ ubuntu 觀察項（不阻斷）
 - GitHub Releases 頁面為空，無預編譯 EXE（見 P0 #2）
@@ -20,15 +19,13 @@
 
 ## P0 —— 近期落地（按性價比排序）
 
-### 1. `memory_shared.md` 截斷透明化（已知靜默丟數據，優先於智能保留）
-- **現狀**：`_shared/volume_policy.json` 限 128KB / `truncate_oldest`，實測各檔頂格
-  （122~132KB）只裝得下最新 51~55 條，而庫中有 127~134 條；日誌僅 INFO 一句
-  「重建完成，51 條」，**不提示丟了多少**，Agent 永遠讀不到被截斷的舊記憶
-- **做法**：`sync_writers.py` 的 `_enforce_write_volume_limit` 截斷時統計丟棄條數，
-  日誌升級 WARN，並把「庫中 M 條 / 保留 N 條 / 丟棄 K 條」寫入 SyncReport 摘要
-- **驗收**：新增回歸測試 `test_truncation_reports_dropped_count`；同步報告可見丟棄數；
-  用戶可據此決定調大 `volume_policy.json` 上限
-- **工作量**：S
+### 1. ✅ `memory_shared.md` 截斷透明化（v2.4.2，2026-09-07 完成）
+- **已完成**：`_write_shared_md` 全量重建截斷（實測主要丟數據點）統計丟棄條數、
+  日誌升 WARN、寫入 `SyncReport.volume_truncations`；`_enforce_write_volume_limit`
+  以 sync marker 口徑統計並經 `_record_truncation()` 寫入 `WriteBackResult`；
+  `_enforce_volume_control` 收縮同樣入報告；報告摘要可見
+  「⚠ 體積保護截斷: 共丟棄 K 條」。回歸測試
+  `test_truncation_reports_dropped_count` + `test_volume_truncation_writer_reports_dropped`
 
 ### 2. 發佈首個 Release（原 T1：tag → CI 自動打包 EXE）
 - **現狀**：Releases 頁面為空，用戶只能源碼運行或自行 `python build.py`
@@ -103,6 +100,7 @@
 
 | 版本 | 日期 | 一句話摘要 |
 |------|------|-----------|
+| v2.4.2 | 2026-09-07 | 體積截斷透明化：memory_shared.md 截斷丟棄條數統計 + WARN + 同步報告可見（TODO P0-1） |
 | v2.4.1 | 2026-09-03 | dry-run 只讀閉環、merge 死代碼清理、`embedding_service` 形參接通、體積檔位 `policy_key`、托盤註冊自愈 |
 | v2.4.0 | 2026-08-31 | 同步報告保真：根治「55 條新增」虛報與 replace churn、access_count 副作用移除、Agent 父子目錄重複登記修復 |
 | v2.3.0 | 2026-08-30 | 墓碑機制（防已刪記憶跨設備復活）、日誌保留雙維裁剪、Windows 命名互斥量跨進程鎖 |
@@ -113,4 +111,4 @@
 
 ---
 
-*最後更新：2026-09-04（全量審計重寫）*
+*最後更新：2026-09-07（P0-1 截斷透明化完成，v2.4.2）*

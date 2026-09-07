@@ -5,6 +5,44 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.4.2] - 2026-09-07
+
+本轮主题：**体积截断透明化（TODO P0-1）**。`memory_shared.md` 按
+`_shared/volume_policy.json`（128KB）顶格只能装下最新 51~55 条，而库中有
+127~134 条 —— 旧记忆静默不进 Agent 实际读取的 md 档，且日志只有一句 INFO
+「重建完成，51 条」，不提示丢了多少。本轮让截断从"静默"变"可见"。
+
+### Added（截断可见性）
+
+- **`SyncReport` 新增 `volume_truncations` 字段**：记录所有体积截断事件
+  （agent / target / dropped / detail）；`summary_text()` 摘要新增醒目段落
+  「⚠ 体积保护截断: 共丢弃 K 条」，提示可调大 volume_policy.json 上限
+- **新增回归测试** `test_truncation_reports_dropped_count`（验收 TODO P0-1：
+  64KB 上限 + 20 条 8KB 记忆 → 断言 dropped = 库中 − 保留、摘要含丢弃数）与
+  `test_volume_truncation_writer_reports_dropped`（writer 侧 info 口径 +
+  `WriteBackResult` 接线）；全量测试 **338/338 全绿**
+
+### Fixed（三处静默截断面全部上报）
+
+- **`sync_engine._write_shared_md` 全量重建截断**（实测主要丢数据点）：
+  装不下全部条目时统计丢弃条数（dropped = 库中 M − 保留 N），日志
+  INFO → **WARN**，并写入 `report.volume_truncations`；不再只打
+  「重建完成，51 条」
+- **`sync_writers._enforce_write_volume_limit`**（写回前体积保护）：
+  以 sync marker 为口径统计丢弃条数，info 升级为结构化口径
+  「体积保护: 原始 X → 截断后 Y (限 Z); 记忆条目: 共 M / 保留 N / 丢弃 K」，
+  日志 INFO → **WARN**；四个 writer（Claude/Trae/Hermes/Generic）统一经
+  `_record_truncation()` 把截断事实写入 `WriteBackResult`
+  （新字段 `volume_truncated` / `volume_dropped` / `volume_info`），
+  由同步引擎汇入报告
+- **`_enforce_volume_control` 收缩（Phase 0.5）**：`shrunk` /
+  `force_truncated` 动作同样汇入 `report.volume_truncations`
+  （条数口径未知记 -1，摘要显示"条数未知"）
+
+### Changed（版本）
+
+- 版本号 2.4.1 → **2.4.2**（`memory_sync_app.__version__` / `pyproject.toml`）
+
 ## [Unreleased] - 2026-09-04
 
 本轮主题：**全量审计后的仓库治理**。不改动任何同步逻辑，只让仓库结构、文档与元数据回到
