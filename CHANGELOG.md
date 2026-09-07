@@ -43,6 +43,16 @@
 
 - 版本号 2.4.1 → **2.4.2**（`memory_sync_app.__version__` / `pyproject.toml`）
 
+### Added（发布链路，TODO P0-2）
+
+- **`.github/workflows/release.yml`**：推送 `v*` tag 自动发布 —— windows-latest +
+  Python 3.12 + PyInstaller 6.22.2（对齐本地打包 venv），测试门禁先行（坏代码不打
+  tag 发布），`build.py` 产物校验后 zip 上传 Release（`gh release create` +
+  GITHUB_TOKEN）；`workflow_dispatch` 仅供调试构建
+- **首 Release 上线**：`v2.4.2` tag 全链路验证通过（Actions 绿 / CI 绿），
+  `AgentMemorySync v2.4.2` 附 `AgentMemorySync-v2.4.2-windows-x64.zip`
+- README（中/英）：启用 Releases 下载指引，替换「尚未发布预编译 EXE」占位说明
+
 ## [Unreleased] - 2026-09-04
 
 本轮主题：**全量审计后的仓库治理**。不改动任何同步逻辑，只让仓库结构、文档与元数据回到

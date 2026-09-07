@@ -11,7 +11,7 @@
   （2026-09-07 新增 2 條截斷透明化回歸測試，v2.4.1 起維持全綠）
 - CI 門禁已修復：自建立以來在 ubuntu 上全紅（5 條平台相關用例必然失敗，門禁形同虛設）；
   現改為 windows-latest 門禁（Python 3.10/3.11/3.12）+ ubuntu 觀察項（不阻斷）
-- GitHub Releases 頁面為空，無預編譯 EXE（見 P0 #2）
+- 首個 Release 已上線：`AgentMemorySync v2.4.2` 附預編譯 zip（2026-09-07，見 P0 #2）
 - 2026-09-04 已完成倉庫治理：歷史文檔歸檔至 `docs/archive/`、一次性探針腳本移出倉庫視野、
   補交 `tools/__init__.py`、修正 `pyproject.toml` 入口、CI 依賴對齊 `requirements.txt`
 
@@ -27,16 +27,13 @@
   「⚠ 體積保護截斷: 共丟棄 K 條」。回歸測試
   `test_truncation_reports_dropped_count` + `test_volume_truncation_writer_reports_dropped`
 
-### 2. 發佈首個 Release（原 T1：tag → CI 自動打包 EXE）
-- **現狀**：Releases 頁面為空，用戶只能源碼運行或自行 `python build.py`
-- **做法**：
-  1. 新增 `.github/workflows/release.yml`：推送 `v*` tag 時在 `windows-latest` 執行
-     `python build.py`，將 `AgentMemorySync/` 打包為 zip 上傳至該 tag 的 Release
-  2. 先以 `v2.4.1` 或下一版本號手動打 tag 驗證全鏈路
-  3. README「下載 EXE」鏈接在 Release 就緒後啟用（`requirements.txt` 頭部註釋已預留文案）
-- **驗收**：tag 推送後 Actions 綠、Release 出現分發包、下載後雙擊 `AgentMemorySync.bat` 可用
-- **備註**：SmartScreen 提示屬未簽名常態，README FAQ 已有指引；代碼簽名（付費證書）暫緩
-- **工作量**：M
+### 2. ✅ 發佈首個 Release（v2.4.2，2026-09-07 完成）
+- **已完成**：`.github/workflows/release.yml` 落地（tag 推送 → windows-latest
+  測試門禁 → `python build.py` → zip → `gh release create`，permissions:
+  contents: write）；`v2.4.2` tag 推送後全鏈路驗證通過：Actions 綠、
+  CI 門禁綠、Release「AgentMemorySync v2.4.2」上線並附
+  `AgentMemorySync-v2.4.2-windows-x64.zip`；README（中/英）下載指引已啟用。
+  代碼簽名（付費證書）按計劃暫緩，SmartScreen 指引見 README FAQ
 
 ---
 
@@ -111,4 +108,4 @@
 
 ---
 
-*最後更新：2026-09-07（P0-1 截斷透明化完成，v2.4.2）*
+*最後更新：2026-09-07（P0 全部完成：#1 截斷透明化、#2 首 Release 上線，均隨 v2.4.2）*
