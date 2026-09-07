@@ -80,13 +80,10 @@
 
 ## P2 —— 平台與體驗
 
-### 8. ✅ MemoryDatabase tags 存取斷鏈修復（v2.5.4，2026-09-07 完成）
-- **已完成**：`_row_to_entry(row, tags=None)` 默認自查標籤（此前寫死 `[]`），
-  `get_memory` / `search_by_vector` 不再拿到空標籤；新增 `_fetch_tags_bulk`
-  按 900 分片，`list_memories` 由逐條 50 次查詢降為 1 次；標籤按名稱升序。
-  另修兩處同源缺陷：`INSERT OR REPLACE` 不清 `memory_tags` 導致舊標籤刪不掉、
-  墓碑 `purge_db` 漏刪 `memory_tags` 造成孤兒。回歸測試 4 條 +
-  `test_conflict_merge` 補 DB 往返標籤並集斷言，全量 **421/421 全綠**
+### 8. MemoryDatabase tags 存取斷鏈修復（2026-09-07 發現）
+- `_row_to_entry` 的 tags 恒為 `[]`（註釋「單獨獲取」但 `get_memory` /
+  `list_memories` 均未查 `memory_tags` 表），入庫標籤讀不回來
+- 修復涉及 schema 與全部調用方；當前 merge 測試以內存級斷言繞開
 
 ### 9. macOS / Linux GUI 支援（原 T2，長週期分支）
 - 托盤後端抽象（`WindowsTrayBackend` / `PystrayBackend` 按平台選擇）；macOS `.app` 打包、
