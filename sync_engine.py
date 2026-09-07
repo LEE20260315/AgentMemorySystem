@@ -75,6 +75,10 @@ class SyncReport:
     # 此前日志只有一句 INFO「重建完成，51 条」，不提示丢了多少。
     volume_truncations: list = field(default_factory=list)
 
+    # v2.5.0 (TODO P1-4): merge 冲突策略下被自动合并的条目。
+    # 每项: {"agent": str, "existing_id": str, "new_id": str}
+    merged_entries: list = field(default_factory=list)
+
     def summary_text(self) -> str:
         """生成人类可读的汇总文本"""
         lines = [
@@ -113,6 +117,15 @@ class SyncReport:
                 lines.append("  - {} ({}): 丢弃 {} — {}".format(
                     t.get("agent", "?"), t.get("target", "?"),
                     dropped_str, t.get("detail", "")))
+
+        # v2.5.0: merge 冲突策略的自动合并条目
+        if self.merged_entries:
+            lines.append("")
+            lines.append("merge 自动合并: {} 条冲突条目:".format(len(self.merged_entries)))
+            for m in self.merged_entries:
+                lines.append("  - {} ({}): 保留 {} ← 合入 {}".format(
+                    m.get("agent", "?"), m.get("existing_id", "?"),
+                    m.get("existing_id", "?"), m.get("new_id", "?")))
 
         if self.errors:
             lines.append("")
@@ -416,9 +429,17 @@ class SyncEngine:
                         self._emit("  Agent DB: {} -> {}".format(extract_id, db_path))
 
                 if len(agent_dbs) >= 2:
+                    # v2.5.0 (TODO P1-4): 冲突策略从配置读取（sync.conflict_strategy，
+                    # 默认 newer_wins 行为不变）；merge 发生时经钩子转发到同步日志
                     merger = create_merger(
                         shared_db_path=shared_db_path,
                         agent_configs=agent_dbs,
+                        conflict_strategy=self.config.get(
+                            "sync.conflict_strategy", "newer_wins"),
+                        on_merge=lambda info: self._emit(
+                            "  ⚠ 冲突自动合并(merge): {} ← {} — {}".format(
+                                info.get("existing_id"), info.get("new_id"),
+                                info.get("detail", ""))),
                     )
                     merge_results = merger.full_sync()
                     report.merge_results = merge_results
@@ -437,11 +458,23 @@ class SyncEngine:
                         if inserted is None:  # 兼容未升级的 merger 返回值
                             inserted = val.get("synced", 0)
                         report.total_merged += inserted or 0
-                        report.total_updated += val.get("updated", 0) or 0
+                        # v2.4.0 定义: total_updated = replace/merge（既有记忆被改写）
+                        report.total_updated += (val.get("updated", 0) or 0) \
+                            + (val.get("merged", 0) or 0)
+                        # v2.5.0: 被合并条目记录进报告
+                        for mi in val.get("merged_ids", []):
+                            report.merged_entries.append({
+                                "agent": key.replace("_to_shared", ""),
+                                "existing_id": mi.get("existing_id"),
+                                "new_id": mi.get("new_id"),
+                            })
 
                     if report.total_merged or report.total_updated:
                         self._emit("融合明细: 新增 {} 条, 更新 {} 条".format(
                             report.total_merged, report.total_updated))
+                    if report.merged_entries:
+                        self._emit("  merge 策略自动合并 {} 条冲突".format(
+                            len(report.merged_entries)))
 
                     self._emit("融合完成")
                 else:

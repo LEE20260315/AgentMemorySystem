@@ -2320,7 +2320,9 @@ class MemoryMerger:
         shared_db_path: Path,
         agent_dbs: dict = None,
         embedding_service: EmbeddingService = None,
-        similarity_threshold: float = 0.85
+        similarity_threshold: float = 0.85,
+        conflict_strategy: str = "newer_wins",
+        on_merge=None,
     ):
         """
         初始化融合器
@@ -2335,11 +2337,28 @@ class MemoryMerger:
             Embedding 服务实例
         similarity_threshold : float
             相似度阈值，超过此值认为是重复记忆
+        conflict_strategy : str
+            v2.5.0 (TODO P1-4): 冲突解决策略。
+            - "newer_wins"（默认，与 v2.4.x 行为一致）：
+              置信度高者胜；同置信度取新时间戳 / 高访问量。
+            - "merge"：非冲突字段自动合并（标签并集、内容取更详细版本、
+              置信度取高者），被合并条目经 on_merge 钩子通知并计入
+              stats["merged"]，报告中列出。
+        on_merge : Callable[[dict], None], optional
+            v2.5.0: merge 发生时的通知钩子（多机同写冲突检测），
+            参数为 {"existing_id", "new_id", "agent_id", "detail"}。
         """
         self.shared_db_path = shared_db_path
         self.agent_dbs = agent_dbs or {}
         self.embedding_service = embedding_service
         self.similarity_threshold = similarity_threshold
+        # v2.5.0: 仅支持 newer_wins / merge；非法值回落 newer_wins 并告警
+        if conflict_strategy not in ("newer_wins", "merge"):
+            logging.warning(
+                "未知 conflict_strategy %r，回落 newer_wins", conflict_strategy)
+            conflict_strategy = "newer_wins"
+        self.conflict_strategy = conflict_strategy
+        self.on_merge = on_merge
 
     def register_agent(self, agent_id: str, db_path: Path):
         """
@@ -2374,8 +2393,9 @@ class MemoryMerger:
         agent_db_path = self.agent_dbs[agent_id]
         # v2.4.0: synced 保留（= inserted + updated）以兼容既有调用方；
         # 新增 inserted / updated 两个细分项，供报告区分"真新增"与"无谓改写"
+        # v2.5.0: 新增 merged（merge 策略下的自动合并条数）与 merged_ids
         stats = {"synced": 0, "skipped": 0, "conflicts": 0,
-                 "inserted": 0, "updated": 0}
+                 "inserted": 0, "updated": 0, "merged": 0, "merged_ids": []}
 
         with MemoryDatabase(agent_db_path) as agent_db, \
              MemoryDatabase(self.shared_db_path) as shared_db:
@@ -2402,10 +2422,8 @@ class MemoryMerger:
 
                 if existing:
                     # 存在相似记忆，处理冲突
-                    # v2.4.1: 移除 "merge" 死分支 —— _resolve_conflict 从不
-                    # 返回 "merge"（详见其 docstring），该分支连同
-                    # _merge_memories() 一起删除。merge 冲突策略属于 TODO
-                    # #5（同步冲突解决策略），实现时再以真实可达的路径补回。
+                    # v2.5.0 (TODO P1-4): "merge" 策略真实可达 —— 按配置的
+                    # conflict_strategy 分流；newer_wins 行为与 v2.4.x 完全一致
                     conflict_result = self._resolve_conflict(existing, memory)
                     if conflict_result == "keep_existing":
                         stats["skipped"] += 1
@@ -2414,6 +2432,25 @@ class MemoryMerger:
                         stats["updated"] += 1
                         stats["synced"] += 1
                         self._index_add(memory)
+                    elif conflict_result == "merge":
+                        merged = self._merge_memories(existing, memory)
+                        self._replace_in_shared(shared_db, existing.id, merged)
+                        stats["merged"] += 1
+                        stats["synced"] += 1
+                        stats["merged_ids"].append(
+                            {"existing_id": existing.id, "new_id": memory.id})
+                        self._index_add(merged)
+                        # v2.5.0: 冲突通知钩子（多机同写的冲突检测）
+                        if self.on_merge:
+                            try:
+                                self.on_merge({
+                                    "existing_id": existing.id,
+                                    "new_id": memory.id,
+                                    "agent_id": memory.agent_id,
+                                    "detail": "merge 策略: 标签并集/内容取更详细/置信度取高",
+                                })
+                            except Exception as e:
+                                logging.warning("on_merge 钩子异常(不阻断): %s", e)
                     stats["conflicts"] += 1
                 else:
                     # 无冲突，直接插入
@@ -2593,10 +2630,23 @@ class MemoryMerger:
         Returns
         -------
         str
-            解决策略: "keep_existing" | "replace"
-            （v2.4.1: 移除 "merge" —— 该返回值从未产生过，属死代码；
-            merge 冲突策略见 TODO #5，实现时一并补回）
+            解决策略: "keep_existing" | "replace" | "merge"
+            （v2.4.1 曾移除不可达的 "merge"；v2.5.0 (TODO P1-4) 以真实
+            可达路径补回 —— 仅当 conflict_strategy == "merge" 时返回，
+            配套 _merge_memories() 生成合并条目）
         """
+        # v2.5.0: merge 档位 —— 内容实质不同（归一化后有差异）的冲突条目
+        # 交给 _merge_memories 自动合并；完全相同的条目仍走 no-op 判定，
+        # 避免 merge 策略下稳态同步产生无谓改写
+        if self.conflict_strategy == "merge":
+            if _normalize_memory_content(existing.content) == _normalize_memory_content(new.content):
+                # 归一化内容一致：置信度更高才值得改写（与 newer_wins 同判定）
+                confidence_order = {"high": 3, "medium": 2, "low": 1}
+                if confidence_order.get(new.confidence, 1) > confidence_order.get(existing.confidence, 1):
+                    return "replace"
+                return "keep_existing"
+            return "merge"
+
         # 置信度比较
         confidence_order = {"high": 3, "medium": 2, "low": 1}
         existing_conf = confidence_order.get(existing.confidence, 1)
@@ -2625,9 +2675,56 @@ class MemoryMerger:
 
         return "keep_existing"
 
-    # v2.4.1: _merge_memories() 已删除 —— 其唯一调用点是 _resolve_conflict
-    # 从不返回的 "merge" 分支，属死代码。实现 TODO #5（merge 冲突策略）时
-    # 从 git 历史恢复或重写。
+    def _merge_memories(self, existing: MemoryEntry, new: MemoryEntry) -> MemoryEntry:
+        """v2.5.0 (TODO P1-4): merge 冲突策略 —— 非冲突字段自动合并。
+
+        规则：
+        - 标签：并集（去重排序）
+        - 内容：取更详细（更长）版本
+        - 置信度：取高者
+        - 时间戳：取较新
+        - access_count：取较大值
+        - 其余元数据（id / agent_id / domain / source_device）保留 existing 的
+          （merge 结果通过 _replace_in_shared 以 existing.id 覆写原行）
+        - embedding：置 None（内容可能变化，待向量服务下次重建）
+
+        Parameters
+        ----------
+        existing : MemoryEntry
+            已存在的记忆（merge 结果的宿主）
+        new : MemoryEntry
+            新记忆（合并来源）
+
+        Returns
+        -------
+        MemoryEntry
+            合并后的新条目（不修改入参）
+        """
+        confidence_order = {"high": 3, "medium": 2, "low": 1}
+        merged_tags = sorted(set(existing.tags or []) | set(new.tags or []))
+        content = existing.content if len(existing.content or "") >= len(new.content or "") \
+            else new.content
+        confidence = existing.confidence \
+            if confidence_order.get(existing.confidence, 1) >= confidence_order.get(new.confidence, 1) \
+            else new.confidence
+        timestamp = existing.timestamp if (existing.timestamp or "") >= (new.timestamp or "") \
+            else new.timestamp
+
+        return MemoryEntry(
+            id=existing.id,
+            agent_id=existing.agent_id,
+            timestamp=timestamp,
+            source_device=existing.source_device,
+            domain=existing.domain,
+            tags=merged_tags,
+            confidence=confidence,
+            conflict_with=existing.conflict_with,
+            content=content,
+            embedding=None,
+            access_count=max(existing.access_count or 0, new.access_count or 0),
+            last_accessed=existing.last_accessed,
+            source_memory_id=existing.source_memory_id,
+        )
 
     def _replace_in_shared(self, shared_db: MemoryDatabase, old_id: str, new_memory: MemoryEntry):
         """
@@ -3019,7 +3116,9 @@ def create_merger(
     shared_db_path: Path,
     agent_configs: dict = None,
     similarity_threshold: float = 0.85,
-    embedding_service: "EmbeddingService" = None
+    embedding_service: "EmbeddingService" = None,
+    conflict_strategy: str = "newer_wins",
+    on_merge=None,
 ) -> MemoryMerger:
     """
     创建融合器实例
@@ -3038,6 +3137,11 @@ def create_merger(
         （memory.embedding + embedding_service 的三处判定）永不生效。
         默认仍为 None（保持现行为）；需要语义去重时显式传入
         EmbeddingService() 实例。
+    conflict_strategy : str
+        v2.5.0 (TODO P1-4): 冲突解决策略 "newer_wins"（默认）| "merge"。
+        透传 MemoryMerger；非法值在构造器内回落 newer_wins。
+    on_merge : Callable[[dict], None], optional
+        v2.5.0: merge 发生时的通知钩子（多机同写冲突检测）。
 
     Returns
     -------
@@ -3047,7 +3151,9 @@ def create_merger(
     merger = MemoryMerger(
         shared_db_path=shared_db_path,
         embedding_service=embedding_service,
-        similarity_threshold=similarity_threshold
+        similarity_threshold=similarity_threshold,
+        conflict_strategy=conflict_strategy,
+        on_merge=on_merge,
     )
 
     if agent_configs:

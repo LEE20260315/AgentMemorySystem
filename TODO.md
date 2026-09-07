@@ -7,11 +7,12 @@
 
 ## 現狀基線（2026-09-07 更新）
 
-- 版本 v2.4.2，遠端 main 與本地同步；測試套件 326 條，**實測 338/338 全綠**
-  （2026-09-07 新增 2 條截斷透明化回歸測試，v2.4.1 起維持全綠）
+- 版本 v2.5.0，遠端 main 與本地同步；測試套件 328 條，**實測 367/367 全綠**
+  （2026-09-07 新增 merge 衝突策略回歸測試）
 - CI 門禁已修復：自建立以來在 ubuntu 上全紅（5 條平台相關用例必然失敗，門禁形同虛設）；
   現改為 windows-latest 門禁（Python 3.10/3.11/3.12）+ ubuntu 觀察項（不阻斷）
-- 首個 Release 已上線：`AgentMemorySync v2.4.2` 附預編譯 zip（2026-09-07，見 P0 #2）
+- 首個 Release 已上線：`AgentMemorySync v2.4.2` 附預編譯 zip（2026-09-07，見 P0 #2）；
+  發佈鏈路（release.yml）已驗證，後續推 tag 即自動出包
 - 2026-09-04 已完成倉庫治理：歷史文檔歸檔至 `docs/archive/`、一次性探針腳本移出倉庫視野、
   補交 `tools/__init__.py`、修正 `pyproject.toml` 入口、CI 依賴對齊 `requirements.txt`
 
@@ -39,14 +40,13 @@
 
 ## P1 —— 核心能力補強
 
-### 4. merge 衝突策略真實實現（原 T5）
-- **現狀**：`conflict_strategy` 僅支援 `newer_wins`；v2.4.1 已刪除從不可達的 `"merge"`
-  死分支與 `_merge_memories()`，實現時需以真實可達的調用路徑補回
-- **做法**：`MemoryMerger._resolve_conflict` 新增 `merge` 分支（非衝突字段自動合併：
-  標籤並集、內容取更詳細版本、置信度取高者）；config 支援 `merge` 檔位並在報告中
-  列出被合併的條目；多機同寫的衝突檢測通知鉤子
-- **驗收**：新增 `test_conflict_merge` / `test_conflict_newer_wins`；全量測試綠
-- **工作量**：M
+### 4. ✅ merge 衝突策略真實實現（v2.5.0，2026-09-07 完成）
+- **已完成**：`MemoryMerger` 新增 `conflict_strategy`（`newer_wins` 默认不变 /
+  `merge`），同 id 异内容（多机同写）即触发；`_merge_memories` 标签并集 /
+  内容取更详细 / 置信度取高 / 时间戳取新；`on_merge` 通知钩子接入同步日志；
+  `SyncReport.merged_entries` + 摘要列出被合并条目；merge 档下归一化同内容
+  不触发合并（稳态保护）。回归测试 `test_conflict_merge` /
+  `test_conflict_newer_wins`，全量 367/367 全绿
 
 ### 5. 語義去重實裝評估（v2.4.1 已接通形參，默認仍關閉）
 - **現狀**：`create_merger(embedding_service=...)` 已可傳參，但同步管線默認傳 `None`，
@@ -74,20 +74,25 @@
 
 ## P2 —— 平台與體驗
 
-### 8. macOS / Linux GUI 支援（原 T2，長週期分支）
+### 8. MemoryDatabase tags 存取斷鏈修復（2026-09-07 發現）
+- `_row_to_entry` 的 tags 恒為 `[]`（註釋「單獨獲取」但 `get_memory` /
+  `list_memories` 均未查 `memory_tags` 表），入庫標籤讀不回來
+- 修復涉及 schema 與全部調用方；當前 merge 測試以內存級斷言繞開
+
+### 9. macOS / Linux GUI 支援（原 T2，長週期分支）
 - 托盤後端抽象（`WindowsTrayBackend` / `PystrayBackend` 按平台選擇）；macOS `.app` 打包、
   Linux 托盤驗證。CLI 已天然跨平台，此項只關乎 GUI/托盤
 - **驗收**：Windows 行為不變；macOS/Linux 至少托盘可啟動
 
-### 9. 檢索增強（原 T6 的搜索側）
+### 10. 檢索增強（原 T6 的搜索側）
 - `search_memory` 支援 `mode="semantic"|"keyword"|"hybrid"` 與時間範圍 / Agent / 標籤多維篩選
 - **驗收**：vector extras 未裝時關鍵詞搜索不受影響；裝後語義搜索有測試
 
-### 10. 效能基準（原 T7）
+### 11. 效能基準（原 T7）
 - 新增 `tools/benchmark.py`（10 萬+ 條寫入 / 查詢 / 融合基準）；據結果做 SQLite 索引與分頁優化
 - **驗收**：基準數據記錄在案，優化前後對比可複現
 
-### 11. UI/UX（原 T8）
+### 12. UI/UX（原 T8）
 - 暗色模式（基於現有 `COLORS` token 擴展明暗兩套）、同步歷史時間軸、記憶可視化瀏覽器
 - **驗收**：GUI 冒煙測試 + 手動驗證清單
 
@@ -97,6 +102,7 @@
 
 | 版本 | 日期 | 一句話摘要 |
 |------|------|-----------|
+| v2.5.0 | 2026-09-07 | merge 衝突策略真實實現：conflict_strategy 接通 + 自動合併 + 通知鉤子 + 報告可見（TODO P1-4） |
 | v2.4.2 | 2026-09-07 | 體積截斷透明化：memory_shared.md 截斷丟棄條數統計 + WARN + 同步報告可見（TODO P0-1） |
 | v2.4.1 | 2026-09-03 | dry-run 只讀閉環、merge 死代碼清理、`embedding_service` 形參接通、體積檔位 `policy_key`、托盤註冊自愈 |
 | v2.4.0 | 2026-08-31 | 同步報告保真：根治「55 條新增」虛報與 replace churn、access_count 副作用移除、Agent 父子目錄重複登記修復 |
@@ -108,4 +114,4 @@
 
 ---
 
-*最後更新：2026-09-07（P0 全部完成：#1 截斷透明化、#2 首 Release 上線，均隨 v2.4.2）*
+*最後更新：2026-09-07（v2.5.0：P0 全清 + P1-4 merge 衝突策略完成）*

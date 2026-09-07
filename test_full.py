@@ -2678,10 +2678,149 @@ def test_volume_truncation_writer_reports_dropped():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_conflict_merge():
+    """v2.5.0 (TODO P1-4): merge 冲突策略 —— 非冲突字段自动合并。
+
+    可达路径：同 id 不同内容（多机同写冲突的真实形态）。
+    标签并集 / 内容取更详细版本 / 置信度取高者 / 时间戳取较新；
+    merged 计数与通知钩子；共享库不重复入库。
+    """
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        shared = tmp / "shared.db"
+        db_a = tmp / "a.db"
+        db_b = tmp / "b.db"
+        with am.MemoryDatabase(db_a) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="mem_x", agent_id="alpha", timestamp="2026-01-01T00:00:00",
+                source_device="d1", domain="deploy", tags=["部署"],
+                confidence="medium", conflict_with=None,
+                content="项目部署在 windows 服务器"))
+        with am.MemoryDatabase(db_b) as db:
+            db.insert_memory(am.MemoryEntry(
+                id="mem_x", agent_id="beta", timestamp="2026-01-02T00:00:00",
+                source_device="d2", domain="deploy", tags=["运维"],
+                confidence="high", conflict_with=None,
+                content="项目部署在 windows 服务器，PyInstaller onedir 打包，注意 Defender 误报需排除目录"))
+
+        notices = []
+        merger = am.create_merger(
+            shared,
+            agent_configs={"alpha": db_a, "beta": db_b},
+            conflict_strategy="merge",
+            on_merge=lambda info: notices.append(info),
+        )
+        r.assert_eq("工厂透传策略", merger.conflict_strategy, "merge")
+        results = merger.full_sync()
+
+        alpha_stats = results["alpha_to_shared"]
+        beta_stats = results["beta_to_shared"]
+        r.assert_eq("alpha 首次插入", alpha_stats["inserted"], 1)
+        r.assert_eq("beta 触发 merge", beta_stats.get("merged", 0), 1)
+        r.assert_eq("钩子通知 1 次", len(notices), 1)
+        r.assert_eq("钩子携带 existing_id", notices[0]["existing_id"], "mem_x")
+        r.assert_eq("钩子携带 agent_id", notices[0]["agent_id"], "beta")
+
+        with am.MemoryDatabase(shared) as db:
+            merged = db.get_memory("mem_x", track_access=False)
+            total = len(db.list_memories(limit=100))
+        # 注：tags 不做 DB 往返断言 —— MemoryDatabase._row_to_entry 的 tags
+        # 恒为 []（memory_tags 表断链，既有缺陷，见 TODO P2）；标签并集语义
+        # 在下方 _merge_memories 内存级断言中验证。
+        r.assert_eq("置信度取高者", merged.confidence, "high")
+        r.assert_true("内容取更详细版本", "PyInstaller" in (merged.content or ""))
+        r.assert_eq("时间戳取较新", merged.timestamp, "2026-01-02T00:00:00")
+        r.assert_eq("共享库不重复入库", total, 1)
+
+        # 内存级：_merge_memories 合并语义（标签并集 / access_count 取大 / embedding 失效）
+        host = am.MemoryEntry(
+            id="mem_x", agent_id="alpha", timestamp="2026-01-01T00:00:00",
+            source_device="d1", domain="deploy", tags=["部署", "共享"],
+            confidence="medium", conflict_with=None, content="短内容",
+            access_count=5, embedding=b"\x01\x02")
+        guest = am.MemoryEntry(
+            id="mem_y", agent_id="beta", timestamp="2026-01-02T00:00:00",
+            source_device="d2", domain="deploy", tags=["运维", "部署"],
+            confidence="high", conflict_with=None,
+            content="短内容，但被另一台设备补充了更多细节信息",
+            access_count=2)
+        m = merger._merge_memories(host, guest)
+        r.assert_eq("内存级: 标签并集去重", sorted(m.tags), ["共享", "运维", "部署"])
+        r.assert_eq("内存级: 置信度取高者", m.confidence, "high")
+        r.assert_true("内存级: 内容取更详细版本", "补充了更多细节" in m.content)
+        r.assert_eq("内存级: 时间戳取较新", m.timestamp, "2026-01-02T00:00:00")
+        r.assert_eq("内存级: access_count 取大", m.access_count, 5)
+        r.assert_true("内存级: embedding 置 None（内容已变）", m.embedding is None)
+        r.assert_eq("内存级: 保留宿主 id", m.id, "mem_x")
+        r.assert_eq("内存级: 保留宿主 agent_id", m.agent_id, "alpha")
+        r.assert_true("不修改入参", host.tags == ["部署", "共享"] and host.access_count == 5)
+
+        # 非法策略回落 newer_wins
+        fallback = am.create_merger(shared, conflict_strategy="bogus")
+        r.assert_eq("非法策略回落", fallback.conflict_strategy, "newer_wins")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_conflict_newer_wins():
+    """v2.5.0 (TODO P1-4): 默认 newer_wins 行为回归 —— 与 v2.4.x 完全一致。
+
+    merge 策略是可选档位，默认路径必须零变化（防行为漂移）。
+    """
+    r.set_module("agent_memory")
+
+    import agent_memory as am
+
+    merger = am.MemoryMerger(shared_db_path=Path(tempfile.mkdtemp()) / "unused.db")
+    r.assert_eq("默认策略 newer_wins", merger.conflict_strategy, "newer_wins")
+
+    def _entry(confidence, content, timestamp="2026-01-02T00:00:00"):
+        return am.MemoryEntry(
+            id="m1", agent_id="beta", timestamp=timestamp,
+            source_device="d2", domain="general", tags=[],
+            confidence=confidence, conflict_with=None, content=content)
+
+    existing = _entry("medium", "原始内容", timestamp="2026-01-01T00:00:00")
+
+    r.assert_eq("高置信新内容 → replace",
+                merger._resolve_conflict(existing, _entry("high", "更详细的新内容")),
+                "replace")
+    r.assert_eq("低置信新内容 → keep_existing",
+                merger._resolve_conflict(existing, _entry("low", "新内容")),
+                "keep_existing")
+    r.assert_eq("同内容更高置信 → replace",
+                merger._resolve_conflict(existing, _entry("high", "原始内容")),
+                "replace")
+    # 归一化只消除 CRLF/行尾空白/连续空行，不折叠空格 —— 用换行差异构造等价内容
+    r.assert_eq("归一化同内容同置信 → keep_existing",
+                merger._resolve_conflict(existing, _entry("medium", "原始内容\n\n")),
+                "keep_existing")
+    r.assert_eq("同置信更晚时间戳 → replace",
+                merger._resolve_conflict(existing, _entry("medium", "原始内容的更新版本")),
+                "replace")
+
+    # merge 策略下：归一化内容一致的条目不触发 merge（防稳态改写）
+    merger_m = am.MemoryMerger(
+        shared_db_path=Path(tempfile.mkdtemp()) / "unused.db",
+        conflict_strategy="merge")
+    r.assert_eq("merge 档: 同内容高置信 → replace",
+                merger_m._resolve_conflict(existing, _entry("high", "原始内容")),
+                "replace")
+    r.assert_eq("merge 档: 归一化同内容同置信 → keep_existing",
+                merger_m._resolve_conflict(existing, _entry("medium", "原始内容\n\n")),
+                "keep_existing")
+    r.assert_eq("merge 档: 内容有差异 → merge",
+                merger_m._resolve_conflict(existing, _entry("high", "原始内容 + 新增细节")),
+                "merge")
+
+
 def test_cache_hit_rate_stats():
     """v2.4.1: SearchOptimizer.get_cache_stats 的命中率不再是恒 0"""
     r.set_module("agent_memory")
-
     import agent_memory as am
 
     tmp = Path(tempfile.mkdtemp())
@@ -2835,6 +2974,9 @@ ALL_TESTS = [
     # v2.4.2: 体积截断透明化（TODO P0-1，memory_shared.md 静默丢数据）
     test_truncation_reports_dropped_count,
     test_volume_truncation_writer_reports_dropped,
+    # v2.5.0: merge 冲突策略真实实现（TODO P1-4）
+    test_conflict_merge,
+    test_conflict_newer_wins,
 ]
 def main():
     print("=" * 60)

@@ -5,6 +5,45 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.5.0] - 2026-09-07
+
+本轮主题：**merge 冲突策略真实实现（TODO P1-4）**。`conflict_strategy` 此前
+只是配置里的摆设键（无任何代码读取），`_resolve_conflict` 硬编码 newer_wins，
+v2.4.1 又删掉了从不可达的 "merge" 死分支。本轮以真实可达路径补回：
+同 id 不同内容（多机同写冲突的真实形态）即触发合并。
+
+### Added（merge 冲突策略）
+
+- **`MemoryMerger` 新增 `conflict_strategy` 参数**（默认 `newer_wins`，
+  行为与 v2.4.x 完全一致，非法值回落并告警）；`create_merger()` 工厂透传；
+  `sync_engine` 从 `sync.conflict_strategy` 配置读取传入
+- **merge 合并语义**（`_merge_memories`，不修改入参）：标签并集去重、
+  内容取更详细版本、置信度取高者、时间戳取较新、access_count 取大、
+  embedding 置 None（内容已变待重建）；合并结果以宿主 id 覆写原行，
+  不产生重复条目
+- **稳态保护**：merge 档位下归一化内容一致的条目不触发 merge
+  （仍按"置信度更高才 replace"判定），防止稳态同步产生无谓改写
+- **冲突通知钩子** `on_merge`：merge 发生时回调
+  `{existing_id, new_id, agent_id, detail}`（多机同写冲突检测），
+  同步引擎接到日志「⚠ 冲突自动合并(merge)」；钩子异常不阻断主流程
+- **报告可见**：`SyncReport.merged_entries` 记录被合并条目，
+  `summary_text()` 列出「merge 自动合并: N 条冲突条目」；
+  merged 计数按 v2.4.0 定义计入 total_updated（既有记忆被改写）
+
+### Fixed（测试）
+
+- 新增 `test_conflict_merge`（端到端：双 agent 库 + 同 id 异内容 → merged
+  计数/钩子/共享库不重复入库 + 内存级合并语义 13 项断言）与
+  `test_conflict_newer_wins`（默认档位行为回归：6 项判定与 v2.4.x 逐一
+  对齐，merge 档稳态保护 3 项）；全量测试 **367/367 全绿**
+
+### Known Issues（既有缺陷，记录待修）
+
+- `MemoryDatabase` 的 tags 存取断链：`_row_to_entry` 的 tags 恒为 `[]`
+  （注释「单独获取」但 `get_memory` 未查 `memory_tags` 表），入库的标签
+  读不回来。本次测试用内存级断言绕开；修复涉及 schema 与全部调用方，
+  记入 TODO P2 单独处理
+
 ## [v2.4.2] - 2026-09-07
 
 本轮主题：**体积截断透明化（TODO P0-1）**。`memory_shared.md` 按
