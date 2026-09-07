@@ -88,6 +88,13 @@ class ConfigManager:
             "retry_count": 3,
             "retry_delay_seconds": 1,
             "lock_timeout_seconds": 30
+        },
+        # v2.5.3 (TODO P1-7): Agent 适配插件目录。空 = 不加载任何外部插件
+        # （默认安全：只含内置适配器）。配置绝对路径后，同步启动时会加载
+        # 该目录下 *.py 插件文件（每个文件需自行调用 register_*_plugin），
+        # 单个插件失败只告警不阻断
+        "agent_plugins": {
+            "dir": ""
         }
     }
 
@@ -5258,6 +5265,20 @@ def _expand_agent_home_path(pattern: str, home: Path) -> Path:
     return Path(os.path.expanduser(p))
 
 
+def _apply_detector_plugins(config, found: dict, logger) -> dict:
+    """v2.5.3 (TODO P1-7): 执行 Agent 检测插件并追加结果。
+
+    两条检测分支（profile 驱动 / legacy 兜底）都走这里，保证配置为空时
+    插件同样生效。插件异常只告警，不影响内置检测结果。
+    """
+    try:
+        from agent_plugins import run_detector_plugins
+        return run_detector_plugins(config, found, logger)
+    except Exception as e:
+        logger.warning("Agent 检测插件执行失败(不阻断): {}".format(e))
+        return found
+
+
 def detect_agents(
     config: ConfigManager = None,
     force_redetect: bool = False,
@@ -5377,7 +5398,7 @@ def detect_agents(
     if not profiles:
         # fallback 到传统 _AGENT_SUBDIRS 方式
         logger.warning("agent_detection 配置为空，使用传统检测方式")
-        return _detect_agents_legacy(config)
+        return _apply_detector_plugins(config, _detect_agents_legacy(config), logger)
 
     found = {}
     # v2.2.0: 统一用 safe_io.get_local_home()（LOCALAPPDATA 推断），
@@ -5464,6 +5485,10 @@ def detect_agents(
 
     # 通用发现：扫描未被已知 profile 覆盖的 AI 工具目录
     found = _discover_generic_agents(found, home, logger)
+
+    # v2.5.3 (TODO P1-7): 插件式检测 —— 外部 DetectorPlugin 追加结果，
+    # 核心代码零改动即可支持新 Agent。已有结果（profile/手动覆盖）优先。
+    found = _apply_detector_plugins(config, found, logger)
 
     # 保存缓存（测试时可禁用）
     if write_cache:

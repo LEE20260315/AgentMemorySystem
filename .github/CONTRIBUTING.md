@@ -69,12 +69,99 @@ python test_full.py --module safe_io   # 单模块
 
 请使用 [feature request 模板](.github/ISSUE_TEMPLATE/feature_request.md)。
 
-## 编写 Agent 适配器（插件式，进行中）
+## 编写 Agent 适配器（插件式，v2.5.3+）
 
-T4 计划将 `WRITER_REGISTRY` / `detect_agents` 重构为可插拔架构。完成前，新增 Agent 支持请：
-1. 在 `config.json` 的 `agent_detection` 增加候选路径与特征文件
-2. 在 `sync_writers.py` 的 `WRITER_REGISTRY` 注册写回器
-3. 在 `test_full.py` 补充检测/写回测试
+新增 Agent 支持**不需要改核心代码**。注册一个插件即可完成「发现 + 写回」，
+`config.json`、`sync_writers.WRITER_REGISTRY`、`test_full.py` 三处都不用动。
+
+### 两类插件
+
+| 基类 | 作用 | 必须实现 |
+|------|------|----------|
+| `WriterPlugin` | 把共享记忆写回该 Agent 的记忆文件 | `write()` |
+| `DetectorPlugin` | 发现该 Agent 是否安装、装在哪 | `detect()` |
+
+两者都在 `agent_plugins.py`；子类必须声明 `agent_id` 类属性。
+
+### 写回插件（`WriterPlugin`）
+
+```python
+# my_agent_plugin.py
+from pathlib import Path
+from agent_plugins import WriterPlugin, register_writer_plugin
+
+
+class MyAgentWriter(WriterPlugin):
+    agent_id = "myagent"                       # 必填，与 detect_agents 的 id 对齐
+    aliases = ("myagent-appdata",)             # 可选，别名也指向本插件
+    description = "MyAgent (~/.myagent/MEMORY.md)"
+
+    def write(self, agent_id, target_path: Path, memories, backup_dir=None, **kwargs):
+        """写回记忆，返回 sync_writers.WriteBackResult。"""
+        ...
+
+    def extract_target_info(self, agent_id, target_path, dry_run=False):
+        """可选：目标完整性信号（供 reconcile 判孤儿）；默认 None = 不提供。"""
+        return None
+
+
+register_writer_plugin(MyAgentWriter)          # 文件末尾自行注册
+```
+
+### 检测插件（`DetectorPlugin`）
+
+```python
+from agent_plugins import DetectorPlugin, register_detector_plugin
+
+
+class MyAgentDetector(DetectorPlugin):
+    agent_id = "myagent"
+
+    def detect(self, config) -> dict | None:
+        """返回 None = 未安装；命中时至少给 path 与 memory_files：
+
+        {"path": "C:/.../.myagent", "memory_files": ["MEMORY.md"]}
+
+        detected_at / source 由框架补齐。
+        """
+        ...
+
+
+register_detector_plugin(MyAgentDetector)
+```
+
+### 查找顺序与优先级
+
+写回器解析（`sync_writers.get_writer`）依次为：
+**插件注册表 → `WRITER_REGISTRY` → `GenericMarkdownWriter` 兜底**。
+即外部插件优先级最高，可新增 Agent，也可以覆盖内置适配器（改行为/修 bug 用）。
+
+检测结果则相反：**已有的检测结果优先**（内置 profile 或用户手动配置），
+插件只在没有结果时追加，不会抢。单个插件抛异常只记 Warning，不影响其他插件。
+
+### 启用外部插件目录（默认关闭）
+
+安全起见，插件系统**默认不扫描、不执行任何外部代码**。要加载自己的插件：
+
+```jsonc
+// config.json
+{
+  "agent_plugins": { "dir": "C:/path/to/my/plugins" }
+}
+```
+
+目录下每个非 `_` 开头的 `*.py` 会被 import，由文件自己调用
+`register_writer_plugin()` / `register_detector_plugin()`。加载失败只记 Warning。
+
+### 验证
+
+```bash
+python -c "import agent_plugins, json; print(json.dumps(agent_plugins.list_plugins(), indent=2, ensure_ascii=False))"
+python test_full.py            # 全量回归必须全绿
+```
+
+提交时请在测试里至少覆盖：插件注册后可被 `get_writer()` 命中、检测结果被追加、
+未配置 `agent_plugins.dir` 时行为与内置一致。
 
 ## 许可证
 

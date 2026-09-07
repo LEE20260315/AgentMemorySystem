@@ -5,6 +5,56 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.5.3] - 2026-09-07
+
+本轮主题：**插件式 Agent 适配架构（TODO P1-7）**。此前新增一个 Agent 要同时
+改 `config.json` + `sync_writers.WRITER_REGISTRY` + `test_full.py` 三处核心代码；
+现在注册一个插件即可完成「发现 + 写回」，核心代码零改动。
+
+### Added（插件架构）
+
+- 新模块 `agent_plugins.py`：`WriterPlugin` / `DetectorPlugin` 抽象基类与
+  `register_writer_plugin()` / `register_detector_plugin()` 注册表；
+  `get_writer_plugin()` / `list_plugins()` / `unregister_plugin()` 查询接口
+- `run_detector_plugins()`：执行检测插件并**追加**命中结果 —— 已有检测结果
+  （内置 profile / 手动覆盖）优先，插件不抢；单插件异常只记 Warning，
+  不影响其他插件与内置检测
+- `load_plugins_from_dir()`：从配置目录加载 `*.py` 插件（跳过 `_` 开头文件）；
+  **默认不扫描任何目录**，需显式配置 `agent_plugins.dir`，安全默认关闭
+- 内置适配器（Claude / Trae / Hermes / Generic）以多继承登记为插件
+  （`register_builtin_plugins()`，模块导入即执行）；只声明
+  `agent_id`/`aliases`，写回逻辑仍走原类 —— 行为零变化
+- 配置项 `agent_plugins.dir`（默认 `""`）；`SyncEngine.__init__` 按配置加载
+
+### Changed
+
+- `sync_writers.get_writer()` 查找顺序改为 **插件注册表 → `WRITER_REGISTRY`
+  → `GenericMarkdownWriter` 兜底**：外部插件优先级最高，可新增也可覆盖
+  内置适配器
+- `detect_agents()` 两条分支（有 profile / 无 profile）均接入
+  `_apply_detector_plugins()`
+
+### Fixed
+
+- 检测插件在 `agent_detection` 为空（旧配置分支）时不生效 —— 该分支原本
+  early-return 直接返回空结果；现已统一经 `_apply_detector_plugins()` 处理
+
+### Tests
+
+- 新增 5 条：`test_writer_plugin_registry`（注册与查询）、
+  `test_writer_plugin_overrides_builtin`（插件覆盖内置）、
+  `test_detector_plugin_appends`（检测插件追加且不抢既有结果）、
+  `test_load_plugins_from_dir`（目录加载）、
+  `test_builtin_plugins_registered`（内置适配器已登记）；
+  全量测试 **407/407 全绿**
+
+### Docs
+
+- `.github/CONTRIBUTING.md`「编写 Agent 适配器」章节重写为插件式：两类插件
+  最小示例、查找顺序、启用目录加载的安全约定、验证命令
+
+---
+
 ## [v2.5.2] - 2026-09-07
 
 本轮主题：**体积保护智能保留 + cold tier 归档（TODO P1-6）**。此前全量重建

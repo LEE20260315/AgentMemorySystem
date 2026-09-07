@@ -344,6 +344,8 @@ def build():
         "--hidden-import", "hashlib",
         "--hidden-import", "logging",
         "--hidden-import", "safe_io",
+        # v2.5.3: 插件式 Agent 适配（均为函数内惰性导入，显式收集保险）
+        "--hidden-import", "agent_plugins",
         # v2.1.2: tools 包（静态导入 shrink_memory_files 供体积控制使用）
         "--paths", str(here / "tools"),
         "--hidden-import", "tools.shrink_memory_files",

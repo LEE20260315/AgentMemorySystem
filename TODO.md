@@ -7,8 +7,8 @@
 
 ## 現狀基線（2026-09-07 更新）
 
-- 版本 v2.5.2，遠端 main 與本地同步；測試套件 333 條，**實測 388/388 全綠**
-  （2026-09-07 新增語義去重回歸測試）
+- 版本 v2.5.3，遠端 main 與本地同步；測試套件 333 條，**實測 407/407 全綠**
+  （2026-09-07 新增插件架構回歸測試 5 條）
 - CI 門禁已修復：自建立以來在 ubuntu 上全紅（5 條平台相關用例必然失敗，門禁形同虛設）；
   現改為 windows-latest 門禁（Python 3.10/3.11/3.12）+ ubuntu 觀察項（不阻斷）
 - 首個 Release 已上線：`AgentMemorySync v2.4.2` 附預編譯 zip（2026-09-07，見 P0 #2）；
@@ -66,12 +66,15 @@
   文本級 `_enforce_write_volume_limit` 維持 truncate_oldest（三形態文本
   重排序風險高收益低，主截斷點已在對像級實現，見 CHANGELOG 範圍裁剪註記）
 
-### 7. 插件式 Agent 適配架構（原 T4）
-- **現狀**：新增 Agent 需改 `config.json` + `sync_writers.WRITER_REGISTRY` + 測試三處核心代碼
-- **做法**：定義 `DetectorPlugin` / `WriterPlugin` 抽象基類與 `register_plugin()` 註冊表，
-  現有適配器遷移為內置插件；CONTRIBUTING 增補「如何編寫 Agent 適配器」章節
-- **驗收**：示例插件加載測試通過；既有適配器行為不變（全量回歸綠）
-- **工作量**：L
+### 7. ✅ 插件式 Agent 適配架構（v2.5.3，2026-09-07 完成）
+- **已完成**：新增 `agent_plugins.py`，定義 `WriterPlugin` / `DetectorPlugin`
+  抽象基類與註冊表；`get_writer()` 查找順序改為「插件 → `WRITER_REGISTRY` →
+  Generic 兜底」（插件優先級最高，可新增亦可覆蓋內置）；`detect_agents()`
+  兩條分支均接入 `_apply_detector_plugins()`（既有結果優先，插件只追加）；
+  內置適配器（Claude/Trae/Hermes/Generic）以多繼承登記為插件，寫回邏輯
+  不變；`agent_plugins.dir` 默認空 —— **不顯式配置就不掃描不執行外部代碼**。
+  回歸測試 5 條，全量 **407/407 全綠**；CONTRIBUTING「如何編寫 Agent 適配器」
+  章節已按插件式重寫
 
 ---
 
@@ -105,6 +108,7 @@
 
 | 版本 | 日期 | 一句話摘要 |
 |------|------|-----------|
+| v2.5.3 | 2026-09-07 | 插件式 Agent 適配架構：`WriterPlugin`/`DetectorPlugin` + 註冊表 + 目錄加載（默認關閉），新增 Agent 零改核心代碼（TODO P1-7） |
 | v2.5.2 | 2026-09-07 | 體積保護智能保留 + cold tier 歸檔：置信度優先裝填 + memory_shared_cold.md（TODO P1-6） |
 | v2.5.1 | 2026-09-07 | 語義去重實裝：向量現場生成落庫 + 灰度開關 + 雙重降級保證（TODO P1-5，真模型實測待做） |
 | v2.5.0 | 2026-09-07 | merge 衝突策略真實實現：conflict_strategy 接通 + 自動合併 + 通知鉤子 + 報告可見（TODO P1-4） |
@@ -119,4 +123,4 @@
 
 ---
 
-*最後更新：2026-09-07（v2.5.2：P0 全清 + P1-4/5/6 完成）*
+*最後更新：2026-09-07（v2.5.3：P0 全清 + P1 全清（4/5/6/7 完成）；剩餘 P2 平台與體驗）*

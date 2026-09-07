@@ -1997,7 +1997,26 @@ def get_writer(agent_id: str, sync_state: SyncState = None) -> BaseMemoryWriter:
     -------
     BaseMemoryWriter
         写回器实例
+
+    Notes
+    -----
+    v2.5.3 (TODO P1-7): **插件优先** —— 注册表里有插件（内置适配器或外部
+    插件）时直接实例化插件类，否则回落 WRITER_REGISTRY → 通用 writer。
+    外部插件由此可新增/覆盖 Agent 适配，无需改动核心代码。
     """
+    # 1) 插件注册表（内置适配器 + 外部插件）
+    try:
+        from agent_plugins import get_writer_plugin
+        plugin_cls = get_writer_plugin(agent_id)
+        if plugin_cls is not None:
+            try:
+                return plugin_cls(sync_state=sync_state)
+            except TypeError:
+                return plugin_cls()
+    except Exception as e:
+        get_logger().warning("写回插件实例化失败，回落内置映射: %s", e)
+
+    # 2) 内置映射 + 模糊匹配 + 通用兜底（既有行为）
     writer_cls = WRITER_REGISTRY.get(agent_id)
     if writer_cls is None:
         # 尝试模糊匹配

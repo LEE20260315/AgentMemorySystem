@@ -3053,6 +3053,158 @@ def test_volume_archive_to_cold():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_writer_plugin_registry():
+    """v2.5.3 (TODO P1-7): 插件注册表 —— 外部插件可用，内置行为不变。"""
+    r.set_module("agent_plugins")
+
+    import agent_plugins as ap
+    from sync_writers import WriteBackResult, get_writer, ClaudeMemoryWriter
+
+    class DemoWriterPlugin(ap.WriterPlugin):
+        agent_id = "demoagent"
+        aliases = ("demoagent-appdata",)
+        description = "示例插件"
+
+        def write(self, agent_id, target_path, memories, backup_dir=None, **kwargs):
+            return WriteBackResult(agent_id=agent_id, target_path=str(target_path),
+                                   written=len(memories), skipped=0, errors=[])
+
+    try:
+        ap.register_writer_plugin(DemoWriterPlugin)
+        w = get_writer("demoagent")
+        r.assert_true("插件写回器被选中", isinstance(w, DemoWriterPlugin))
+        w_alias = get_writer("demoagent-appdata")
+        r.assert_true("别名同样命中插件", isinstance(w_alias, DemoWriterPlugin))
+
+        # 内置适配器行为不变（仍是原 writer 类的实例）
+        builtin = get_writer("hermes")
+        r.assert_true("内置 hermes 仍是原类体系", isinstance(builtin, object)
+                      and type(builtin).__name__.startswith("Builtin"))
+        from sync_writers import HermesMemoryWriter
+        r.assert_true("内置 hermes 继承原 Hermes 写回逻辑",
+                      isinstance(builtin, HermesMemoryWriter))
+        # 未知 agent 仍兜底通用 writer
+        unknown = get_writer("totally-unknown-agent")
+        r.assert_true("未知 agent 仍可用", unknown is not None)
+    finally:
+        ap.unregister_plugin("demoagent")
+        ap.unregister_plugin("demoagent-appdata")
+
+
+def test_writer_plugin_overrides_builtin():
+    """v2.5.3: 插件优先级高于内置映射（可覆盖而不改核心代码）。"""
+    r.set_module("agent_plugins")
+
+    import agent_plugins as ap
+    from sync_writers import WriteBackResult, get_writer
+
+    class OverrideClaudePlugin(ap.WriterPlugin):
+        agent_id = "claude"
+        description = "覆盖内置 claude"
+
+        def write(self, agent_id, target_path, memories, backup_dir=None, **kwargs):
+            return WriteBackResult(agent_id=agent_id, target_path=str(target_path),
+                                   written=0, skipped=0, errors=[])
+
+    try:
+        ap.register_writer_plugin(OverrideClaudePlugin)
+        w = get_writer("claude")
+        r.assert_true("插件覆盖内置映射", isinstance(w, OverrideClaudePlugin))
+    finally:
+        # 恢复内置插件（否则影响后续用例）
+        ap.register_builtin_plugins()
+
+
+def test_detector_plugin_appends():
+    """v2.5.3: 检测插件 —— 命中结果追加进最终检测结果。"""
+    r.set_module("agent_plugins")
+
+    import agent_memory as am
+    import agent_plugins as ap
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "agent_demo").mkdir()
+
+        class DemoDetector(ap.DetectorPlugin):
+            agent_id = "demoagent"
+            description = "示例检测插件"
+
+            def detect(self, config):
+                return {"path": str(tmp / "agent_demo"), "memory_files": []}
+
+        ap.register_detector_plugin(DemoDetector)
+        cfg = am.ConfigManager(config_path=tmp / "config.json")
+        cfg.config["agent_detection"] = {}
+
+        legacy_stub = {"alpha": {"path": str(tmp / "agent_alpha"),
+                                 "memory_files": [],
+                                 "detected_at": "2026-01-01T00:00:00+00:00",
+                                 "source": "legacy"}}
+        with patch("agent_memory._detect_agents_legacy", return_value=legacy_stub), \
+             patch("agent_memory._discover_generic_agents",
+                   side_effect=lambda found, home, logger: found):
+            result = am.detect_agents(config=cfg, force_redetect=True,
+                                      write_cache=False)
+
+        r.assert_true("内置检测结果保留", "alpha" in result)
+        r.assert_true("插件 Agent 被识别", "demoagent" in result)
+        r.assert_eq("插件结果标注来源", result["demoagent"].get("source"), "plugin")
+        r.assert_true("插件路径正确", result["demoagent"]["path"].endswith("agent_demo"))
+    finally:
+        ap.unregister_plugin("demoagent")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_load_plugins_from_dir():
+    """v2.5.3: 目录加载 —— 显式指定时才加载外部插件文件。"""
+    r.set_module("agent_plugins")
+
+    import agent_plugins as ap
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "my_plugin.py").write_text(
+            "from agent_plugins import WriterPlugin, register_writer_plugin\n"
+            "class DirDemoWriter(WriterPlugin):\n"
+            "    agent_id = 'dirdemo'\n"
+            "    def write(self, agent_id, target_path, memories, backup_dir=None, **kw):\n"
+            "        return None\n"
+            "register_writer_plugin(DirDemoWriter)\n",
+            encoding="utf-8")
+        # 坏插件不应影响其他插件加载
+        (tmp / "broken.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+
+        loaded = ap.load_plugins_from_dir(tmp)
+        r.assert_eq("成功加载 1 个（坏插件不计）", loaded, 1)
+        r.assert_true("插件已登记", ap.get_writer_plugin("dirdemo") is not None)
+        r.assert_eq("空目录不加载", ap.load_plugins_from_dir(tmp / "nope"), 0)
+    finally:
+        ap.unregister_plugin("dirdemo")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_builtin_plugins_registered():
+    """v2.5.3: 内置适配器已登记为插件（list_plugins 可见）。"""
+    r.set_module("agent_plugins")
+
+    import agent_plugins as ap
+
+    info = ap.list_plugins()
+    for aid in ("claude", "trae", "hermes", "generic"):
+        r.assert_true("内置 {} 已在插件表".format(aid), aid in info["writers"])
+    r.assert_true("claude-appdata 别名已登记", "claude-appdata" in info["writers"])
+    # 未声明 agent_id 的插件必须被拒绝
+    class NoIdPlugin(ap.WriterPlugin):
+        def write(self, agent_id, target_path, memories, backup_dir=None, **kw):
+            return None
+    try:
+        ap.register_writer_plugin(NoIdPlugin)
+        r.fail("未声明 agent_id 应被拒绝", "未抛出 ValueError")
+    except ValueError:
+        r.ok("未声明 agent_id 的插件被拒绝")
+
+
 def test_cache_hit_rate_stats():
     """v2.4.1: SearchOptimizer.get_cache_stats 的命中率不再是恒 0"""
     r.set_module("agent_memory")
@@ -3219,6 +3371,12 @@ ALL_TESTS = [
     # v2.5.2: 体积保护智能保留 + cold 归档（TODO P1-6）
     test_volume_limit_priority_keep,
     test_volume_archive_to_cold,
+    # v2.5.3: 插件式 Agent 适配架构（TODO P1-7）
+    test_writer_plugin_registry,
+    test_writer_plugin_overrides_builtin,
+    test_detector_plugin_appends,
+    test_load_plugins_from_dir,
+    test_builtin_plugins_registered,
 ]
 def main():
     print("=" * 60)

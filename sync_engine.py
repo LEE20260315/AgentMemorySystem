@@ -207,6 +207,18 @@ class SyncEngine:
         except Exception:
             self.tombstones = None
 
+        # v2.5.3 (TODO P1-7): 显式配置的插件目录才加载（默认空 = 不加载任何
+        # 外部代码）。放在检测/写回之前，保证本轮同步即可用上插件
+        plugin_dir = self.config.get("agent_plugins.dir", "")
+        if plugin_dir:
+            try:
+                from agent_plugins import load_plugins_from_dir
+                loaded = load_plugins_from_dir(plugin_dir)
+                if loaded:
+                    self._emit("已加载 {} 个 Agent 适配插件（{}）".format(loaded, plugin_dir))
+            except Exception as e:
+                self.logger.warning("Agent 插件目录加载失败(不阻断): %s", e)
+
         # 确定 OneDrive 融合层根目录
         # v2.1.0: 统一数据根解析 —— 与 GUI/SyncState/detect_agents 一致走 get_data_root()
         # 修复历史分裂：引擎曾硬编码 <repo>/data，而 GUI/状态用 AgentMemory/（BAT 注入
