@@ -252,7 +252,6 @@ AgentMemorySystem/
 ├── safe_io.py                # 安全讀寫與資料目錄解析
 ├── memory_sync_app.py        # GUI + 系統匣 + CLI
 ├── memory_cli.py             # CLI 入口
-├── watchdog.py               # 看門狗（崩潰自動重啟）
 ├── setup_agent.py            # Agent 初始化腳本
 ├── build.py                  # 封裝腳本（python build.py → EXE）
 ├── AgentMemorySync.bat       # 跨裝置啟動器（由 build.py 生成）
