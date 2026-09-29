@@ -5,6 +5,13 @@ __pycache__/
 dist/
 build/
 *.spec
+# Recall 的 PyInstaller 构建配置是权威源文件（build_exe.bat 依赖它，
+# 内含黄金集资源声明），必须版本控制，不能被上面的 *.spec 吞掉
+!recall.spec
+
+# PyInstaller onefile 解压残留（运行 onefile exe 时在同目录生成，绝不提交）
+recall_mei/
+_MEI*/
 
 # 打包产物
 AgentMemorySync.exe

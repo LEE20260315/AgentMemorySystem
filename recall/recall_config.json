@@ -1,0 +1,11 @@
+{
+  "sync_interval_minutes": 180,
+  "sources": [
+    { "agent": "trae",      "root": "~/.trae-cn/memory", "glob": "**/*.md" },
+    { "agent": "dsh",       "root": "~/.dsh",            "glob": "MEMORY.md" },
+    { "agent": "pi",        "root": "~/.pi",             "glob": "**/MEMORY.md" },
+    { "agent": "workbuddy", "root": "~/.workbuddy",      "glob": "MEMORY.md" },
+    { "agent": "codepilot", "root": "~/.codepilot",      "glob": "MEMORY.md" },
+    { "agent": "claude",    "root": "~/.claude",         "glob": "MEMORY.md" }
+  ]
+}

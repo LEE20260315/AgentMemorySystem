@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recall-memory"
+version = "0.1.0"
+description = "Recall-first multi-agent memory retrieval (read-only ingest + local index)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+memory = "recall.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["recall*"]
