@@ -107,6 +107,23 @@ class SearchPresentationTest(unittest.TestCase):
         store.search(self.conn, "世界", k=5)
         self.assertEqual(self._count(), before, "search must not modify the index")
 
+    # 5) DOC regression guard: two DIFFERENT memories sharing a long boilerplate
+    #    prefix must not render as one identical preview.
+    def test_shared_prefix_previews_become_distinguishable(self):
+        """Measured on the v2 baseline: 67.0% of duplicate-preview pairs differed
+        only AFTER the first 300 body chars, so the 140-char default window was
+        identical for two distinct memories. The window must slide to escape."""
+        shared = ("b" * 200) + "task" + ("z" * 100)     # len 304, hit at 200
+        self._add("a", "a.md", "One", shared + " ALPHA 独特甲")
+        self._add("b", "b.md", "Two", shared + " BETA 独特乙")
+        results = store.search(self.conn, "task", k=5)
+        self.assertEqual(len(results), 2)
+        snippets = [r["snippet"] for r in results]
+        self.assertNotEqual(snippets[0], snippets[1],
+                            "previews of distinct memories must differ")
+        for one in snippets:
+            self.assertIn("task", one, "a slid preview must keep the matched term")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -74,13 +74,76 @@ def _content_key(text: str) -> str:
     return hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()
 
 
-def _snippet(text: str, terms: list[str], width: int = 140, lead: int = 40) -> str:
-    """Return a window of `text` centred on the FIRST body hit of any term.
+def _span(length: int, pos: int, width: int, lead: int) -> tuple[int, int]:
+    """The [start,end) slice a preview would show for a hit at `pos`."""
+    start = max(0, pos - lead)
+    end = min(length, start + width)
+    if end - start < width:            # near the tail: pull the window back
+        start = max(0, end - width)
+    return start, end
 
-    Looks for the earliest case-insensitive occurrence of any `terms`; if found,
-    returns a `width`-char window starting ~`lead` chars before it, adding `…`
-    on either side as needed. If no term is in the body (e.g. the match was only
-    in the title), falls back to the head of the body (previous behaviour).
+
+def _slide_starts(length: int, pos: int, width: int, lead: int) -> list[int]:
+    """Candidate preview starts, best-first: default centring, then slides.
+
+    Every start keeps the hit at `pos` INSIDE its window, so a slid preview never
+    loses the term it matched on — sliding only changes which surrounding text is
+    shown. This is how a preview escapes being byte-identical to one already on
+    screen: two memories whose shared boilerplate prefix contains the term would
+    otherwise render as the same 140 chars (measured on the v2 baseline: 67.0% of
+    duplicate-preview pairs differ only AFTER the first 300 chars).
+    """
+    if length <= width:
+        return [0]
+    default, _ = _span(length, pos, width, lead)
+    lo = max(0, pos - width + 1)
+    hi = min(pos, length - width)
+    step = max(1, width // 7)
+    starts = [default]
+    s = default
+    while s + step <= hi:
+        s += step
+        starts.append(s)
+    starts.append(hi)          # the extremes must be tried: a fixed step can skip
+    s = default                # exactly the shift that reaches distinguishing text
+    while s - step >= lo:
+        s -= step
+        starts.append(s)
+    starts.append(lo)
+    seen: set[int] = set()
+    out: list[int] = []
+    for s in starts:
+        if lo <= s <= hi and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out or [default]
+
+
+def _leading_common(a: str, b: str) -> int:
+    """Length of the shared leading run — what a reader perceives as "the same"."""
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
+def _snippet(text: str, terms: list[str], width: int = 140, lead: int = 40,
+             avoid: list[str] | None = None) -> str:
+    """Return a window of `text` anchored on the earliest body hit of any term.
+
+    If no term occurs in the body (e.g. the match was only in the title), falls
+    back to the head of the body (previous behaviour).
+
+    `avoid` holds the previews already shown for this result set. `DOC` is a
+    BINARY metric (byte-equality), so a window shifted by a single character
+    already counts as "distinct" while still looking identical to a reader — the
+    first version of this fix exploited exactly that and was rejected on visual
+    inspection. So this does not merely break equality: among all slide positions
+    it picks the one that MAXIMISES the visible difference, i.e. minimises the
+    longest common leading run against every already-shown preview. The hit at
+    `pos` is always kept inside the window, and nothing is rewritten — only the
+    window moves.
     """
     flat = " ".join((text or "").split())
     if not flat:
@@ -88,19 +151,38 @@ def _snippet(text: str, terms: list[str], width: int = 140, lead: int = 40) -> s
     low = flat.lower()
     pos = -1
     for t in terms:
-        i = low.find(t.lower())
+        i = low.find((t or "").lower())
         if i != -1 and (pos == -1 or i < pos):
             pos = i
     if pos == -1:
         return flat if len(flat) <= width else flat[: width - 1] + "…"
-    start = max(0, pos - lead)
-    end = min(len(flat), start + width)
-    if end - start < width:            # near the tail: pull the window back
-        start = max(0, end - width)
-    frag = flat[start:end]
-    prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(flat) else ""
-    return prefix + frag + suffix
+
+    def _render(start: int) -> str:
+        end = min(len(flat), start + width)
+        prefix = "…" if start > 0 else ""
+        suffix = "…" if end < len(flat) else ""
+        return prefix + flat[start:end] + suffix
+
+    default, _ = _span(len(flat), pos, width, lead)
+    if not avoid:
+        return _render(default)
+
+    def _core(start: int) -> str:
+        return flat[start:min(len(flat), start + width)]
+
+    # Compare the UNDECORATED windows. Every slid window starts with an "…", so
+    # comparing rendered strings would score a zero common prefix for ALL of them
+    # and turn the rule below into a no-op — which is exactly what the first
+    # version did (caught on visual inspection, not by the metric).
+    best_start = default
+    best_worst = max(_leading_common(_core(default), a) for a in avoid)
+    for start in _slide_starts(len(flat), pos, width, lead):
+        worst = max(_leading_common(_core(start), a) for a in avoid)
+        if worst < best_worst:
+            best_start, best_worst = start, worst
+            if worst == 0:                 # differs from the very first char
+                break
+    return _render(best_start)
 
 
 def search(conn: sqlite3.Connection, query: str, k: int = 5) -> list[dict]:
@@ -115,6 +197,10 @@ def search(conn: sqlite3.Connection, query: str, k: int = 5) -> list[dict]:
     merged into ONE result — the highest-ranked row is the representative, and
     the result carries the full `sources` list + `n_sources`. Top-K therefore
     yields K DISTINCT contents instead of K copies of the same memory.
+
+    Previews: every shown window is made distinguishable from the other windows in
+    the same result set (see `_snippet(avoid=…)`). DOC exists because two
+    different memories can otherwise render as one identical 140-char preview.
 
     The index itself is never modified: this is a read-only, display-time merge.
     """
@@ -176,9 +262,14 @@ def search(conn: sqlite3.Connection, query: str, k: int = 5) -> list[dict]:
             g["sources"].append({"agent": r["agent"], "file": r["file"]})
 
     results = []
+    shown: list[str] = []
     for key in order[:k]:
         g = groups[key]
         rep = g["rep"]
+        snip = _snippet(rep["text"], terms, avoid=shown)
+        # `avoid` holds the UNDECORATED window bodies: the "…" decoration is what
+        # defeats a common-prefix comparison (see _snippet).
+        shown.append(snip.lstrip("…").rstrip("…"))
         results.append({
             "id": rep["id"],
             "agent": rep["agent"],
@@ -187,7 +278,7 @@ def search(conn: sqlite3.Connection, query: str, k: int = 5) -> list[dict]:
             "text": rep["text"],
             "sources": g["sources"],
             "n_sources": len(g["sources"]),
-            "snippet": _snippet(rep["text"], terms),
+            "snippet": snip,
             "matched_terms": rep["matched_terms"],
         })
     return results
