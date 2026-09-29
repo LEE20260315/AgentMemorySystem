@@ -1,16 +1,28 @@
 {
   "_format": "json-as-yaml (JSON is a subset of YAML 1.2); no PyYAML needed",
   "_note": "answer_phrase is the hidden oracle and lives ONLY in this file",
-  "version": 1,
+  "version": 2,
+  "rework": "2026-09-22: stopword filter + prose oracle + body tokens + df band",
   "seed": 0,
   "m": 200,
-  "built": 200,
-  "strict_unique": 147,
-  "line_safe": 163,
+  "built": 158,
+  "min_df": 6,
+  "max_df": 18,
+  "n_tokens": 2,
+  "pick": "hi",
+  "min_and_size": 1,
+  "strict_unique": 103,
+  "line_safe": 50,
   "allow_supersets": true,
+  "df_avg": 16.895,
+  "df_union_avg": 28.576,
+  "and_avg": 5.133,
+  "and_min": 1,
+  "title_coll_avg": 23.753,
+  "title_coll_max": 61,
   "records": [
     {
-      "query": "topics.md to",
+      "query": "15 encountered",
       "answer_phrase": " taking up space. They cleaned the disk to resolve the storage p",
       "sources": [
         "trae"
@@ -19,81 +31,17 @@
       "title": "topics.md",
       "key": "84e4fa6174cd2621a991220fb334a03affa9d10775215bbd6dcc5b9555c4574c",
       "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "项目 and",
-      "answer_phrase": "h:d47001657fc50f35|src:beta] id: mem_20260706_extracted_012 — 来自",
-      "sources": [
-        "codepilot",
-        "workbuddy"
+      "line_safe": true,
+      "df": [
+        17,
+        17
       ],
-      "agent": "codepilot",
-      "title": "项目",
-      "key": "082bbb64807af419dc4ddb9f5e44893233fe13608582f2b09dd2213d897d44bc",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 29,
+      "and_size": 5,
+      "title_collision_size": 36
     },
     {
-      "query": "engineering conventions and",
-      "answer_phrase": " provider/model settings are inherited by new微信桥接 bindings\n- Gra",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Engineering Conventions",
-      "key": "7db99258ff0864df77f4176ae6d3fc0d269db172440e95ba5a03598ed0547c7e",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "engineering conventions to",
-      "answer_phrase": "- Git repository for hermes-agent must be maintained in a health",
-      "sources": [
-        "codepilot",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "pi",
-      "title": "Engineering Conventions",
-      "key": "d068fe9c1099fbce47745a4ea667f4888cb9eb702f845486f668ab1247dec70f",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "user preferences and",
-      "answer_phrase": "), focus solely on the current issue without referencing prior c",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "dsh",
-      "title": "User Preferences",
-      "key": "4c7226043a9163e3d3b2ee78667945dc4ee0d129d61443b483f4be808cc8706c",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "当前 执行 phase 价值 2026-09-16 用户",
-      "answer_phrase": "  - 命中-实质改变结果：没有这条记忆，结论/代码/执行方向会不同（重踩坑、找回决策理由、纠正方向、省掉重复调",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "当前执行阶段：Phase 0 价值证伪门（2 周，约 2026-09-16 ~ 2026-09-30）",
-      "key": "17698b4cd97cc9db732b99d03c48d8371ab2a43d685926656039798a02b5a4a0",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "stack and",
+      "query": "mode models",
       "answer_phrase": "omestic versions), Codepilot, Cocos Creator 3.8.8, DevEco Studio",
       "sources": [
         "codepilot",
@@ -106,11 +54,126 @@
       "title": "Tech Stack",
       "key": "66673a30ad1c77d5f890e64b3068110b0c605a29ad8aca7741ab390f0b954751",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 31,
+      "and_size": 4,
+      "title_collision_size": 2
     },
     {
-      "query": "stack and",
-      "answer_phrase": "iliar with WSL, Windows desktop applications, Hermes configurati",
+      "query": "30 main",
+      "answer_phrase": " provider/model settings are inherited by new微信桥接 bindings\n- Gra",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "workbuddy",
+      "title": "Engineering Conventions",
+      "key": "7db99258ff0864df77f4176ae6d3fc0d269db172440e95ba5a03598ed0547c7e",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 30,
+      "and_size": 6,
+      "title_collision_size": 19
+    },
+    {
+      "query": "prevent repository",
+      "answer_phrase": "- Git repository for hermes-agent must be maintained in a health",
+      "sources": [
+        "codepilot",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "pi",
+      "title": "Engineering Conventions",
+      "key": "d068fe9c1099fbce47745a4ea667f4888cb9eb702f845486f668ab1247dec70f",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        16,
+        15
+      ],
+      "df_union": 30,
+      "and_size": 1,
+      "title_collision_size": 19
+    },
+    {
+      "query": "context task",
+      "answer_phrase": "s solely on the current issue without referencing prior context\n",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "pi",
+        "workbuddy"
+      ],
+      "agent": "dsh",
+      "title": "User Preferences",
+      "key": "4c7226043a9163e3d3b2ee78667945dc4ee0d129d61443b483f4be808cc8706c",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 29,
+      "and_size": 6,
+      "title_collision_size": 4
+    },
+    {
+      "query": "30 50",
+      "answer_phrase": "≥50%、实质改变结果 ≥2 次，才进 Phase 1。\n记录载体：`Phase0_命中日志.md`（项目根）。",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "当前执行阶段：Phase 0 价值证伪门（2 周，约 2026-09-16 ~ 2026-09-30）",
+      "key": "17698b4cd97cc9db732b99d03c48d8371ab2a43d685926656039798a02b5a4a0",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 1
+    },
+    {
+      "query": "markdown update",
+      "answer_phrase": "s Markdown template structure. These files are the source of tru",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "pi",
+        "trae"
+      ],
+      "agent": "codepilot",
+      "title": "After You Know Who You Are",
+      "key": "22569deed425179ba34836f522e9d1df53e8d46a7278967f83f04a7088863b27",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        14,
+        10
+      ],
+      "df_union": 21,
+      "and_size": 3,
+      "title_collision_size": 1
+    },
+    {
+      "query": "vscode tools",
+      "answer_phrase": " (Lark) integration\n- Python, SQLite, CLI tools (lark-cli, CodeP",
       "sources": [
         "codepilot",
         "dsh",
@@ -122,10 +185,17 @@
       "title": "Tech Stack",
       "key": "03e358ebb3aa62c2dd817582125185ea27457217c170065dcd94102eca539e66",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        15,
+        10
+      ],
+      "df_union": 20,
+      "and_size": 5,
+      "title_collision_size": 2
     },
     {
-      "query": "engineering conventions and",
+      "query": "concepts content",
       "answer_phrase": "oncept files have their精华 content migrated to source book pages ",
       "sources": [
         "codepilot",
@@ -138,11 +208,18 @@
       "title": "Engineering Conventions",
       "key": "5c25ea4851a424b8a01256415c88eea9e184b584b5f20b3b358b7271a08ed64a",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        16,
+        16
+      ],
+      "df_union": 28,
+      "and_size": 4,
+      "title_collision_size": 19
     },
     {
-      "query": "hard constraints and",
-      "answer_phrase": "real-time data from system_heartbeat and PostgreSQL system table",
+      "query": "home url",
+      "answer_phrase": "m system_heartbeat and PostgreSQL system tables\n- Non-essential ",
       "sources": [
         "codepilot",
         "dsh",
@@ -154,10 +231,17 @@
       "title": "Hard Constraints",
       "key": "b94bc0ffacc1cb87f6dc8b6b04c5a5747326dbf73e3c3640fbb9b65ea0aca40f",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 29,
+      "and_size": 5,
+      "title_collision_size": 19
     },
     {
-      "query": "topics.md and",
+      "query": "04 30",
       "answer_phrase": "') or review the diff fi",
       "sources": [
         "trae"
@@ -166,39 +250,58 @@
       "title": "topics.md",
       "key": "acd8496dc80617739aa1416efe1bf26a4c76a2bf946526d994b60b6962f73b8e",
       "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "show only for ≥3 days.\n---\n[sync:mem_20260806_extracted_004|h:ed",
-      "sources": [
-        "codepilot"
+      "line_safe": false,
+      "df": [
+        18,
+        18
       ],
-      "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "121164da5d5417665dcd160d4681fecb55659f70990c3240bdcae560fed200c7",
-      "strict_unique": true,
-      "line_safe": false
+      "df_union": 27,
+      "and_size": 9,
+      "title_collision_size": 36
     },
     {
-      "query": "engineering conventions and",
-      "answer_phrase": " be explicitly pulled and stored in database after configuration",
+      "query": "gateway prevent",
+      "answer_phrase": "bally (not via npx with @latest) to prevent repeated package dow",
       "sources": [
         "codepilot",
-        "dsh",
         "pi",
-        "trae",
+        "workbuddy"
+      ],
+      "agent": "codepilot",
+      "title": "Hard Constraints",
+      "key": "0fa9a4b5e472909e4468d2fec34e092a9b3d3ea3928148e82c3b41c34de91367",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        16
+      ],
+      "df_union": 32,
+      "and_size": 2,
+      "title_collision_size": 19
+    },
+    {
+      "query": "web 一个",
+      "answer_phrase": "hell 工具 stdout 偶发为空 → 用 `Out-File` 写临时文件再由 Bash cat 读取。\n- **2026",
+      "sources": [
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "Engineering Conventions",
-      "key": "3236a326263b6deb0eacafd88659c8a3d2e63d9fb762ae0eeed5fe6724558326",
-      "strict_unique": false,
-      "line_safe": true
+      "title": "用户环境关键事实",
+      "key": "366e3e40cb9ce461c3310725e8d6809ae3a86cc79a55cdf60954b1b51aae85b1",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 4
     },
     {
-      "query": "hard constraints and",
-      "answer_phrase": "Do not modify the config schema directly",
+      "query": "assets home",
+      "answer_phrase": "patible endpoints require 'openai-compatible' protocol)\n- Grafan",
       "sources": [
         "codepilot",
         "dsh",
@@ -210,24 +313,40 @@
       "title": "Hard Constraints",
       "key": "0080f70db5a618f4c64cd2ce00dba0c57920b2f5b90fc49037666789c5eb2f8e",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 31,
+      "and_size": 3,
+      "title_collision_size": 19
     },
     {
-      "query": "work context sync",
-      "answer_phrase": "SenseNova skills 的运行状态。\n---\n[sync:mem_20260629_extracted_017|h:5",
+      "query": "authentication desensitized",
+      "answer_phrase": "of PATs (PATs starting with 'gh' are automatically desensitized ",
       "sources": [
+        "codepilot",
         "dsh",
-        "pi"
+        "pi",
+        "workbuddy"
       ],
       "agent": "dsh",
-      "title": "Work Context",
-      "key": "d981cc22438683ae3f6cbe292751872065c58d07813666e93cc804141bcece8d",
-      "strict_unique": true,
-      "line_safe": false
+      "title": "Hard Constraints",
+      "key": "783e623e75a13dbe3c50b9106b510edfab89eedac8a3394375b2dfa738845d07",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        16,
+        16
+      ],
+      "df_union": 17,
+      "and_size": 15,
+      "title_collision_size": 19
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "sh) before proceeding to M3 OHOS native build. — 来自 trae (2026-0",
+      "query": "context high",
+      "answer_phrase": "r access issues; HTTP port 8080 recommended for local testing — ",
       "sources": [
         "trae"
       ],
@@ -235,36 +354,62 @@
       "title": "Lessons Learned",
       "key": "6d6d7549e7ca13321472e968a75670cd65fc7acad37fea13ff5bb25855d6193f",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 61
     },
     {
-      "query": "备注 sync",
-      "answer_phrase": "\n---\n[sync:mem_20260814_extracted_049|h:0c57ecb5df5a4e18|src:tra",
+      "query": "akshare 120",
+      "answer_phrase": "HOLD=120 (half-year trading days); samples <120 marked as 'limit",
       "sources": [
-        "codepilot"
+        "codepilot",
+        "pi",
+        "trae",
+        "workbuddy"
       ],
       "agent": "codepilot",
-      "title": "备注",
-      "key": "3964e352ba34375824f548806524e714df681e74e3a9fcd7ef6bc722eda5474c",
+      "title": "Engineering Conventions",
+      "key": "ff61fccf2b897094cdbe4da1ac3aa0e813ebd8715fe62910aa94df1439190dbf",
       "strict_unique": true,
-      "line_safe": false
+      "line_safe": false,
+      "df": [
+        17,
+        15
+      ],
+      "df_union": 21,
+      "and_size": 11,
+      "title_collision_size": 19
     },
     {
-      "query": "task 每日 记忆 整理 and",
-      "answer_phrase": "日是 2026-06-13，让我检查今天的对话和记忆状态。让我读取今日完整的每日记忆文件。今日（2026-06-13）记忆整理完",
+      "query": "explicitly language",
+      "answer_phrase": "glish\", \"用中文回答\"), switch to the user's requested language for th",
       "sources": [
+        "codepilot",
+        "dsh",
         "pi",
         "trae",
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "[Task] 每日记忆整理",
-      "key": "04cbe22dcd4856daf44866050437c4a20aa704eff8a6b2eb6dfbc29a8b2f5930",
+      "title": "Exception",
+      "key": "9a02bd4795deb4738c0fc2c3595fe0621dd7bbe4a382f87733d986941c6f8ea9",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        15,
+        13
+      ],
+      "df_union": 27,
+      "and_size": 1,
+      "title_collision_size": 1
     },
     {
-      "query": "hard constraints and",
+      "query": "assets opening",
       "answer_phrase": "Physics, Spine, DragonBones, Terrain, VideoPlayer, WebView must ",
       "sources": [
         "codepilot",
@@ -277,11 +422,18 @@
       "title": "Hard Constraints",
       "key": "8d4393b7c61c6b8cdbf0b7719fc7258801aa1d195ffa8ce66704af9ec69ccf6e",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 32,
+      "and_size": 2,
+      "title_collision_size": 19
     },
     {
-      "query": "hard constraints and",
-      "answer_phrase": "of PATs (PATs starting with 'gh' are automatically desensitized ",
+      "query": "assets initial",
+      "answer_phrase": ".scene (db:/assets/MainScene.scene) to load GameLauncher script\n",
       "sources": [
         "codepilot",
         "dsh",
@@ -290,13 +442,20 @@
       ],
       "agent": "dsh",
       "title": "Hard Constraints",
-      "key": "783e623e75a13dbe3c50b9106b510edfab89eedac8a3394375b2dfa738845d07",
+      "key": "fdaa50d3ba180a4ae17dfa21692e154eb3631d1595da31a00562ab7e72fb7e5f",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 30,
+      "and_size": 4,
+      "title_collision_size": 19
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "p and user frustration; prioritize minimal viable monitoring fir",
+      "query": "home features",
+      "answer_phrase": "e minimal viable monitoring first\n- Grafana 13.0.1 requires JS i",
       "sources": [
         "trae"
       ],
@@ -304,22 +463,357 @@
       "title": "Lessons Learned",
       "key": "bd02322386789a2eea6364020dac0e18f1cd42ebb58ecebd9f1452ec8273ac07",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        16
+      ],
+      "df_union": 22,
+      "and_size": 11,
+      "title_collision_size": 61
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "s required. No code files were modified.\n---\n[sync:mem_20260806_",
+      "query": "backfill temporary",
+      "answer_phrase": "e placed in gitignore'd directory 'tools/tmp_local_backfill/'\n- ",
       "sources": [
-        "codepilot"
+        "codepilot",
+        "dsh",
+        "pi",
+        "workbuddy"
       ],
       "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "cacb25c3906dbb0053cb3f87ec60b05af6fe02fecb6d49b5c1558229449fec0f",
+      "title": "Engineering Conventions",
+      "key": "2a82771ec1970c7e7ccffb22ed6353fa84818e591f08b0547680d8af649fdcde",
       "strict_unique": true,
-      "line_safe": false
+      "line_safe": false,
+      "df": [
+        16,
+        16
+      ],
+      "df_union": 30,
+      "and_size": 2,
+      "title_collision_size": 19
     },
     {
-      "query": "engineering conventions and",
+      "query": "models settings",
+      "answer_phrase": "led and stored in database after configuration\n- Default provide",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "workbuddy",
+      "title": "Engineering Conventions",
+      "key": "3236a326263b6deb0eacafd88659c8a3d2e63d9fb762ae0eeed5fe6724558326",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 20,
+      "and_size": 14,
+      "title_collision_size": 19
+    },
+    {
+      "query": "concepts content",
+      "answer_phrase": " pages use `page_type: variety` frontmatter and aggregate cross-",
+      "sources": [
+        "codepilot",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "pi",
+      "title": "Engineering Conventions",
+      "key": "d8e75a92f59ddfbb835e13b6689c1c3b6eac3db445fcde180c9f45f3660c58b1",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        16,
+        16
+      ],
+      "df_union": 28,
+      "and_size": 4,
+      "title_collision_size": 19
+    },
+    {
+      "query": "actions gateway",
+      "answer_phrase": "钮；转而使用gh命令行触发，却因workflow缺少workflow_dispatch触发器导致HTTP 422错误。随后将Se",
+      "sources": [
+        "codepilot",
+        "dsh"
+      ],
+      "agent": "dsh",
+      "title": "跨项目要点（从同步记忆精简，完整归档见 MEMORY.md.2026-08-27.bak）",
+      "key": "e931e6dd16704e7bccf88325e82979b2c49f0e0366cc7826a70e7fa11f07f86f",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 1
+    },
+    {
+      "query": "-- timestamp",
+      "answer_phrase": " beta\ntimestamp: 2026-06-23T10:00:00+00:00 — 来自 beta (2026-08-13",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "MEMORY.md — 来自 codepilot (2026-08-14)",
+      "key": "f1fca19c40d623aa30ffd42112e94bc253dcb5e75e25d9fad627afa41510cda3",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        13
+      ],
+      "df_union": 28,
+      "and_size": 3,
+      "title_collision_size": 1
+    },
+    {
+      "query": "web 一个",
+      "answer_phrase": "klist | grep node` 找残留 node 进程；任务栏 .lnk 目标可用 Python 解析（WScript.S",
+      "sources": [
+        "codepilot",
+        "pi",
+        "trae"
+      ],
+      "agent": "codepilot",
+      "title": "用户环境关键事实",
+      "key": "92d0a6ea17fbc7c0b178c884657a406420d43cd799c30b681b864a84cfedac9a",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 4
+    },
+    {
+      "query": "always mandatory",
+      "answer_phrase": "nput language.\nThis is a mandatory requirement, not a preference",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "workbuddy",
+      "title": "Rule",
+      "key": "fcbd326e9330699806c678bdffd4cb259c37d5dcf0e5e7ea911db7b722216a0e",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        13,
+        11
+      ],
+      "df_union": 23,
+      "and_size": 1,
+      "title_collision_size": 1
+    },
+    {
+      "query": "window 保留",
+      "answer_phrase": "ify path2_lightweight and its archives; no deletion of source co",
+      "sources": [
+        "codepilot",
+        "pi",
+        "workbuddy"
+      ],
+      "agent": "pi",
+      "title": "Hard Constraints",
+      "key": "73076b3ec700e4a19bd5d015e526a69017057ad0b1f4dcc1053d8899fcbf26f8",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        17,
+        16
+      ],
+      "df_union": 30,
+      "and_size": 3,
+      "title_collision_size": 19
+    },
+    {
+      "query": "main 18",
+      "answer_phrase": "2.iso). The assistant provided detailed steps for using Rufus, i",
+      "sources": [
+        "dsh"
+      ],
+      "agent": "dsh",
+      "title": "MEMORY.md",
+      "key": "7494a0a292721e5993b5ec5372744647f1ea6489c10fdec0707300ca4136a911",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 31,
+      "and_size": 4,
+      "title_collision_size": 6
+    },
+    {
+      "query": "04 gateway",
+      "answer_phrase": "ired. No code files were modified. — 来自 ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "cbae16c51120529cc7ae213f2d02c83ffb8800a7cd2062aea9c55b227ac82c9b",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 29,
+      "and_size": 7,
+      "title_collision_size": 61
+    },
+    {
+      "query": "references 链接",
+      "answer_phrase": " for user confirmation\n- Index.md must be updated to reflect cur",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "codepilot",
+      "title": "Hard Constraints",
+      "key": "e95f22c279e49ab29948ebae93640e77d0d1a45c8600d362a2f26e208653a237",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 32,
+      "and_size": 2,
+      "title_collision_size": 19
+    },
+    {
+      "query": "信息 写入",
+      "answer_phrase": "06-13，让我检查是否有今天的对话记录需要整理。今日（2026-06-13）暂无新的对话记录需要整理。当前时间为凌晨 00:0",
+      "sources": [
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "workbuddy",
+      "title": "[Task] 每日记忆整理",
+      "key": "04cbe22dcd4856daf44866050437c4a20aa704eff8a6b2eb6dfbc29a8b2f5930",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 2
+    },
+    {
+      "query": "cloudflare environment",
+      "answer_phrase": "vice deployment (Railway), HarmonyOS app development\n- Technical",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "pi",
+      "title": "Background",
+      "key": "980f639b03203098b760417c790a6d2b0344d8192f6e4fe4e86b39b808c0d582",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        14,
+        14
+      ],
+      "df_union": 26,
+      "and_size": 2,
+      "title_collision_size": 2
+    },
+    {
+      "query": "临时 升级",
+      "answer_phrase": "ight 渲染兜底的双通道设计，避免单一数据源失败\n- 消融实验中窗口错配会导致结果不可靠，需先进行数据窗口审计并统一所有品种的",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "workbuddy"
+      ],
+      "agent": "dsh",
+      "title": "Lessons Learned",
+      "key": "1a0ad528594e3a84451853ff2169c834d87b88b742297807de0bf2942ec60c7b",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 32,
+      "and_size": 4,
+      "title_collision_size": 61
+    },
+    {
+      "query": "30 一个",
+      "answer_phrase": "：ghp_b4a7iSu7hRtPT54JYo6SWEhE3582C23vjzc",
+      "sources": [
+        "dsh",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "trae",
+      "title": "`invoke_command:/plan` 目标：开发一个名为「小资金商品期货·模拟盘跟踪系统」的...",
+      "key": "7217abd4f59c46b87e6cc80e2807b29fcddf714cdde6b92bcb1b8de033cee8fe",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 1
+    },
+    {
+      "query": "context manually",
+      "answer_phrase": "should be suitable for mobile browsing with dark background\n- Ta",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "workbuddy"
+      ],
+      "agent": "codepilot",
+      "title": "User Preferences",
+      "key": "8db9c0a7a575920cb80b69d2c617a435bcfbf2ab7317ab9c0d9b72c86fdbb098",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 34,
+      "and_size": 1,
+      "title_collision_size": 4
+    },
+    {
+      "query": "rpk startup",
       "answer_phrase": "ilds target huawei-quick-game platform with inline enums enabled",
       "sources": [
         "codepilot",
@@ -332,222 +826,17 @@
       "title": "Engineering Conventions",
       "key": "5c4dfead45b2926be1e76cf8c61999954c109d5395bf4c98353f7174e1b63655",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "engineering conventions and",
-      "answer_phrase": " pages use `page_type: variety` frontmatter and aggregate cross-",
-      "sources": [
-        "codepilot",
-        "pi",
-        "trae",
-        "workbuddy"
+      "line_safe": false,
+      "df": [
+        16,
+        14
       ],
-      "agent": "pi",
-      "title": "Engineering Conventions",
-      "key": "d8e75a92f59ddfbb835e13b6689c1c3b6eac3db445fcde180c9f45f3660c58b1",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 28,
+      "and_size": 2,
+      "title_collision_size": 19
     },
     {
-      "query": "hard constraints to",
-      "answer_phrase": "ene.scene (db:/assets/MainScene.scene) to load GameLauncher scri",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "dsh",
-      "title": "Hard Constraints",
-      "key": "fdaa50d3ba180a4ae17dfa21692e154eb3631d1595da31a00562ab7e72fb7e5f",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "memory.md 来自 codepilot 2026-08-14 sync",
-      "answer_phrase": "mestamp: 2026-06-23T10:00:00+00:00 — 来自 beta (2026-08-13",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "MEMORY.md — 来自 codepilot (2026-08-14)",
-      "key": "f1fca19c40d623aa30ffd42112e94bc253dcb5e75e25d9fad627afa41510cda3",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "after you know who are and",
-      "answer_phrase": "s Markdown template structure. These files are the source of tru",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae"
-      ],
-      "agent": "codepilot",
-      "title": "After You Know Who You Are",
-      "key": "22569deed425179ba34836f522e9d1df53e8d46a7278967f83f04a7088863b27",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "方式 跨项 项目 偏好 用户",
-      "answer_phrase": "遗留（口径待用户定）」直接抛给用户，没给建议。**机械规则：在输出里写下「待定 / 待你定口径 / 需要你决策 / 两个疑点」这",
-      "sources": [
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "协作方式（跨项目偏好）",
-      "key": "094ca41ade6129fb8e5f6c4b606e7085ed8492c128e7868005846172a7f0b240",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": "ify path2_lightweight and its archives; no deletion of source co",
-      "sources": [
-        "codepilot",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "pi",
-      "title": "Hard Constraints",
-      "key": "73076b3ec700e4a19bd5d015e526a69017057ad0b1f4dcc1053d8899fcbf26f8",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "跨项 项目 要点 同步 记忆 精简 完整 归档 sync",
-      "answer_phrase": "om仓库和Cloudflare Worker三方不一致导致401错误。实施了包括在war-room仓库修改router.js、e",
-      "sources": [
-        "codepilot",
-        "dsh"
-      ],
-      "agent": "dsh",
-      "title": "跨项目要点（从同步记忆精简，完整归档见 MEMORY.md.2026-08-27.bak）",
-      "key": "e931e6dd16704e7bccf88325e82979b2c49f0e0366cc7826a70e7fa11f07f86f",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "per caused ctx leaks, so native rewrite is required — 来自 trae (2",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "cbae16c51120529cc7ae213f2d02c83ffb8800a7cd2062aea9c55b227ac82c9b",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "be613 | topic_summary_time: 2026-08-11 11:23:50] — 来自 trae (2026",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "e362c3c663992c8824aafa4bb2e05290bb8083c61439a0c912d69d62b9c6b66b",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": "I Key validity is critical; expired keys cause 401 errors regard",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Hard Constraints",
-      "key": "abbfa049c5a8eaeaaf73ad84caa1f476f62e751be4f534ae31c139d6a1215c65",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "background and",
-      "answer_phrase": "EST API, service deployment (Railway), HarmonyOS app development",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "pi",
-      "title": "Background",
-      "key": "980f639b03203098b760417c790a6d2b0344d8192f6e4fe4e86b39b808c0d582",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "memory.md and",
-      "answer_phrase": "4_extracted_035|h:7009f54c0bb04ad3|src:trae] [session_id: 6a4cf3",
-      "sources": [
-        "dsh"
-      ],
-      "agent": "dsh",
-      "title": "MEMORY.md",
-      "key": "7494a0a292721e5993b5ec5372744647f1ea6489c10fdec0707300ca4136a911",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "plan 目标 开发 发一 一个 名为 资金 商品 期货 模拟 拟盘 系统 ... and",
-      "answer_phrase": "、保留顶部风险声明，改完后发布到原链接，最后只回我三句：链接、用的哪个数据源及刷新间隔、抓取失败时的兜底是否正常。一次做完，不输",
-      "sources": [
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "trae",
-      "title": "`invoke_command:/plan` 目标：开发一个名为「小资金商品期货·模拟盘跟踪系统」的...",
-      "key": "7217abd4f59c46b87e6cc80e2807b29fcddf714cdde6b92bcb1b8de033cee8fe",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": "bally (not via npx with @latest) to prevent repeated package dow",
-      "sources": [
-        "codepilot",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Hard Constraints",
-      "key": "0fa9a4b5e472909e4468d2fec34e092a9b3d3ea3928148e82c3b41c34de91367",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "background to",
-      "answer_phrase": "3b76751edaf25b1b1（应用 cli_aab633ecf0399cef 下的 open_id；注意 open_id ",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Background",
-      "key": "31cf9f8c046ba23ffaa4c4129a31dc03050bc9db2580785badc5e7e359397b27",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "user preferences and",
+      "query": "context high",
       "answer_phrase": "ge management: Prefers concise concept organization; removes bas",
       "sources": [
         "codepilot",
@@ -559,25 +848,41 @@
       "title": "User Preferences",
       "key": "5fb10fdd3ab1a65518158df918ad2cc5cca547c2065861a67615525231470c87",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 4
     },
     {
-      "query": "lessons learned sync",
-      "answer_phrase": "d6060c | topic_summary_time: 2026-08-23 16:31:52]用户要求推进飞书实装、对抗性审",
+      "query": "configurations task",
+      "answer_phrase": "r\n- Knowledge base maintenance: Before modifying files, presents",
       "sources": [
         "codepilot",
         "dsh",
+        "pi",
+        "trae",
         "workbuddy"
       ],
       "agent": "dsh",
-      "title": "Lessons Learned",
-      "key": "1a0ad528594e3a84451853ff2169c834d87b88b742297807de0bf2942ec60c7b",
+      "title": "Workflows",
+      "key": "372db11d247fb48d298307ca5f43fdc4eede5e7d6d742a828e6938b4e75c6ef8",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 33,
+      "and_size": 1,
+      "title_collision_size": 1
     },
     {
-      "query": "当前 任务 and",
-      "answer_phrase": "e local repository from futures-tracker to Sirius-war-room. — 来自",
+      "query": "-- fix",
+      "answer_phrase": "-）\n2. 广期所（GFEX）新品种抓不到数据（多晶硅、碳酸锂）\n3. 历史数据回补失败提示 — 来自 trae (2026-0",
       "sources": [
         "trae"
       ],
@@ -585,109 +890,58 @@
       "title": "当前任务",
       "key": "fbf5d0c49a674dc609db58f2634c0c502d900aa56f962f7c26afebb76814b331",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 35,
+      "and_size": 1,
+      "title_collision_size": 2
     },
     {
-      "query": "shared knowledge auto-synced sync",
-      "answer_phrase": "extracted_027|h:a8565a310b8793f1|src:trae] ## Hard Constraints —",
+      "query": "actions delete",
+      "answer_phrase": "nsitized; use SSH key for GitHub API authentication instead\n- Gi",
       "sources": [
         "codepilot",
+        "dsh",
         "pi",
         "workbuddy"
       ],
       "agent": "codepilot",
-      "title": "Shared Knowledge (auto-synced)",
-      "key": "53cb0f05d3f7293b3f1ddf23e111a05d60b26496c7fcc04eed579fa10c359049",
-      "strict_unique": true,
-      "line_safe": true
+      "title": "Hard Constraints",
+      "key": "d25c22128fbbcb0c2d24869482f8e457d3b3f84659167eac5178e79f3179bd23",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 30,
+      "and_size": 6,
+      "title_collision_size": 19
     },
     {
-      "query": "项目 接续 先理 理解 解项 然后 执行 以下 指令 and",
-      "answer_phrase": ", NO orders, NO real accounts, NO synthetic data, NO parameter t",
+      "query": "一个 两个",
+      "answer_phrase": "遗留（口径待用户定）」直接抛给用户，没给建议。**机械规则：在输出里写下「待定 / 待你定口径 / 需要你决策 / 两个疑点」这",
       "sources": [
-        "dsh",
-        "pi",
-        "trae",
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "项目接续，先理解项目，然后执行以下指令：",
-      "key": "0a50c259d6ef9d680b9265709608e34280dc917181997b32794aeec8324619e2",
+      "title": "协作方式（跨项目偏好）",
+      "key": "094ca41ade6129fb8e5f6c4b606e7085ed8492c128e7868005846172a7f0b240",
       "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "context sync",
-      "answer_phrase": "走交易所官方”（black_series.py仍直连东财）保持未完成状态。\n---\n[sync:mem_20260907_ext",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi"
+      "line_safe": false,
+      "df": [
+        18,
+        16
       ],
-      "agent": "pi",
-      "title": "Context",
-      "key": "57d7b0776e08a4e739ab6481765145f29ed1d867b5fc6a8e004b06081d954e41",
-      "strict_unique": true,
-      "line_safe": false
+      "df_union": 31,
+      "and_size": 3,
+      "title_collision_size": 1
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "PI format causes 404 errors\n---\n[sync:mem_20260629_extracted_016",
-      "sources": [
-        "dsh",
-        "pi"
-      ],
-      "agent": "dsh",
-      "title": "Lessons Learned",
-      "key": "6cdf8b6b62a3de4304d461be65e197c41b11669cb17c9f9600daf374e29e8405",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "shared knowledge auto-synced sync",
-      "answer_phrase": " [sync:mem_20260806_extracted_005|h:1e70212f8a9ee4b5|src:generic",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Shared Knowledge (auto-synced)",
-      "key": "2a466733bb0b11cf4fa150130c012d28440985fc59b0e9f381c5cb37f2f4de83",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "engineering conventions and",
-      "answer_phrase": "HOLD=120 (half-year trading days); samples <120 marked as 'limit",
-      "sources": [
-        "codepilot",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Engineering Conventions",
-      "key": "ff61fccf2b897094cdbe4da1ac3aa0e813ebd8715fe62910aa94df1439190dbf",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "keep technical unchanged the",
-      "answer_phrase": "I commands, file paths, stack traces, logs, JSON keys, identifie",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Keep technical artifacts unchanged",
-      "key": "9c5abfc66252d2575a3725c5053c2f33d75edebefcaacc0c4d4aa8f6291e5230",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "engineering conventions in",
+      "query": "token 指标",
       "answer_phrase": "t() only after token validation\n-连涨/连跌指标需满足≥3日才显示（配置在 render_sum",
       "sources": [
         "codepilot",
@@ -700,62 +954,103 @@
       "title": "Engineering Conventions",
       "key": "80ef9893ed60101fce9ee9acc2f840351b6156fe688826d701c13b3c8deb54c4",
       "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "when you re done sync",
-      "answer_phrase": "en:\n - Bootstrapping a workspace manually\n---\n[sync:mem_20260806",
-      "sources": [
-        "dsh"
+      "line_safe": false,
+      "df": [
+        16,
+        11
       ],
-      "agent": "dsh",
-      "title": "When You're Done",
-      "key": "3a722d28ab6e432da767d386c9178493e7273643a6d0f53e358357dedff73f88",
-      "strict_unique": true,
-      "line_safe": false
+      "df_union": 23,
+      "and_size": 4,
+      "title_collision_size": 19
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "ode files were modified. — 来自 trae (2026-08-22)\n- [sync:mem_2026",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "ae43cdac125ff82d633454c25e00f6e8eb14f62628c871ed8d890cfb46475e02",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "用户 户环 环境 境关 关键 键事 事实 文件",
-      "answer_phrase": "工具 stdout 偶发为空 → 用 `Out-File` 写临时文件再由 Bash cat 读取。\n\n### dsh（Deep",
+      "query": "models settings",
+      "answer_phrase": "g\n- CodePilot requires `is_active = 1` and `enabled = 1` flags i",
       "sources": [
         "codepilot",
         "dsh",
         "pi",
-        "trae"
+        "trae",
+        "workbuddy"
       ],
-      "agent": "codepilot",
-      "title": "用户环境关键事实",
-      "key": "c253030defb061d2e0e74f08df937d4c965e5be0a4121033abbd01334c4f02d0",
-      "strict_unique": true,
-      "line_safe": false
+      "agent": "dsh",
+      "title": "Hard Constraints",
+      "key": "4b2d9ddbfb7fce74d1a9e98b7517142a1c6d8a3f33f0070ae1884468a617fc32",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 20,
+      "and_size": 14,
+      "title_collision_size": 19
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "s required. No code files were modified.\n---\n[sync:mem_20260823_",
+      "query": "-- 下文",
+      "answer_phrase": "Markdown，可由解析器直接读取。 — 来自 qwen (2026-08-0",
       "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Shared Knowledge (auto-synced)",
+      "key": "2a466733bb0b11cf4fa150130c012d28440985fc59b0e9f381c5cb37f2f4de83",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 28,
+      "and_size": 8,
+      "title_collision_size": 7
+    },
+    {
+      "query": "main module",
+      "answer_phrase": " reasonable monthly release cycle\n- Policy news function must be",
+      "sources": [
+        "codepilot",
+        "pi",
+        "workbuddy"
+      ],
+      "agent": "codepilot",
+      "title": "Hard Constraints",
+      "key": "8b4a73f744c7373ec4b05a5b6c541d5dafc5bc3a1f5560f089f7c5d6d07a60e9",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 19
+    },
+    {
+      "query": "models settings",
+      "answer_phrase": "I Key validity is critical; expired keys cause 401 errors regard",
+      "sources": [
+        "codepilot",
         "dsh",
+        "pi",
+        "trae",
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "Lessons Learned",
-      "key": "b65cdda24d749d788941b22ed386017cc80b5ff2c94bd619e4042425e6dbbf14",
-      "strict_unique": true,
-      "line_safe": false
+      "title": "Hard Constraints",
+      "key": "abbfa049c5a8eaeaaf73ad84caa1f476f62e751be4f534ae31c139d6a1215c65",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 20,
+      "and_size": 14,
+      "title_collision_size": 19
     },
     {
-      "query": "engineering conventions and",
+      "query": "table grafana",
       "answer_phrase": "nclude postgres, redis, grafana, market-data, and 3 strategy con",
       "sources": [
         "codepilot",
@@ -768,219 +1063,18 @@
       "title": "Engineering Conventions",
       "key": "e1284fb18c188eb1c0c30ee1aa8a93d0a1a51420b25fac4b6e45f0f74e33dc01",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "shared knowledge auto-synced sync",
-      "answer_phrase": "tracted_005|h:1e70212f8a9ee4b5|src:generic-.pi] # pi-web Memory ",
-      "sources": [
-        "dsh",
-        "pi"
+      "line_safe": false,
+      "df": [
+        17,
+        16
       ],
-      "agent": "dsh",
-      "title": "Shared Knowledge (auto-synced)",
-      "key": "b62656305166bed3805dd102fdfb9fbfea445b40cc55cba76e0eca396e2f05bf",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 26,
+      "and_size": 7,
+      "title_collision_size": 19
     },
     {
-      "query": "偏好 sync",
-      "answer_phrase": "- [sync:mem_20260806_extracted_001|h:d6739474826d5572|src:qwen] ",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "偏好",
-      "key": "64848d6d7e6ba6a3f3261610d6d23056d9c0c4528852c74b5eb72ab41d8b8c22",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "engineering conventions and",
-      "answer_phrase": " LME inventory collector uses _fetch_cnal_latest to retrieve dat",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Engineering Conventions",
-      "key": "2a82771ec1970c7e7ccffb22ed6353fa84818e591f08b0547680d8af649fdcde",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": "- Feishu credentials must be checked in both config.yaml (struct",
-      "sources": [
-        "codepilot",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Hard Constraints",
-      "key": "d0108c656c4de63318ee6373bc7d59ea496c6b696a2969aa6552de27081a0d0e",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "备注 sync",
-      "answer_phrase": "ync:mem_20260818_extracted_009|h:906d6143687fb418|src:trae] [ses",
-      "sources": [
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "备注",
-      "key": "f64e849a93bc89f7e04d8a942691354b318197f9c27b06b8a3d22b6acf3acd6c",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": "rification threshold; maintain strict information source filteri",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "dsh",
-      "title": "Hard Constraints",
-      "key": "4b2d9ddbfb7fce74d1a9e98b7517142a1c6d8a3f33f0070ae1884468a617fc32",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "delete lock files and gateway_state.json then restart gateway — ",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "deaa2358dce365c9cbd023a09e2ac211fe81a0898f643d1d3230898764fb2749",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "shared knowledge auto-synced sync",
-      "answer_phrase": "[sync:mem_20260806_extracted_009|h:1e70212f8a9ee4b5|src:generic-",
-      "sources": [
-        "codepilot",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Shared Knowledge (auto-synced)",
-      "key": "5cc7774947e7a4c7ab9dc1e3aeac2379dac49a7ff3281c0df4ac42636a77232a",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "constraints and",
-      "answer_phrase": "ve topics: Explicitly avoids political and efficiency tool topic",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Constraints",
-      "key": "82a33c85e2ae017b634b1bb51fe9b0b4569c48d1c0edbeed228078870a87e5e8",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "用户 户环 环境 境关 关键 键事 事实 文件",
-      "answer_phrase": "ano | grep LISTEN` + `tasklist | grep node` 找残留 node 进程；任务栏 .lnk",
-      "sources": [
-        "codepilot",
-        "pi",
-        "trae"
-      ],
-      "agent": "pi",
-      "title": "用户环境关键事实",
-      "key": "92d0a6ea17fbc7c0b178c884657a406420d43cd799c30b681b864a84cfedac9a",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": "- GitHub Actions workflow files must have proper YAML indentatio",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "dsh",
-      "title": "Hard Constraints",
-      "key": "d25c22128fbbcb0c2d24869482f8e457d3b3f84659167eac5178e79f3179bd23",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "to override default home dashboard redirect — 来自 trae (2026-06-2",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "edc902d45f72d7325c901ecbd2d2ca61e28992de20654e72cde09318348c5131",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": " Index.md must be updated to reflect current concept count and m",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Hard Constraints",
-      "key": "e95f22c279e49ab29948ebae93640e77d0d1a45c8600d362a2f26e208653a237",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "onedrive git 仓库 跨项 项目 文件",
-      "answer_phrase": "me 全找不到）；② 沙箱静默吞 `refs/remotes/**` 写入（fetch/update-ref 返回 0 但 re",
-      "sources": [
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "OneDrive 内 git 仓库（跨项目铁律，2026-09-15）",
-      "key": "5e23508006beba8d549013604b0b60381287a45278b4eb8f45031663e183f181",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "the conversation and",
-      "answer_phrase": "alues, boundaries, and personality traits should persist in SOUL",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "trae"
-      ],
-      "agent": "pi",
-      "title": "The Conversation",
-      "key": "db594f213e621c02b331b639220d2903c078ca22678eec8c8fce534011f8e119",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "connect to",
-      "answer_phrase": "pp - link their personal account",
+      "query": "account",
+      "answer_phrase": "hey want to reach yo",
       "sources": [
         "codepilot",
         "dsh",
@@ -991,64 +1085,104 @@
       "title": "Connect (Optional)",
       "key": "bdd761914c7fd225dd4c430a436c7c312ba3ed89ce3d76c6f92bd0a48551bd9c",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        7
+      ],
+      "df_union": 7,
+      "and_size": 7,
+      "title_collision_size": 1
     },
     {
-      "query": "topics.md session_id",
-      "answer_phrase": "337 | topic_summary_time: 2026-08-17 17:23:51]用户对基本面页面的评级规则提出修改意",
+      "query": "-- 主动",
+      "answer_phrase": "码，主动记录重要变更。 — 来自 generic-.pi (2026-08-06",
       "sources": [
         "trae"
       ],
       "agent": "trae",
-      "title": "topics.md",
-      "key": "4e040508dcd200afb265df1973317b93bdf05d48e94726ce63b6509d2de1dc5d",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "偏好 sync",
-      "answer_phrase": "[sync:mem_20260806_extracted_005|h:1e70212f8a9ee4b5|src:pi] # pi",
-      "sources": [
-        "codepilot",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
       "title": "偏好",
-      "key": "667c78dd34e8344b4eb2f58a158bb61e65bd8fe7972cf3221caccd9b92c63b03",
+      "key": "64848d6d7e6ba6a3f3261610d6d23056d9c0c4528852c74b5eb72ab41d8b8c22",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 32,
+      "and_size": 3,
+      "title_collision_size": 7
     },
     {
-      "query": "备注 sync",
-      "answer_phrase": "复 test_inventory_lme.py::test_incremental_writes_new_rows 中 self",
+      "query": "text blocks",
+      "answer_phrase": ", logs, JSON keys, identifiers\n- Exact quoted text from the user",
       "sources": [
         "codepilot",
         "dsh",
+        "pi",
+        "trae",
+        "workbuddy"
+      ],
+      "agent": "codepilot",
+      "title": "Keep technical artifacts unchanged",
+      "key": "9c5abfc66252d2575a3725c5053c2f33d75edebefcaacc0c4d4aa8f6291e5230",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        15,
+        9
+      ],
+      "df_union": 23,
+      "and_size": 1,
+      "title_collision_size": 1
+    },
+    {
+      "query": "应用 technical",
+      "answer_phrase": "3b76751edaf25b1b1（应用 cli_aab633ecf0399cef 下的 open_id；注意 open_id ",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "pi",
+        "trae",
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "备注",
-      "key": "7581d1e7bed24876d9779e6b0bb186f13d8b0c918580d0f046106da34ad7ead5",
+      "title": "Background",
+      "key": "31cf9f8c046ba23ffaa4c4129a31dc03050bc9db2580785badc5e7e359397b27",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        10
+      ],
+      "df_union": 26,
+      "and_size": 1,
+      "title_collision_size": 2
     },
     {
-      "query": "hard constraints and",
-      "answer_phrase": "`Wiki/authors/` instead of `他山之石/` to maintain read-only integri",
+      "query": "context full",
+      "answer_phrase": "ate. Don't be robotic. Just talk",
       "sources": [
         "codepilot",
+        "dsh",
         "pi",
-        "workbuddy"
+        "trae"
       ],
       "agent": "pi",
-      "title": "Hard Constraints",
-      "key": "038e311867fa09a890c5a46677f507437dd0456e8c83eb6ef88972d5719da680",
-      "strict_unique": false,
-      "line_safe": true
+      "title": "The Conversation",
+      "key": "db594f213e621c02b331b639220d2903c078ca22678eec8c8fce534011f8e119",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 34,
+      "and_size": 1,
+      "title_collision_size": 1
     },
     {
-      "query": "用户 户环 环境 境关 关键 键事 事实 文件",
-      "answer_phrase": "ome_proxy.exe --app-id=...`），本质是浏览器窗口，连的是后端 node 服务（默认端口 30141）。",
+      "query": "web 一个",
+      "answer_phrase": "面仍显示旧版本的原因**：磁盘文件已更新但旧 node 服务进程没关，仍用内存里的旧代码服务。不是装漏了，是\"进程没重启\"。\n-",
       "sources": [
         "codepilot",
         "dsh",
@@ -1059,64 +1193,103 @@
       "title": "用户环境关键事实",
       "key": "be67258fb44fdde2d6a18aff6beda1ffef0d169c93fd9007e78a7fabfd9a810b",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 4
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": " user's PATH for direct dsh command access. — 来自 trae (2026-08-1",
+      "query": "delete gateway",
+      "answer_phrase": "ck files and gateway_state.json then restart gateway — 来",
       "sources": [
         "trae"
       ],
       "agent": "trae",
       "title": "Lessons Learned",
-      "key": "0ecf194caa80061a64e3063a4e073adaae989edfb4ac9557de3ba964a51cb64e",
+      "key": "deaa2358dce365c9cbd023a09e2ac211fe81a0898f643d1d3230898764fb2749",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 61
     },
     {
-      "query": "user preferences and",
-      "answer_phrase": "- Task execution: After completing task implementation, conduct ",
+      "query": "authentication desensitized",
+      "answer_phrase": "topics: Explicitly avoids political and efficiency tool topics\n-",
       "sources": [
         "codepilot",
         "dsh",
+        "pi",
+        "trae",
         "workbuddy"
       ],
       "agent": "codepilot",
-      "title": "User Preferences",
-      "key": "8db9c0a7a575920cb80b69d2c617a435bcfbf2ab7317ab9c0d9b72c86fdbb098",
+      "title": "Constraints",
+      "key": "82a33c85e2ae017b634b1bb51fe9b0b4569c48d1c0edbeed228078870a87e5e8",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        16,
+        16
+      ],
+      "df_union": 17,
+      "and_size": 15,
+      "title_collision_size": 6
     },
     {
-      "query": "engineering conventions and",
-      "answer_phrase": "p must first check network penetration status and Feishu connect",
+      "query": "context fix",
+      "answer_phrase": "硬停#3 处理 —— 先做\"修复效果归.",
       "sources": [
-        "codepilot",
+        "dsh",
         "pi",
         "trae",
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "Engineering Conventions",
-      "key": "89534f691e24c6d548e1def0f9540cb67c7b148a4e55f50ee28739d0a38013fd",
+      "title": "项目接续，先理解项目，然后执行以下指令：",
+      "key": "0a50c259d6ef9d680b9265709608e34280dc917181997b32794aeec8324619e2",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 1
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "e default home dashboard redirect\n---\n[sync:mem_20260813_extract",
+      "query": "concept frontmatter",
+      "answer_phrase": "hors/` instead of `他山之石/` to maintain read-only integrity\n- Conc",
       "sources": [
-        "pi"
+        "codepilot",
+        "pi",
+        "workbuddy"
       ],
       "agent": "pi",
-      "title": "Lessons Learned",
-      "key": "a5b65984f4103f74a14ea4694cb44fc82e2993db29124e8cb38a8b1f33dbf882",
-      "strict_unique": true,
-      "line_safe": false
+      "title": "Hard Constraints",
+      "key": "038e311867fa09a890c5a46677f507437dd0456e8c83eb6ef88972d5719da680",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        15,
+        11
+      ],
+      "df_union": 17,
+      "and_size": 9,
+      "title_collision_size": 19
     },
     {
-      "query": "user preferences and",
-      "answer_phrase": "ocumentation preferences: Documentation should include explanati",
+      "query": "context task",
+      "answer_phrase": "t just run terminal commands and say \"connected\" or \"usable\"\n- D",
       "sources": [
         "codepilot",
         "dsh",
@@ -1127,125 +1300,99 @@
       "title": "User Preferences",
       "key": "173c776ac0a19e90106420e48ff14773e77070c1267456036252564c13152830",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 29,
+      "and_size": 6,
+      "title_collision_size": 4
     },
     {
-      "query": "task 每周 项目 状态 态检 检查 and",
-      "answer_phrase": "过 PAT；或让用户自己用浏览器操作、需要 token 时用其本地 git credential manager。 — 来自 h",
+      "query": "home models",
+      "answer_phrase": " to override default home dashboard redirect — 来自 trae (2026-06-",
       "sources": [
         "trae"
       ],
       "agent": "trae",
-      "title": "[Task] 每周项目状态检查",
-      "key": "38c9a201eaa2f520e95f988f5003015edec4a9b67554498e12dbdf26988b9378",
+      "title": "Lessons Learned",
+      "key": "edc902d45f72d7325c901ecbd2d2ca61e28992de20654e72cde09318348c5131",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 31,
+      "and_size": 3,
+      "title_collision_size": 61
     },
     {
-      "query": "memory.md and",
-      "answer_phrase": ":mem_20260803_extracted_009|h:382947594e1b92d9|src:trae] [sessio",
+      "query": "name 反复",
+      "answer_phrase": "**\n 广州（在招岗位上写的广州，待本人确认）\n- **Notes:**\n 技术自评\"小白\"，不熟路径拼接，容易被重复的路径前缀",
       "sources": [
         "codepilot"
       ],
       "agent": "codepilot",
-      "title": "MEMORY.md",
-      "key": "7abadedbc71fd84beb70d03b81784c84d2af1721579fec58f98e7525be57ee5a",
+      "title": "Tool / system outputs",
+      "key": "8e0989064fd0218b9e302ecc95fd3317682abc4ca23e3a8434685c4aa151e8e1",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        16,
+        16
+      ],
+      "df_union": 28,
+      "and_size": 4,
+      "title_collision_size": 5
     },
     {
-      "query": "lessons learned sync",
-      "answer_phrase": "extracted_045|h:1f91dc9de956ef5f|src:trae] ## Hard Constraints —",
+      "query": "authentication desensitized",
+      "answer_phrase": "lly desensitized)\n- Feishu credentials must be checked in both c",
       "sources": [
         "codepilot",
         "pi",
+        "trae",
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "Lessons Learned",
-      "key": "40a47893a9d6e66c691c14587805aa77da5dfd17da3f74421abd72368bd7d684",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "备注 sync",
-      "answer_phrase": "制更稳。\n---\n[sync:mem_20260814_extracted_004|h:7f8d318013598da1|src",
-      "sources": [
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "备注",
-      "key": "f52a0157184cd8a015bbed624b24f8f73744b2d0d55d032bb9a4994c1acdb8b7",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": " override default home dashboard redirect\n---\n[sync:mem_20260703",
-      "sources": [
-        "dsh"
-      ],
-      "agent": "dsh",
-      "title": "Lessons Learned",
-      "key": "92e4c0683e70b7f615e6af55f490e57634ab03114907b7025368825372a833c1",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": " Knowledge graph files (知识图谱索引.md, 知识图谱.canvas) must be manually",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "dd504388b4cf6252a6c7eacd48be5dd1b8e7bf15cc720c58f31a8463aa1c185e",
+      "title": "Hard Constraints",
+      "key": "d0108c656c4de63318ee6373bc7d59ea496c6b696a2969aa6552de27081a0d0e",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "nc:mem_20260806_extracted_020|h:56d3a7f8d237a1b1|src:trae] ## Ha",
-      "sources": [
-        "codepilot",
-        "workbuddy"
+      "line_safe": false,
+      "df": [
+        16,
+        16
       ],
-      "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "0954a5cd8cc6d3c9ece586d480d5ad1a6f4fcdc3be0ab66e14c9320ed3458c91",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 17,
+      "and_size": 15,
+      "title_collision_size": 19
     },
     {
-      "query": "engineering conventions 系统",
-      "answer_phrase": "据源地图需添加“最近实测日期戳”列，校准文档需包含三门槛纪律、品种 IC 表、遗留问题和下次校准",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Engineering Conventions",
-      "key": "7e430af246746c7d2d5730b9d9aacfc96ca9809a2f9fb324f63b3de769a3cbfd",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "3f5a | topic_summary_time: 2026-06-15 17:38:40] — 来自 trae (2026-",
+      "query": "output",
+      "answer_phrase": "26-06-28 | Model: bobapi",
       "sources": [
         "dsh",
-        "pi"
+        "pi",
+        "trae",
+        "workbuddy"
       ],
       "agent": "pi",
-      "title": "Lessons Learned",
-      "key": "b48067be8c0b58a6f7e4b8824ba48fb0640a3dbba81a1cc289831aef2923413a",
+      "title": "你是谁？",
+      "key": "2c0802b4c3f6ba849a94d28f45aaa206b9f5480c6923c630cd958918c4e7a363",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        14
+      ],
+      "df_union": 14,
+      "and_size": 14,
+      "title_collision_size": 1
     },
     {
-      "query": "engineering conventions and",
-      "answer_phrase": "Candidate layering: core pool requires qualified + startup/main ",
+      "query": "30 main",
+      "answer_phrase": "\n- Candidate layering: core pool requires qualified + startup/ma",
       "sources": [
         "codepilot",
         "dsh",
@@ -1257,35 +1404,36 @@
       "title": "Engineering Conventions",
       "key": "b9e5e410a9fc8c60c6250c72b1dd6bcc5dc75648be90d52e389e318c3bb8eb58",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 30,
+      "and_size": 6,
+      "title_collision_size": 19
     },
     {
-      "query": "topics.md session_id",
-      "answer_phrase": "（1.1GB）、Python pip缓存（3.1GB）和WPS addons组件缓存（5.8GB），合计释放约10GB空间，C盘",
+      "query": "云文 五维",
+      "answer_phrase": "337 | topic_summary_time: 2026-08-17 17:23:51]用户对基本面页面的评级规则提出修改意",
       "sources": [
         "trae"
       ],
       "agent": "trae",
       "title": "topics.md",
-      "key": "8516f9f80b1a2a920eb0f054806505d73039b40a8f92b4ebf7cd891a555c2e4d",
+      "key": "4e040508dcd200afb265df1973317b93bdf05d48e94726ce63b6509d2de1dc5d",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "c:mem_20260806_extracted_018|h:e8f33ae48c4749e6|src:trae] ## Har",
-      "sources": [
-        "codepilot",
-        "workbuddy"
+      "line_safe": false,
+      "df": [
+        18,
+        18
       ],
-      "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "b46656204cbe5de9365e6fe55c5a690ad90c25ac408038d09b7dace60c392aa8",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 22,
+      "and_size": 14,
+      "title_collision_size": 36
     },
     {
-      "query": "engineering conventions and",
+      "query": "backfill temporary",
       "answer_phrase": "ime, automatically tag data-backup branch with 'backup-YYYY-MM' ",
       "sources": [
         "codepilot",
@@ -1293,69 +1441,22 @@
         "trae",
         "workbuddy"
       ],
-      "agent": "workbuddy",
+      "agent": "codepilot",
       "title": "Engineering Conventions",
       "key": "d4ef173d492f43716b543ad2d621aa3e7bc5ea4e002240fa1550d3e27c2e0a90",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "_extracted_014|h:d7fb8a60c03beb20|src:trae] ## Hard Constraints ",
-      "sources": [
-        "dsh",
-        "pi"
+      "line_safe": false,
+      "df": [
+        16,
+        16
       ],
-      "agent": "pi",
-      "title": "Lessons Learned",
-      "key": "4178a28fd1fde8398b64a210c0578f74c961998ee35602d7223e217e857d3051",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 30,
+      "and_size": 2,
+      "title_collision_size": 19
     },
     {
-      "query": "hard constraints and",
-      "answer_phrase": "_price_qh对6个品种（玻璃、纯碱、铁矿石、多晶硅、铜(BC)、聚氯乙烯）因99qh权限问题抛出TypeError，返回N",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "dsh",
-      "title": "Hard Constraints",
-      "key": "74efac7a5680c36e933f6914539de0c5b8717fa9f9ccb330170c486a786bbf24",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md and",
-      "answer_phrase": "leting the problematic SpriteFallback.mtl and its meta file. The",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "f03780d3fd9f3786957e2ced6208bf4ff4d20566d92421b632b57a9b083db78b",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints to",
-      "answer_phrase": " must be set to 35 days to match the reasonable monthly release ",
-      "sources": [
-        "codepilot",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Hard Constraints",
-      "key": "8b4a73f744c7373ec4b05a5b6c541d5dafc5bc3a1f5560f089f7c5d6d07a60e9",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "归档 obsidian 他山 山之 之石 跨项 项目 结论 api",
-      "answer_phrase": "- ⇒ **不要再排\"自动重试抓取\"类自动化**（两轮已证明复现同一失败）；剩余缺口走**浏览器剪藏（Obsidian Web ",
+      "query": "web 一个",
+      "answer_phrase": "*，冷却 75s 后无头浏览器可抓到。\n- ⇒ **不要再排\"自动重试抓取\"类自动化**（两轮已证明复现同一失败）；剩余缺口走*",
       "sources": [
         "workbuddy"
       ],
@@ -1363,204 +1464,18 @@
       "title": "公众号文章归档（Obsidian `他山之石/`，跨项目结论 2026-09-21）",
       "key": "2dd21cc96a460653f5e75ea52ccf9bb459b97d53d44587bcf8ebf9ede169c5f3",
       "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "ata, requiring a fallback to CNAL to ensure data freshness\n---\n[",
-      "sources": [
-        "pi"
+      "line_safe": false,
+      "df": [
+        18,
+        18
       ],
-      "agent": "pi",
-      "title": "Lessons Learned",
-      "key": "deb88ed02f10833125b49d5fb3adbad6d1a67aecda227658df949b9849f0edbe",
-      "strict_unique": true,
-      "line_safe": false
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 1
     },
     {
-      "query": "偏好 sync",
-      "answer_phrase": "ings.json 中（用户级别），而不是每个工作区的 .vscode/mcp.json。认为每个项目配 — 来自 hermes",
-      "sources": [
-        "dsh"
-      ],
-      "agent": "dsh",
-      "title": "偏好",
-      "key": "94d4a78bec34b5672c7a393a80c2fc0f29a7aaed4f4edd497bb00bdd40fac5d6",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "ay alarms, and ensure streak indicators show only for ≥3 days. —",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "abce6feec3be99215c6bd3b45adf86a60de537d429891cee359eb4fc33e795ff",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "tool system outputs and",
-      "answer_phrase": "kbuddy] # USER.md - About Your Human — 来自 workbuddy (2026-09-03)",
-      "sources": [
-        "codepilot"
-      ],
-      "agent": "codepilot",
-      "title": "Tool / system outputs",
-      "key": "8e0989064fd0218b9e302ecc95fd3317682abc4ca23e3a8434685c4aa151e8e1",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "constraints and",
-      "answer_phrase": "an Vault, and C:\\Program Files\\CodePilot\n---\n[sync:mem_20260817_",
-      "sources": [
-        "codepilot",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Constraints",
-      "key": "f62de108354dd550a35679f66fcb7d508febdab63656701ccb562aad1a3b139c",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "a137735d2e|src:workbuddy] # MEMORY.md — 跨项目长期记忆 — 来自 workbuddy (",
-      "sources": [
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "Lessons Learned",
-      "key": "add32df9e2b560d893b8a5ff1c26b7fa647643c85182fca268d15be344ecc23d",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "备注 sync",
-      "answer_phrase": "extracted_061|h:36a84482c1bc0ed3|src:trae] ## Hard Constraints —",
-      "sources": [
-        "codepilot",
-        "dsh",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "dsh",
-      "title": "备注",
-      "key": "ed41a85f9ffd9dff35b6276fd06af7a8a469113b63c69bcd8aed204c6378dd2a",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md and",
-      "answer_phrase": " mode, 1 core candidate (C) and 1 observation candidate (M) were",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "9e32fae8cd6fc9fbf02d239ed1252d98cbb62f53d6e41740fa283fc704e8f4fa",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": "h2_lightweight and its own engine/config; do not touch retired P",
-      "sources": [
-        "codepilot",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Hard Constraints",
-      "key": "34d143bdb88fe829afef111b80858338b5a015f9404d8b29d36e01f7b92f9998",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "和执行顺序，最后询问是否立即动手做第一项优化。\n---\n[sync:mem_20260814_extracted_004|h:7",
-      "sources": [
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Lessons Learned",
-      "key": "7044bcfb3016a515ceaee047345cb645f5abddce9b1e2ace73e1add5e6791125",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "tool system outputs and",
-      "answer_phrase": "07|h:0972f74383b29725|src:workbuddy] # BOOTSTRAP.md — 来自 workbud",
-      "sources": [
-        "dsh",
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "Tool / system outputs",
-      "key": "c22774f04a9f5061156d65b7e9bbc7d0103a78c4a24b6e85748761bf6ee3de4a",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "项目 sync",
-      "answer_phrase": "发项目。\n---\n[sync:mem_20260806_extracted_002|h:d5f9e6ed6a436cc9|src",
-      "sources": [
-        "dsh",
-        "pi"
-      ],
-      "agent": "dsh",
-      "title": "项目",
-      "key": "845bd7ea5acf62ba064c816ce7a9af8a031b398b8907374cfd8cca858c2ffd82",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "本机 事实 2026-09-16 实测 避免 免重 重复 onedrive",
-      "answer_phrase": "r，不用 --onefile），打包后自动部署到本地运行位。install_task.bat 注册/重注册任务也指向本地运行位。",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "本机工程事实（2026-09-16 实测，避免重复踩坑）",
-      "key": "33094ea475ec08527f8f3cd0151aab7ba5b75d55c371b960911f2f9dfad3d542",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "_extracted_046|h:c2799ff7cdb11af9|src:trae] ## Hard Constraints ",
-      "sources": [
-        "codepilot",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "564c18c9f9fd5b8be909bf37465cd1ed9f681c8aa79e410d957b65383fbf7ed7",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "engineering conventions and",
-      "answer_phrase": "l Chinese with English technical terms, and signature \"西城閒人 · 識\"",
-      "sources": [
-        "codepilot",
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Engineering Conventions",
-      "key": "12ed6a6d09af59beb838f2bacbf8313e1b0ac5d8762d4e16523a702660d20ad9",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "constraints and",
-      "answer_phrase": "keys for GitHub API authentication instead of PATs when possible",
+      "query": "authentication desensitized",
+      "answer_phrase": "tion instead of PATs when possible\n- File paths: Key project pat",
       "sources": [
         "codepilot",
         "dsh",
@@ -1572,63 +1487,100 @@
       "title": "Constraints",
       "key": "857f2866bd271784674cb46943b768b4593a019391f0817b46f3f45ed98853fb",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "偏好 sync",
-      "answer_phrase": "变更。\n---\n[sync:mem_20260806_extracted_001|h:d6739474826d5572|src:",
-      "sources": [
-        "dsh",
-        "pi"
+      "line_safe": false,
+      "df": [
+        16,
+        16
       ],
-      "agent": "dsh",
-      "title": "偏好",
-      "key": "de273d9daeb121941333036615c3a9c2dbe69a5e433bf86f4c80ec08ebfbf328",
-      "strict_unique": true,
-      "line_safe": false
+      "df_union": 17,
+      "and_size": 15,
+      "title_collision_size": 6
     },
     {
-      "query": "topics.md and",
-      "answer_phrase": "API, SenseNova, 中国移动) in the database, ensuring 528 models were ",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "3cfb0e2e8a10212ac97c8d73b5e3bcec7a7c1775c7969a942b157e4d035acb09",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "当前 任务 and",
-      "answer_phrase": "66e33f37928a8dc9aae | topic_summary_time: 2026-07-19 15:46:32] —",
+      "query": "50 high",
+      "answer_phrase": "染生产历史\n- 需处理akshare spot_price_qh对6个品种（玻璃、纯碱、铁矿石、多晶硅、铜(BC)、聚氯乙烯）因",
       "sources": [
         "codepilot",
         "dsh",
         "pi",
         "workbuddy"
       ],
-      "agent": "codepilot",
-      "title": "当前任务",
-      "key": "17ae4a76a4322705454e91bb65a78cadf6bf4971c4bc1a4c7a042fdfa1dda588",
-      "strict_unique": true,
-      "line_safe": true
+      "agent": "dsh",
+      "title": "Hard Constraints",
+      "key": "74efac7a5680c36e933f6914539de0c5b8717fa9f9ccb330170c486a786bbf24",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 32,
+      "and_size": 4,
+      "title_collision_size": 19
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "show only for ≥3 days.\n---\n[sync:mem_20260823_extracted_010|h:fa",
+      "query": "leaks cycle_days",
+      "answer_phrase": "ser reported issues with the pi-web application: missing histori",
       "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "0ecf194caa80061a64e3063a4e073adaae989edfb4ac9557de3ba964a51cb64e",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        16
+      ],
+      "df_union": 26,
+      "and_size": 8,
+      "title_collision_size": 61
+    },
+    {
+      "query": "写入 升级",
+      "answer_phrase": "第三方依赖升级需进行全量回归测试，确保零回归\n- 调度逻辑需确保所有采集器被正确发现并执行，避免长期断更\n- 文档修订需清除过时",
+      "sources": [
+        "codepilot",
+        "dsh",
+        "workbuddy"
+      ],
+      "agent": "codepilot",
+      "title": "Engineering Conventions",
+      "key": "7e430af246746c7d2d5730b9d9aacfc96ca9809a2f9fb324f63b3de769a3cbfd",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 32,
+      "and_size": 4,
+      "title_collision_size": 19
+    },
+    {
+      "query": "actions module",
+      "answer_phrase": "_westmetall_latest 的 AttributeError，显式 patch _parse_westmetall_l",
+      "sources": [
+        "codepilot",
         "dsh",
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "Lessons Learned",
-      "key": "8b8fa441b7b67314b7886e4f450afc4956b0017bbf3ad57c34941ab3c2e75e5b",
+      "title": "备注",
+      "key": "7581d1e7bed24876d9779e6b0bb186f13d8b0c918580d0f046106da34ad7ead5",
       "strict_unique": true,
-      "line_safe": false
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 10
     },
     {
-      "query": "tool system outputs and",
+      "query": "explanation tool",
       "answer_phrase": "em verbatim, and if needed, add a short **Chinese** explanation ",
       "sources": [
         "codepilot",
@@ -1641,136 +1593,18 @@
       "title": "Tool / system outputs",
       "key": "192244569dafd8772d222c92b9489da3d964e291a39817d3fc5dfc34234887a5",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "备注 and",
-      "answer_phrase": "t。\n---\n[sync:mem_20260821_extracted_007|h:0ac598c0628cd09e|src:t",
-      "sources": [
-        "dsh"
+      "line_safe": true,
+      "df": [
+        13,
+        9
       ],
-      "agent": "dsh",
-      "title": "备注",
-      "key": "d175d9819cf9f91ef6184d270ec48a31feecdf04cce78da43ed771dad527e516",
-      "strict_unique": true,
-      "line_safe": false
+      "df_union": 17,
+      "and_size": 5,
+      "title_collision_size": 5
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "oes not solve the 10x return problem; position management and tr",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "14f8028d0ed3af9ca2ad797487f08423e4acbbb6dd1643c3953e8edff159fa7d",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "when you re done to",
-      "answer_phrase": "ync:mem_20260806_extracted_006|h:f39482959b10b53f|src:workbuddy]",
-      "sources": [
-        "codepilot"
-      ],
-      "agent": "codepilot",
-      "title": "When You're Done",
-      "key": "6732c483456723f8370c999d7759a1d4c747cdeea6dc6f1d789d132cf7c56a4f",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "偏好 sync",
-      "answer_phrase": "[sync:mem_20260806_extracted_001|h:d5f9e6ed6a436cc9|src:qwen] # ",
-      "sources": [
-        "codepilot",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "偏好",
-      "key": "5b5fe59e2d2577c5e96608779bff6409deda64a05b7ef48220cddf8cc0af9690",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "h:ce2602e21784d164|src:workbuddy] # MEMORY.md — 跨项目长期记忆 — 来自 wor",
-      "sources": [
-        "codepilot",
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "Lessons Learned",
-      "key": "e8edac4c3ea188bace4b59efb30a5e231c8fe7eb6a54823c6f4aafd10ff9a3af",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned to",
-      "answer_phrase": "xtracted_015|h:e8f33ae48c4749e6|src:trae] ## Hard Constraints — ",
-      "sources": [
-        "dsh",
-        "pi"
-      ],
-      "agent": "dsh",
-      "title": "Lessons Learned",
-      "key": "295612f17fc0e6680b70d504cba26d87b2db760cb90a5d943bf05d6221ef5ba9",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md and",
-      "answer_phrase": "s. The build produced apps/cli/lib/bin.js with dsh version 0.1.0",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "4f231f980ec9d75fa202d0e6fab260dc897cb77c6cdbfe7a886b9a21e11b86d3",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "_extracted_004|h:6f78897d8884da3b|src:trae] [session_id: 6a29303",
-      "sources": [
-        "codepilot",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "883fe21fb9b3d8740c0cae1580335e19f649a8044f61fdb41df5b4ed7ff705c2",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "[sync:mem_20260806_extracted_017|h:d7fb8a60c03beb20|src:trae] ##",
-      "sources": [
-        "codepilot",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Lessons Learned",
-      "key": "f6c3b40bfbcb44ea1ef73be3548a1dd18aea887a39436401f0aa995308f72f46",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "s required. No code files were modified.\n---\n[sync:mem_20260629_",
-      "sources": [
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "Lessons Learned",
-      "key": "66c8ebd65df63330351cc3baaf48fdf78b6aa8aa67af86598d8e75d66788916b",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "engineering conventions in",
-      "answer_phrase": " 因子名称需预填全部86个因子代码，缺失原样输出",
+      "query": "actions 一个",
+      "answer_phrase": " 因子名称需预填全部86个因子代码，缺失原样输出\n- 飞书文档创建需使用feishu_doc.py模块\n- 测试需覆盖374+用",
       "sources": [
         "codepilot",
         "dsh",
@@ -1782,65 +1616,101 @@
       "title": "Engineering Conventions",
       "key": "5e64fc6e594b9ec5d8ff06d19b33a44a6cc253e0a7ec1e39e732f282c5cfe9a1",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 19
     },
     {
-      "query": "topics.md and",
-      "answer_phrase": "ng (constants temporarily lost, now stable after replay and re-v",
+      "query": "下文 信息",
+      "answer_phrase": "Now let me check the key project areas in parallel. — 来自 codepil",
       "sources": [
         "trae"
       ],
       "agent": "trae",
-      "title": "topics.md",
-      "key": "2d29f481a7b0f32fef0680f2707c6493e0fa094883a5145f39deac6718b90f7b",
+      "title": "[Task] 每周项目状态检查",
+      "key": "38c9a201eaa2f520e95f988f5003015edec4a9b67554498e12dbdf26988b9378",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 2
     },
     {
-      "query": "hard constraints 文件",
-      "answer_phrase": "tmetall_latest 为返回空 DataFrame 以隔离网络波动，且 source 断言需改为 \"WESTMETALL",
+      "query": "delete mode",
+      "answer_phrase": "h2_lightweight and its own engine/config; do not touch retired P",
       "sources": [
         "codepilot",
-        "dsh",
+        "pi",
         "workbuddy"
       ],
       "agent": "codepilot",
       "title": "Hard Constraints",
-      "key": "dd714c4d8476e1ad9c122f367edb54461d325ee9731724b936bdb40959fcd0e5",
-      "strict_unique": true,
-      "line_safe": true
+      "key": "34d143bdb88fe829afef111b80858338b5a015f9404d8b29d36e01f7b92f9998",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 19
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "9be3a0bc058 | topic_summary_time: 2026-08-14 21:05:42] — 来自 trae",
+      "query": "delete analysis",
+      "answer_phrase": " and Feishu connection status and report results\n- Before modify",
       "sources": [
         "codepilot",
         "pi",
+        "trae",
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "Lessons Learned",
-      "key": "5cd4402c0494dbde3912f75970b608a2ef8723e6d48e4a5d8e87031a0dd9a4d5",
+      "title": "Engineering Conventions",
+      "key": "89534f691e24c6d548e1def0f9540cb67c7b148a4e55f50ee28739d0a38013fd",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        16
+      ],
+      "df_union": 33,
+      "and_size": 1,
+      "title_collision_size": 19
     },
     {
-      "query": "task 每周 项目 状态 态检 检查 and",
-      "answer_phrase": "5GB报警时用 execute_code (Python os.walk) 替代 du 扫描避免超时。最大 — 来自 herme",
+      "query": "信息 权限",
+      "answer_phrase": "的第一轮对话，目前还没有 2026-06-13 的对话记录需要整理。昨天（6/12）的记忆已完成",
       "sources": [
-        "dsh",
         "pi",
+        "trae",
         "workbuddy"
       ],
       "agent": "pi",
-      "title": "[Task] 每周项目状态检查",
-      "key": "cf421bc1928083f4c7624934275652f534956b877a136fb4a1d83ef9fe27f049",
+      "title": "[Task] 每日记忆整理",
+      "key": "13c29c08a88f4c9a2c223439709bfad15814037114a58b175438a96546e44151",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 30,
+      "and_size": 5,
+      "title_collision_size": 2
     },
     {
-      "query": "engineering conventions and",
-      "answer_phrase": " Audio compression uses OGG format with -q:a 5 quality setting t",
+      "query": "text background",
+      "answer_phrase": "s) → 1s停留 → 0.7s fade out\n- Audio compression uses OGG format wi",
       "sources": [
         "codepilot",
         "dsh",
@@ -1852,85 +1722,137 @@
       "title": "Engineering Conventions",
       "key": "5378d0fa3fc2ec3510ca019c486a18270eafd04275d71c13be1073086d3f8a5c",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        15,
+        13
+      ],
+      "df_union": 23,
+      "and_size": 5,
+      "title_collision_size": 19
     },
     {
-      "query": "when you re done sync",
-      "answer_phrase": "- [sync:mem_20260731_extracted_719|h:7d84b947a94c6ecd|src:hermes",
+      "query": "manually references",
+      "answer_phrase": " 'ghost' references\n- Knowledge graph files (知识图谱索引.md, 知识图谱.can",
       "sources": [
         "trae"
       ],
       "agent": "trae",
-      "title": "When You're Done",
-      "key": "deff67452575499bc1eee4213d8b575b4d238c6b39e7f4cf8c8e314cba4e5ace",
-      "strict_unique": true,
-      "line_safe": true
+      "title": "Lessons Learned",
+      "key": "dd504388b4cf6252a6c7eacd48be5dd1b8e7bf15cc720c58f31a8463aa1c185e",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 29,
+      "and_size": 5,
+      "title_collision_size": 61
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "xtracted_015|h:f52573abefa40b5d|src:trae] [session_id: 6a2bad5eb",
+      "query": "delete name",
+      "answer_phrase": "n you're helping. Update this as you go.",
       "sources": [
-        "codepilot",
-        "workbuddy"
+        "codepilot"
       ],
       "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "52efdd23665cf1078ceab10995894915b8293b7203cf257ea309b9e42bf4a0e2",
+      "title": "When You're Done",
+      "key": "6732c483456723f8370c999d7759a1d4c747cdeea6dc6f1d789d132cf7c56a4f",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        18,
+        16
+      ],
+      "df_union": 33,
+      "and_size": 1,
+      "title_collision_size": 4
     },
     {
-      "query": "tool system outputs and",
-      "answer_phrase": "3 字符的 `g — 来自 hermes (2026-07-31",
+      "query": "说明 方式",
+      "answer_phrase": "如\"这个窗口算不算信号\"）、口径定义、写生产数据、\n  跨仓契约变更、或修法有多种合理选择。\n- 执行方式：直接改 → 跑门禁 ",
       "sources": [
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "Tool / system outputs",
-      "key": "30331c314894924cb37ff0f0331683517be5711eeda1ab9ab10944084fce401d",
+      "title": "★ 机械规则：明显的 bug 直接修，不要问（用户明确指令，2026-09-23）",
+      "key": "fa6f9f391d6f641dc00a2d637601156dd1f39fc64c03640ecbfdcae018419d02",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        17,
+        16
+      ],
+      "df_union": 29,
+      "and_size": 4,
+      "title_collision_size": 1
     },
     {
-      "query": "when you re done sync",
-      "answer_phrase": "ce.\n---\n[sync:mem_20260806_extracted_003|h:7f330d43452f6ab4|src:",
+      "query": "main assets",
+      "answer_phrase": "ese with English technical terms, and signature \"西城閒人 · 識\"\n- Sha",
       "sources": [
-        "pi"
+        "codepilot",
+        "pi",
+        "trae",
+        "workbuddy"
       ],
       "agent": "pi",
-      "title": "When You're Done",
-      "key": "2a868db27e169a569c136618de76bd66f74fdc39638c6ad3a0a8acaee573e5c0",
+      "title": "Engineering Conventions",
+      "key": "12ed6a6d09af59beb838f2bacbf8313e1b0ac5d8762d4e16523a702660d20ad9",
       "strict_unique": true,
-      "line_safe": false
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 31,
+      "and_size": 4,
+      "title_collision_size": 19
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "bsidian to verify the fix.\n---\n[sync:mem_20260806_extracted_008|",
+      "query": "actions module",
+      "answer_phrase": "空 DataFrame 以隔离网络波动，且 source 断言需改为 \"WESTMETALL\"\n- 部署机（GitHub Act",
       "sources": [
+        "codepilot",
         "dsh",
-        "pi"
+        "workbuddy"
       ],
       "agent": "dsh",
-      "title": "Lessons Learned",
-      "key": "60252c462a87a2305c63d4ec0a3ecd43b9de48ea3358daf8b88986a18c2a1728",
+      "title": "Hard Constraints",
+      "key": "dd714c4d8476e1ad9c122f367edb54461d325ee9731724b936bdb40959fcd0e5",
       "strict_unique": true,
-      "line_safe": false
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 19
     },
     {
-      "query": "topics.md session_id",
-      "answer_phrase": "nifest.json的包名、orientation和minPlatformVersion问题。音频升级策略采用freesoun",
+      "query": "方法 移等",
+      "answer_phrase": "（1.1GB）、Python pip缓存（3.1GB）和WPS addons组件缓存（5.8GB），合计释放约10GB空间，C盘",
       "sources": [
         "trae"
       ],
       "agent": "trae",
       "title": "topics.md",
-      "key": "af26a599818adfb023261f6f950dd73c9f9a60b80083f0890f7296b8a2182731",
-      "strict_unique": true,
-      "line_safe": true
+      "key": "8516f9f80b1a2a920eb0f054806505d73039b40a8f92b4ebf7cd891a555c2e4d",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        16,
+        15
+      ],
+      "df_union": 28,
+      "and_size": 3,
+      "title_collision_size": 36
     },
     {
-      "query": "context sync",
-      "answer_phrase": "4|h:7f330d43452f6ab4|src:workbuddy] This isn't just metadata. It",
+      "query": "who save",
+      "answer_phrase": "? What annoys them? What makes them laugh? Build this over time.",
       "sources": [
         "codepilot"
       ],
@@ -1938,197 +1860,37 @@
       "title": "Context",
       "key": "f356b3becc5a95585ad08dc280225804ed2643247804e0398c214ba2c1c6c21b",
       "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "sync:mem_20260806_extracted_019|h:302874a4dbe99736|src:trae] ## ",
-      "sources": [
-        "codepilot",
-        "workbuddy"
+      "line_safe": true,
+      "df": [
+        12,
+        11
       ],
-      "agent": "workbuddy",
-      "title": "Lessons Learned",
-      "key": "3ae0a4ba856e938f74b1565e43a8c6429ffa470be7939458256ad8c1dd6b32a3",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 15,
+      "and_size": 8,
+      "title_collision_size": 4
     },
     {
-      "query": "task 每日 记忆 整理 user",
-      "answer_phrase": "Assistant**: 这是今天的第一轮对话，目前还没有 2026-06-13 的对话记录需要整理。昨天（6/12）的记忆已完",
-      "sources": [
-        "pi",
-        "trae",
-        "workbuddy"
-      ],
-      "agent": "pi",
-      "title": "[Task] 每日记忆整理",
-      "key": "13c29c08a88f4c9a2c223439709bfad15814037114a58b175438a96546e44151",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "constraints and",
-      "answer_phrase": "7553e49be2906017e7ec\\安装与远程访问配置方案.md.\n---\n[sync:mem_20260813_extr",
-      "sources": [
-        "dsh"
-      ],
-      "agent": "dsh",
-      "title": "Constraints",
-      "key": "30d1b7c1bb6a7f5fe6da837980af0e0868586c3022104d0dbdeae05381571196",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "topics.md session_id",
-      "answer_phrase": "e4e49f698be0f4d514 | topic_summary_time: 2026-09-02 16:48:34]用户询",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "48f9fd0278a88d86a3701d7e2384cdfb7eada39285378219070023e0707d068b",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "shared knowledge auto-synced and",
-      "answer_phrase": "sync:mem_20260806_extracted_008|h:0972f74383b29725|src:workbuddy",
-      "sources": [
-        "codepilot"
-      ],
-      "agent": "codepilot",
-      "title": "Shared Knowledge (auto-synced)",
-      "key": "e15228cd7cfda910647496f798ca8cd1eb6aa6bf3e7a5e7e03d59e92669c5ddc",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "memory.md and",
-      "answer_phrase": "ted_001|h:7814241b72ffe821|src:codepilot] # CodePilot Memory — 来",
+      "query": "-- 写入",
+      "answer_phrase": "me 全找不到）；② 沙箱静默吞 `refs/remotes/**` 写入（fetch/update-ref 返回 0 但 re",
       "sources": [
         "workbuddy"
       ],
       "agent": "workbuddy",
-      "title": "MEMORY.md",
-      "key": "de5185661009c6036439a0e6c35b02119d35cf96046a0ad2f9007b43e47ac240",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "context sync",
-      "answer_phrase": "黑色仓单走交易所官方”（black_series.py仍直连东财）保持未完成状态。\n---\n[sync:mem_20260823",
-      "sources": [
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "Context",
-      "key": "1986122db11bcafa716791718520bae8606770d6cc059db078fe229fd30052d7",
+      "title": "OneDrive 内 git 仓库（跨项目铁律，2026-09-15）",
+      "key": "5e23508006beba8d549013604b0b60381287a45278b4eb8f45031663e183f181",
       "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "404 errors\n---\n[sync:mem_20260702_extracted_003|h:7400df197b9e7b",
-      "sources": [
-        "dsh",
-        "pi"
+      "line_safe": false,
+      "df": [
+        18,
+        18
       ],
-      "agent": "dsh",
-      "title": "Lessons Learned",
-      "key": "2c194e5a7f906ceff1566e95d2ebebbd92663f967b6fbabc09e22116b2d92a28",
-      "strict_unique": true,
-      "line_safe": false
+      "df_union": 35,
+      "and_size": 1,
+      "title_collision_size": 1
     },
     {
-      "query": "lessons learned to",
-      "answer_phrase": "parate original sources from derived content — 来自 trae (2026-08-",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "2d9c71766c1e54cebeff6a0621ba458fff06676b5ac0aa7fdd206d674d5fb07f",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "bsidian to verify the fix.\n---\n[sync:mem_20260731_extracted_719|",
-      "sources": [
-        "codepilot"
-      ],
-      "agent": "codepilot",
-      "title": "Lessons Learned",
-      "key": "47f8caa7def4303f75a2e4edb5b9d90a8bc11bd73116dbba23697ee71e2d2dbf",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "用户 户环 环境 境关 关键 键事 事实 文件",
-      "answer_phrase": "1.6.2），已升到 0.9.0；桌面「Pi-Web 启动」→ `C:\\Users\\MR.Dong\\pi-web-launche",
-      "sources": [
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "用户环境关键事实",
-      "key": "366e3e40cb9ce461c3310725e8d6809ae3a86cc79a55cdf60954b1b51aae85b1",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "work context sync",
-      "answer_phrase": "SenseNova skills 的运行状态。\n---\n[sync:mem_20260702_extracted_015|h:d",
-      "sources": [
-        "dsh",
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "Work Context",
-      "key": "0919253236981aee9925d318124af2227f507f17e96ba462e1c32ec118f296ad",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "integrating the Sina fallback into the DCE collector. — 来自 trae ",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "33e84916610872300aab9516bdb36c0dce5c02c45ab2d4823640c561d62cf2d1",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "work context sync",
-      "answer_phrase": "SenseNova skills 的运行状态。\n---\n[sync:mem_20260629_extracted_016|h:6",
-      "sources": [
-        "codepilot",
-        "workbuddy"
-      ],
-      "agent": "codepilot",
-      "title": "Work Context",
-      "key": "d3076e86b150687a99c4a3e685252e2f2602aa6cf732a85405ad327dc46cceeb",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "dsh 更新 完成 2026-09-02 sync",
-      "answer_phrase": "回滚标签 local-backup-before-20260902-update；废弃文件暂存 C:\\Users\\MR.Dong",
-      "sources": [
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "DSH 更新完成 (2026-09-02)",
-      "key": "37fa8c43de29931318cff5352e53b88de87a2c1cac745a321915986c70aaab11",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "这个 个项 项目 开发 发一 一个 agent 的记 记忆 共享 onedrive 同步 成了 ... and",
-      "answer_phrase": "ut:\\n\\n1. First, update .gitignore to exclude user data\\n2. Crea",
+      "query": "context fix",
+      "answer_phrase": "-11 | Model: mimo-v2.5-p",
       "sources": [
         "pi",
         "trae",
@@ -2138,10 +1900,340 @@
       "title": "看看这个项目，我本来是想开发一个agent的记忆共享，用OneDrive同步，但是现在做成了半吊子，...",
       "key": "e22a9755a2f425d76fea9295a967fc0ff3b11f2ce0b5323dd2a9b06b5816368d",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 1
     },
     {
-      "query": "lessons learned and",
+      "query": "encountered initial",
+      "answer_phrase": "leting the problematic SpriteFallback.mtl and its meta file. The",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "f03780d3fd9f3786957e2ced6208bf4ff4d20566d92421b632b57a9b083db78b",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 24,
+      "and_size": 10,
+      "title_collision_size": 36
+    },
+    {
+      "query": "mode 一个",
+      "answer_phrase": "nghai, streaming=true, compact=true, show_cost=true, TTS=zh-CN-X",
+      "sources": [
+        "codepilot"
+      ],
+      "agent": "codepilot",
+      "title": "Work Context",
+      "key": "3634c5a6db38ea30d61a2dd2d18fcd7606f6e476301903135aea301bd8762734",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 35,
+      "and_size": 1,
+      "title_collision_size": 6
+    },
+    {
+      "query": "-- 50",
+      "answer_phrase": " 移走废弃文件 + git reset --mixed；symlink 按 core.symlinks=false 写成含目标路",
+      "sources": [
+        "workbuddy"
+      ],
+      "agent": "workbuddy",
+      "title": "DSH 更新完成 (2026-09-02)",
+      "key": "37fa8c43de29931318cff5352e53b88de87a2c1cac745a321915986c70aaab11",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 1
+    },
+    {
+      "query": "akshare 权限",
+      "answer_phrase": "cation delay, set cycle_days=2 to avoid false staleness alarms —",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "abce6feec3be99215c6bd3b45adf86a60de537d429891cee359eb4fc33e795ff",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 21,
+      "and_size": 13,
+      "title_collision_size": 61
+    },
+    {
+      "query": "-- 下文",
+      "answer_phrase": "dy\\knowledge_brief.md\n- 完整共享记忆（约 60-80KB）: C:\\Users\\MR.Dong\\OneD",
+      "sources": [
+        "workbuddy"
+      ],
+      "agent": "workbuddy",
+      "title": "Shared Knowledge (auto-synced)",
+      "key": "a98f333dba1ce927e6c94cc478ef19931beffd3a930e91a85f4fdc57091084d7",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 28,
+      "and_size": 8,
+      "title_collision_size": 7
+    },
+    {
+      "query": "mode observation",
+      "answer_phrase": " mode, 1 core candidate (C) and 1 observation candidate (M) were",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "9e32fae8cd6fc9fbf02d239ed1252d98cbb62f53d6e41740fa283fc704e8f4fa",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 32,
+      "and_size": 3,
+      "title_collision_size": 36
+    },
+    {
+      "query": "命令 home",
+      "answer_phrase": "-onefile），打包后自动部署到本地运行位。install_task.bat 注册/重注册任务也指向本地运行位。\n- rec",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "本机工程事实（2026-09-16 实测，避免重复踩坑）",
+      "key": "33094ea475ec08527f8f3cd0151aab7ba5b75d55c371b960911f2f9dfad3d542",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 32,
+      "and_size": 3,
+      "title_collision_size": 1
+    },
+    {
+      "query": "encountered models",
+      "answer_phrase": "API, SenseNova, 中国移动) in the database, ensuring 528 models were ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "3cfb0e2e8a10212ac97c8d73b5e3bcec7a7c1775c7969a942b157e4d035acb09",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 30,
+      "and_size": 4,
+      "title_collision_size": 36
+    },
+    {
+      "query": "anthropic openai",
+      "answer_phrase": "oes not solve the 10x return problem; position management and tr",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "14f8028d0ed3af9ca2ad797487f08423e4acbbb6dd1643c3953e8edff159fa7d",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 20,
+      "and_size": 16,
+      "title_collision_size": 61
+    },
+    {
+      "query": "deepseek-ai cleanup",
+      "answer_phrase": "s. The build produced apps/cli/lib/bin.js with dsh version 0.1.0",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "4f231f980ec9d75fa202d0e6fab260dc897cb77c6cdbfe7a886b9a21e11b86d3",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        17,
+        16
+      ],
+      "df_union": 28,
+      "and_size": 5,
+      "title_collision_size": 36
+    },
+    {
+      "query": "30 50",
+      "answer_phrase": "并区分交易计划与已成交补录；B.统一持仓投影；C.接入基础止损止盈到期提醒；D.修复日报相关漏洞。每次只执行一个子任务，从A开始",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "2d29f481a7b0f32fef0680f2707c6493e0fa094883a5145f39deac6718b90f7b",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 36
+    },
+    {
+      "query": "索引 layer",
+      "answer_phrase": "构（OneDrive fusion layer、sync/extract/full-merge、dashboard）已废弃，不复",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "project_memory.md",
+      "key": "3cc0640327a40c98af5100a879969fdab48f7997ea1e20e661ac1c28a3b6851a",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        12,
+        10
+      ],
+      "df_union": 21,
+      "and_size": 1,
+      "title_collision_size": 1
+    },
+    {
+      "query": "delete manually",
+      "answer_phrase": "on't need a bootstrap script anymore. — 来自 workbuddy (2026-08-06",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "When You're Done",
+      "key": "deff67452575499bc1eee4213d8b575b4d238c6b39e7f4cf8c8e314cba4e5ace",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 31,
+      "and_size": 4,
+      "title_collision_size": 4
+    },
+    {
+      "query": "web 动化",
+      "answer_phrase": "nifest.json的包名、orientation和minPlatformVersion问题。音频升级策略采用freesoun",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "af26a599818adfb023261f6f950dd73c9f9a60b80083f0890f7296b8a2182731",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 36
+    },
+    {
+      "query": "维度 覆盖",
+      "answer_phrase": "e4e49f698be0f4d514 | topic_summary_time: 2026-09-02 16:48:34]用户询",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "48f9fd0278a88d86a3701d7e2384cdfb7eada39285378219070023e0707d068b",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 23,
+      "and_size": 13,
+      "title_collision_size": 36
+    },
+    {
+      "query": "main module",
+      "answer_phrase": "nfusion; separate original sources from derived content — 来自 tra",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "2d9c71766c1e54cebeff6a0621ba458fff06676b5ac0aa7fdd206d674d5fb07f",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 61
+    },
+    {
+      "query": "delete full",
+      "answer_phrase": "d delete existing rows to set latest=None and pull full window —",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "33e84916610872300aab9516bdb36c0dce5c02c45ab2d4823640c561d62cf2d1",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 27,
+      "and_size": 8,
+      "title_collision_size": 61
+    },
+    {
+      "query": "anthropic incorrect",
       "answer_phrase": "\n- koa-connect wrapper caused subtle ctx.state data loss; native",
       "sources": [
         "trae"
@@ -2150,47 +2242,18 @@
       "title": "Lessons Learned",
       "key": "647821ef7c57f6bf0f61fbbed80725c8123752d6a605af52fec070463905ed06",
       "strict_unique": false,
-      "line_safe": false
-    },
-    {
-      "query": "work context and",
-      "answer_phrase": "tracted_010|h:8734752d0fec687a|src:hermes] Hermes 配置优化（2026-06-1",
-      "sources": [
-        "codepilot"
+      "line_safe": false,
+      "df": [
+        18,
+        18
       ],
-      "agent": "codepilot",
-      "title": "Work Context",
-      "key": "3634c5a6db38ea30d61a2dd2d18fcd7606f6e476301903135aea301bd8762734",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 61
     },
     {
-      "query": "shared knowledge auto-synced sync",
-      "answer_phrase": "tter + Markdown，可由解析器直接读取。\n---\n[sync:mem_20260806_extracted_021|",
-      "sources": [
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Shared Knowledge (auto-synced)",
-      "key": "07c8155efe842baf56b5192a70b1edafa8a8df8f7a38d246beb97cfee5dc87ef",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "memory.md sync",
-      "answer_phrase": "3_extracted_048|h:3759523eaa369e55|src:trae] [session_id: 6a89af",
-      "sources": [
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "MEMORY.md",
-      "key": "73c71c62118815efb7a3c666a359c9be16cd7ef421ae170f1c839948d6e0ce73",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "tx leaks in middleware; native Koa implementation required inste",
+      "query": "anthropic leaks",
+      "answer_phrase": "ead\n- CodePilot database may reset unexpectedly, leading to loss",
       "sources": [
         "trae"
       ],
@@ -2198,48 +2261,17 @@
       "title": "Lessons Learned",
       "key": "766f2b91acd0bd78db1130acac848924cea52e045df6b1d557a9b626d595cbd2",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "备注 and",
-      "answer_phrase": "e manually\n---\n[sync:mem_20260821_extracted_007|h:0ac598c0628cd0",
-      "sources": [
-        "codepilot"
+      "line_safe": false,
+      "df": [
+        18,
+        18
       ],
-      "agent": "codepilot",
-      "title": "备注",
-      "key": "6ef5a45328f0e61f25f927a32ac620e252781f081b58320bcd99569bb743e167",
-      "strict_unique": true,
-      "line_safe": false
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 61
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": "xtracted_048|h:ae6bf5ac000bc79b|src:trae] ## Hard Constraints — ",
-      "sources": [
-        "codepilot",
-        "pi",
-        "workbuddy"
-      ],
-      "agent": "workbuddy",
-      "title": "Lessons Learned",
-      "key": "8ee964378bf41fe77b4d081038967ba002cee900cc3f3a15cfd2a873184e3c16",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": " into the DCE collector.\n---\n[sync:mem_20260817_extracted_001|h:",
-      "sources": [
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "Lessons Learned",
-      "key": "9b5f93219f11485adbac76180ca6edafcee0935ce70447ff4badced8c367aaec",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "lessons learned and",
+      "query": "actions delete",
       "answer_phrase": "freshness\n- koa-connect wrapper caused ctx.state data loss; nati",
       "sources": [
         "trae"
@@ -2248,34 +2280,17 @@
       "title": "Lessons Learned",
       "key": "9fe7ae3000f559768bf11f96805048f79d20245b3efb46d6e9f89d292bcceea1",
       "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "shared knowledge auto-synced sync",
-      "answer_phrase": "ect\\AgentMemorySystem\\AgentMemory\\agent_workbuddy\\memory_shared.",
-      "sources": [
-        "workbuddy"
+      "line_safe": false,
+      "df": [
+        18,
+        18
       ],
-      "agent": "workbuddy",
-      "title": "Shared Knowledge (auto-synced)",
-      "key": "a98f333dba1ce927e6c94cc478ef19931beffd3a930e91a85f4fdc57091084d7",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 30,
+      "and_size": 6,
+      "title_collision_size": 61
     },
     {
-      "query": "constraints and",
-      "answer_phrase": "6a7e7553e49be2906017e7ec\\安装与远程访问配置方案.md.\n---\n[sync:mem_20260811_",
-      "sources": [
-        "pi"
-      ],
-      "agent": "pi",
-      "title": "Constraints",
-      "key": "def07f358edace38c6c7e1b2e7adbdd767d96989ea8804fa4f055fcc67e970af",
-      "strict_unique": true,
-      "line_safe": false
-    },
-    {
-      "query": "topics.md and",
+      "query": "observation pool",
       "answer_phrase": "and data, restoring normal widths for spread, spread%, and statu",
       "sources": [
         "trae"
@@ -2284,10 +2299,17 @@
       "title": "topics.md",
       "key": "38fddb4dbb4a65c626c57d1e44a70bb12c1b56ee99cde2c53b1e0cd92df43dfb",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 19,
+      "and_size": 15,
+      "title_collision_size": 36
     },
     {
-      "query": "topics.md session_id",
+      "query": "40 判定",
       "answer_phrase": "e_check.py中实现核心对齐逻辑，将GHA晨跑锚点（北京09:00=UTC 01:00）换算为各市场本地自然日，使开市判定",
       "sources": [
         "trae"
@@ -2296,23 +2318,18 @@
       "title": "topics.md",
       "key": "1b8fc225e505d79472b1c7602605bf5f15b1327be1440d054de43b8df4456e6e",
       "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": " [sync:mem_20260629_extracted_016|h:628d67e6328b7e90|src:trae] #",
-      "sources": [
-        "trae"
+      "line_safe": true,
+      "df": [
+        16,
+        14
       ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "8899eb807be523c13f7068611f196333f9787113eb1c370c306328934cdd57c3",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 29,
+      "and_size": 1,
+      "title_collision_size": 36
     },
     {
-      "query": "hard constraints and",
-      "answer_phrase": "romium installation must be conditional based on Westmetall LME ",
+      "query": "50 actions",
+      "answer_phrase": "tmetall LME rendering requirements\n- DCE API data must be writte",
       "sources": [
         "trae"
       ],
@@ -2320,10 +2337,17 @@
       "title": "Hard Constraints",
       "key": "7111bfdc5352837c64fe0b7a3448b72ed014b311ad331181daf9bb950b43f6de",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 35,
+      "and_size": 1,
+      "title_collision_size": 19
     },
     {
-      "query": "topics.md and",
+      "query": "30 home",
       "answer_phrase": "added to grafana/branding/Dockerfile to redirect root URL to the",
       "sources": [
         "trae"
@@ -2332,262 +2356,17 @@
       "title": "topics.md",
       "key": "b61fcb051a10ecfaa58099a3347cd9fcc0c5df93eacffe2f8dc0bfcd9a8799e6",
       "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "项目 and",
-      "answer_phrase": "yOS App：鸿蒙应用开发项目。 — 来自 trae (2026-08-11)",
-      "sources": [
-        "trae"
+      "line_safe": true,
+      "df": [
+        18,
+        17
       ],
-      "agent": "trae",
-      "title": "项目",
-      "key": "85fc8c014e3929d3d6dc6722d34682935ebd588e76fab45d5effba954e2e2f56",
-      "strict_unique": true,
-      "line_safe": true
+      "df_union": 33,
+      "and_size": 2,
+      "title_collision_size": 36
     },
     {
-      "query": "lessons learned and",
-      "answer_phrase": " [sync:mem_20260814_extracted_048|h:ae6bf5ac000bc79b|src:trae] #",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "9a940305104606d38228cc6e07a8003dda994744863e2d28df71265944e9bbb7",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "偏好 sync",
-      "answer_phrase": "、直接高效沟通。要求 agent 自主优化配置提升效率（\"武装好自己\"），无需询问即可执行非破坏性改动。 — 来自 hermes",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "偏好",
-      "key": "461d43f8271da064d6f202d7c745a6e6d0c7c5e899f1dd327e9a2fb445b44ac0",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "备注 and",
-      "answer_phrase": " 用 Python 读二进制更稳。 — 来自 trae (2026-08-22)",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "备注",
-      "key": "9a2aef1295cbdf425db9b9ffbee8125e8cd73e080bdc69da310763b1b7fab715",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md session_id",
-      "answer_phrase": "认exch_official_client.py与两个采集器官方通道逻辑通过661项测试（新增23条）。文档方面，更新了CHAN",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "6ffc3f192ae90719e7d7fe598aa185ad77ba1843cfdbe51eed9a4cd6b03abe09",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md session_id",
-      "answer_phrase": "ession_id: 6a979539e49f698be0f4cbc8 | topic_summary_time: 2026-0",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "dfb53682d0bd4d53d25463e22f34126c80f38ff2a33ab49c9a22722d4716dbdc",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "ject.toml build-backend, missing LICENSE, and 26 MR.Dong path re",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "11db76c5ee6a18cf32e0578582c0373e732403b121df088e62fd00a12130eb83",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "hard constraints and",
-      "answer_phrase": "non-essential files (e.g., .logs/, .trae/, OneDrive conflict cop",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Hard Constraints",
-      "key": "153c7ff8dde315995d600e151929bcc2a235c6615b10d8db09810f91b926edca",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "engineering conventions and",
-      "answer_phrase": "ate initial backup as the backup directory does not exist by def",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Engineering Conventions",
-      "key": "65e4d701bfd96942cb4df814e49028c9b65420f0141e6e09d9747bdc61c22159",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md session_id",
-      "answer_phrase": "（C/Y/P缺失规格）、超期持仓（系统断跑导致）、浮盈未止盈（设计选择）、融合器无效（path1策略未生成信号）、weekly_",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "1a2127030133011496f5e99baa12ced6b2c8a32b81a96700c7af31094b50bb99",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md and",
-      "answer_phrase": " and extracted memory from Hermes (~/.hermes/memories/, 9 entrie",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "71eea61eef2d7620b02c8bf4327be96f5e592bdcc6cb0173456c1df7460804c8",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "ucted to re-bind微信 to apply the new configuration. — 来自 trae (20",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "3e735bcec6ad5808c5cd5210c8cfbbc47057459f50f6d3437b98b2e283cf12af",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md and",
-      "answer_phrase": "king '在不在'. The assistant confirmed that '佛教.md' has already bee",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "922ff349a9dcc611e90059e5d910f6dd57fea51efe3d4e0bc2c066858d9260ea",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md session_id",
-      "answer_phrase": "file和DSH-better-sidebar三个插件，其中DSH-better-sidebar因原生模块node-pty需要构",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "2c20d4f89ad12d36eed89f82bf75a54685811a4535a3b4a574aab74d5bf956d3",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned in",
-      "answer_phrase": "ing animations are not triggered for retry/next level transition",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "b232443b4e9e1442057e02dd69b7deb2d98f46710eb267f85e837b803146718c",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md session_id",
-      "answer_phrase": "High、9 Medium），包括选关后HUD不激活、暂停无恢复路径等，通过npx tsc --noEmit验证零错误。STAT",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "8206e61c5732f658c01bf44e9a85cb2a5a2d0019526231ec4d5684e50e23e40d",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": "he\\puppeteer（约867MB），共可再释放约3.7GB，需用户确认是否继续清理。 — 来自 trae (2026-08",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "d799fbba7639b88db6273d1787ad49fc5f3bbe4096c43ff8f5131b8b415e7773",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "lessons learned and",
-      "answer_phrase": " 实现右键菜单，气泡通知采用 NIF_INFO 标志以提高可靠性。用户需测试最小化到托盘功能是否恢复正常。 — 来自 trae ",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Lessons Learned",
-      "key": "92ff0bce0cde84094b1e0ce4163089ea46acbc2466905088837a5cf2a1fc55ba",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md and",
-      "answer_phrase": "hich was fixed with a patch script. Data-backup was pushed (comm",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "topics.md",
-      "key": "b55ee96f340665a366de49f3e49a2c8c62c7811d66ad8f66bbb37be7eacef71a",
-      "strict_unique": false,
-      "line_safe": true
-    },
-    {
-      "query": "context sync",
-      "answer_phrase": "- [sync:mem_20260903_extracted_005|h:9261823f185200fa|src:workbu",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Context",
-      "key": "1b33c586ef673ec328049ddaaaa806cbe82a389b7978125ac31db7e4abef0984",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "tool system outputs and",
-      "answer_phrase": "- [sync:mem_20260806_extracted_007|h:0972f74383b29725|src:workbu",
-      "sources": [
-        "trae"
-      ],
-      "agent": "trae",
-      "title": "Tool / system outputs",
-      "key": "e341c34157696981e9351c0ec051876149d0f9b4b49a4f06eeb35ff2b5620db2",
-      "strict_unique": true,
-      "line_safe": true
-    },
-    {
-      "query": "topics.md and",
+      "query": "04 fix",
       "answer_phrase": "icon and triggers a notification after 800ms (or immediately if ",
       "sources": [
         "trae"
@@ -2596,10 +2375,264 @@
       "title": "topics.md",
       "key": "ae157516634029d2eefdf8b7c8e128b89d95d12628be3b990f93457a79542a68",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 32,
+      "and_size": 4,
+      "title_collision_size": 36
     },
     {
-      "query": "topics.md and",
+      "query": "anthropic incorrect",
+      "answer_phrase": " override default home dashboard redirect — 来自 trae (2026-07-06)",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "4c004e17f56bbfbb94976276faf3f1c31986944389c8eda2d245524c768ae099",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 61
+    },
+    {
+      "query": "规则 中的",
+      "answer_phrase": "ession_id: 6aaa086a7415799c5f011380 | topic_summary_time: 2026-0",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "0dbf517ac204bac04e8acedc5fb7dad07edf0645a6a3c066c2c40dc01be89117",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        16,
+        15
+      ],
+      "df_union": 30,
+      "and_size": 1,
+      "title_collision_size": 36
+    },
+    {
+      "query": "leaks web",
+      "answer_phrase": "t triggered for retry/next level transitions\n- Web server using ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "b232443b4e9e1442057e02dd69b7deb2d98f46710eb267f85e837b803146718c",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 61
+    },
+    {
+      "query": "04 fix",
+      "answer_phrase": "V2.5-Pro）的连通性，管理 SenseNova skills 的运行状态。 — 来自 codebuddy (2026-06",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Work Context",
+      "key": "e341edaa184c86571d49944c62329e367560ffcf86025b6d8234749d9bb6736f",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 32,
+      "and_size": 4,
+      "title_collision_size": 6
+    },
+    {
+      "query": "fix gateway",
+      "answer_phrase": "ject.toml build-backend, missing LICENSE, and 26 MR.Dong path re",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "11db76c5ee6a18cf32e0578582c0373e732403b121df088e62fd00a12130eb83",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 61
+    },
+    {
+      "query": "动化 命令",
+      "answer_phrase": "kspace root as `IDENTITY.md`. — 来自 workbuddy (2026-09-03",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Context",
+      "key": "1b33c586ef673ec328049ddaaaa806cbe82a389b7978125ac31db7e4abef0984",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 4
+    },
+    {
+      "query": "-- 信息",
+      "answer_phrase": "118a47a088178b907d05e | topic_summary_time: 2026-09-10 09:19:46]",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "6999856d17fb0dcab9505419312cc93cda533fb94c8224a5c11baca72f69a8b2",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 35,
+      "and_size": 1,
+      "title_collision_size": 36
+    },
+    {
+      "query": "用了 wmic",
+      "answer_phrase": "）、wmic 等系统级工具；解析 .lnk 用 Python 读二进制更稳。 — 来自 workbuddy (2026-08-1",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "备注",
+      "key": "40eed9d668479bd9b9b211af45303ae73cbbb58a9005a68ffddd7bc41e59ceb3",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        16,
+        13
+      ],
+      "df_union": 19,
+      "and_size": 10,
+      "title_collision_size": 10
+    },
+    {
+      "query": "anthropic openai",
+      "answer_phrase": "o apply the new configuration. —",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "3e735bcec6ad5808c5cd5210c8cfbbc47057459f50f6d3437b98b2e283cf12af",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 20,
+      "and_size": 16,
+      "title_collision_size": 61
+    },
+    {
+      "query": "04 30",
+      "answer_phrase": "king '在不在'. The assistant confirmed that '佛教.md' has already bee",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "922ff349a9dcc611e90059e5d910f6dd57fea51efe3d4e0bc2c066858d9260ea",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 27,
+      "and_size": 9,
+      "title_collision_size": 36
+    },
+    {
+      "query": "incorrect module",
+      "answer_phrase": " not support RPK/Quick App; use Android devices for RPK testing ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "6ab7eb266cbbc7305b6d8e869f323b09f21bcaf7e1d06d41b0ee59a8c3ba1536",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 26,
+      "and_size": 10,
+      "title_collision_size": 61
+    },
+    {
+      "query": "anthropic openai",
+      "answer_phrase": "nter Menu 实现右键菜单，气泡通知采用 NIF_INFO 标志以提高可靠性。用户需测试最小化到托盘功能是否恢复正常。 —",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "92ff0bce0cde84094b1e0ce4163089ea46acbc2466905088837a5cf2a1fc55ba",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 20,
+      "and_size": 16,
+      "title_collision_size": 61
+    },
+    {
+      "query": "提出 层面",
+      "answer_phrase": "（C/Y/P缺失规格）、超期持仓（系统断跑导致）、浮盈未止盈（设计选择）、融合器无效（path1策略未生成信号）、weekly_",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "1a2127030133011496f5e99baa12ced6b2c8a32b81a96700c7af31094b50bb99",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        18,
+        15
+      ],
+      "df_union": 23,
+      "and_size": 10,
+      "title_collision_size": 36
+    },
+    {
+      "query": "mode encountered",
       "answer_phrase": "generating a 3.3MB EXE with a _internal/ dependency directory. T",
       "sources": [
         "trae"
@@ -2608,22 +2641,454 @@
       "title": "topics.md",
       "key": "e1ec7604bec3db01b31fd88baa575860d6864c22731349173091565a564b1974",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 27,
+      "and_size": 8,
+      "title_collision_size": 36
     },
     {
-      "query": "work context and",
-      "answer_phrase": "据接口，方案需包含验收标准（相对抗性审查）以确保准确性，目前仅需输出方案待用户审核后再决定是否实施。 — 来自 trae (20",
+      "query": "fix gateway",
+      "answer_phrase": "se Python os.walk instead of du for scanning to avoid timeout — ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "d799fbba7639b88db6273d1787ad49fc5f3bbe4096c43ff8f5131b8b415e7773",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 61
+    },
+    {
+      "query": "信息 应用",
+      "answer_phrase": "i，与国内智谱密钥不匹配。解决方案是使用内置的国内提供者zai-coding-cn（国内端open.bigmodel.cn/ap",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "9cffca149b2d492f82ce6fff6d998df03fe6361208c7903517ca57b7db851164",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 31,
+      "and_size": 4,
+      "title_collision_size": 36
+    },
+    {
+      "query": "主动 timestamp",
+      "answer_phrase": "代码，主动记录重要变更。 — 来自 pi (2026-07-23",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "偏好",
+      "key": "461d43f8271da064d6f202d7c745a6e6d0c7c5e899f1dd327e9a2fb445b44ac0",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        17,
+        13
+      ],
+      "df_union": 25,
+      "and_size": 5,
+      "title_collision_size": 7
+    },
+    {
+      "query": "leaks unexpectedly",
+      "answer_phrase": " to event loop卡死 (332 seconds) and frontend connection timeouts ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "9a940305104606d38228cc6e07a8003dda994744863e2d28df71265944e9bbb7",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 29,
+      "and_size": 7,
+      "title_collision_size": 61
+    },
+    {
+      "query": "web 下文",
+      "answer_phrase": "file和DSH-better-sidebar三个插件，其中DSH-better-sidebar因原生模块node-pty需要构",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "2c20d4f89ad12d36eed89f82bf75a54685811a4535a3b4a574aab74d5bf956d3",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 30,
+      "and_size": 6,
+      "title_collision_size": 36
+    },
+    {
+      "query": "50 high",
+      "answer_phrase": "Shell）、wmic 等系统级工具；解析 .lnk 用 Python 读二进制更稳。 — 来自 trae (2026-08-2",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "备注",
+      "key": "9a2aef1295cbdf425db9b9ffbee8125e8cd73e080bdc69da310763b1b7fab715",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 32,
+      "and_size": 4,
+      "title_collision_size": 10
+    },
+    {
+      "query": "-- web",
+      "answer_phrase": "0）；wmic/CIM 在本环境被限，PowerShell 工具看不到宿主进程，进程排查用 Bash 的 tasklist。 —",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "备注",
+      "key": "b28f935783ba33c44f4b973e8cbbd5922bb4fa293ca65f26955d4d588a47fe26",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 35,
+      "and_size": 1,
+      "title_collision_size": 10
+    },
+    {
+      "query": "task 40",
+      "answer_phrase": " and extracted memory from Hermes (~/.hermes/memories/, 9 entrie",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "71eea61eef2d7620b02c8bf4327be96f5e592bdcc6cb0173456c1df7460804c8",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        17,
+        16
+      ],
+      "df_union": 29,
+      "and_size": 4,
+      "title_collision_size": 36
+    },
+    {
+      "query": "high 41",
+      "answer_phrase": "High、9 Medium），包括选关后HUD不激活、暂停无恢复路径等，通过npx tsc --noEmit验证零错误。STAT",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "8206e61c5732f658c01bf44e9a85cb2a5a2d0019526231ec4d5684e50e23e40d",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 28,
+      "and_size": 7,
+      "title_collision_size": 36
+    },
+    {
+      "query": "临时 npm",
+      "answer_phrase": "rkbuddy（2170MB）、deepseek-harness\\node_modules（1600MB）、.vscode（36",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "1a028d819f4a3b246e6a4d5adaa840b16546433debd919e9f0a288557652ef38",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 28,
+      "and_size": 7,
+      "title_collision_size": 36
+    },
+    {
+      "query": "一个 动化",
+      "answer_phrase": "V2.5-Pro）的连通性，管理 SenseNova skills 的运行状态。 — 来自 codebuddy (2026-07",
       "sources": [
         "trae"
       ],
       "agent": "trae",
       "title": "Work Context",
-      "key": "e341edaa184c86571d49944c62329e367560ffcf86025b6d8234749d9bb6736f",
+      "key": "9812d1174960ca481d0aa944916b4cac08d4752c971e4615f888d13dd6b58c1c",
       "strict_unique": true,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 29,
+      "and_size": 7,
+      "title_collision_size": 6
     },
     {
-      "query": "topics.md session_id",
+      "query": "50 15",
+      "answer_phrase": "hich was fixed with a patch script. Data-backup was pushed (comm",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "b55ee96f340665a366de49f3e49a2c8c62c7811d66ad8f66bbb37be7eacef71a",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 27,
+      "and_size": 8,
+      "title_collision_size": 36
+    },
+    {
+      "query": "main 命令",
+      "answer_phrase": "认exch_official_client.py与两个采集器官方通道逻辑通过661项测试（新增23条）。文档方面，更新了CHAN",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "6ffc3f192ae90719e7d7fe598aa185ad77ba1843cfdbe51eed9a4cd6b03abe09",
+      "strict_unique": false,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 32,
+      "and_size": 4,
+      "title_collision_size": 36
+    },
+    {
+      "query": "04 30",
+      "answer_phrase": "ust be cleaned up when merging concepts ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "d3cf4dba92773ea04f569cda59f641578cffd345867126d8448ded5e754ec197",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 27,
+      "and_size": 9,
+      "title_collision_size": 61
+    },
+    {
+      "query": "observation price",
+      "answer_phrase": " the user requires a markdown table report containing: Top 3 can",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "8137f04114127aa5a78f562b6f5556cc7641bf18ec0f347bebcd843e7ef598d2",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 22,
+      "and_size": 12,
+      "title_collision_size": 36
+    },
+    {
+      "query": "actions fix",
+      "answer_phrase": " data. The Feishu push worked normally, indicating the issue was",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "128799fb3618442c882c5ae5e08b81904e0a53fb677c0abb2248cc0c6ad52409",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 36
+    },
+    {
+      "query": "mode models",
+      "answer_phrase": " copies)\n- CodePilot requires `is_active = 1` and `enabled = 1` ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Hard Constraints",
+      "key": "153c7ff8dde315995d600e151929bcc2a235c6615b10d8db09810f91b926edca",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 31,
+      "and_size": 4,
+      "title_collision_size": 19
+    },
+    {
+      "query": "explanation who",
+      "answer_phrase": " and if needed, add a short **Chinese** explanation below. — 来自 ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Tool / system outputs",
+      "key": "e341c34157696981e9351c0ec051876149d0f9b4b49a4f06eeb35ff2b5620db2",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        13,
+        12
+      ],
+      "df_union": 23,
+      "and_size": 2,
+      "title_collision_size": 5
+    },
+    {
+      "query": "应用 无需",
+      "answer_phrase": "应用。\n[session_id: 6a979539e49f698be0f4cbc8 | topic_summary_time: ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "dfb53682d0bd4d53d25463e22f34126c80f38ff2a33ab49c9a22722d4716dbdc",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 29,
+      "and_size": 5,
+      "title_collision_size": 36
+    },
+    {
+      "query": "mode assets",
+      "answer_phrase": "s the backup directory does not exist by default\n- GitHub reposi",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Engineering Conventions",
+      "key": "65e4d701bfd96942cb4df814e49028c9b65420f0141e6e09d9747bdc61c22159",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        17
+      ],
+      "df_union": 34,
+      "and_size": 1,
+      "title_collision_size": 19
+    },
+    {
+      "query": "references 应用",
+      "answer_phrase": "nt：ACP adapter 本地部署项目。\nHarmonyOS App：鸿蒙应用开发项目。 — 来自 trae (2026-0",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "项目",
+      "key": "85fc8c014e3929d3d6dc6722d34682935ebd588e76fab45d5effba954e2e2f56",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 33,
+      "and_size": 1,
+      "title_collision_size": 4
+    },
+    {
+      "query": "main 40",
+      "answer_phrase": "+ custom, status light using anti-aliased circles via PIL, tray ",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "c47dea4ad4465fd53f46019b00cce7d5d38686237d45e034c44f5dbd35d309fa",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        16
+      ],
+      "df_union": 32,
+      "and_size": 2,
+      "title_collision_size": 36
+    },
+    {
+      "query": "50 web",
+      "answer_phrase": "ap (animation not triggering on retry/next level), and implement",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "1ab50f0c9a8bfb6eea5851ab6ea24a221abd00a102891827e117df2d3c8daea9",
+      "strict_unique": false,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 31,
+      "and_size": 5,
+      "title_collision_size": 36
+    },
+    {
+      "query": "形态 changelog",
       "answer_phrase": " 当日幂等保护跳过采集。通道实测发现 DCE 官网故障形态变为 BadZipFile，新浪 DCE 品种数据停在 8/12，仅新",
       "sources": [
         "trae"
@@ -2632,11 +3097,94 @@
       "title": "topics.md",
       "key": "096b1e389e9a2eb3a9f97a511fae671eb430aa526fa4274bda34ed7275cf4fdb",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": true,
+      "df": [
+        18,
+        16
+      ],
+      "df_union": 30,
+      "and_size": 4,
+      "title_collision_size": 36
     },
     {
-      "query": "topics.md and",
-      "answer_phrase": "bad5ebea4e6a704193f5a | topic_summary_time: 2026-06-16 09:58:14]",
+      "query": "临时 信息",
+      "answer_phrase": "-17 14:39:00]尝试使用临时文件策略解决OneDrive目录锁定问题失败，决定采用快速失败策略并跳过操作，同时输出警告",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "9449617888c49e6896d7299fca75cf1702c1e9d2dff28def81051b0709c6742c",
+      "strict_unique": true,
+      "line_safe": true,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 36
+    },
+    {
+      "query": "50 main",
+      "answer_phrase": "快进合并main并push。F的核心增量包括新增格式契约注册表（.verify/fixtures/report-format-c",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "topics.md",
+      "key": "14b659299389471a39660386c4c1042fd0657013748a381121ab1377e4a8cbf4",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 36
+    },
+    {
+      "query": "assets opening",
+      "answer_phrase": "R.Dong\\OneDrive\\Obsidian Vault, and C:\\Program Files\\CodePilot —",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Constraints",
+      "key": "9cad15b4aa5efd9b73946893ce0dbb41f810dbfdbc0899f0aaab16ecb373a839",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        17,
+        17
+      ],
+      "df_union": 32,
+      "and_size": 2,
+      "title_collision_size": 6
+    },
+    {
+      "query": "50 anthropic",
+      "answer_phrase": "int calls the loader before use. Symptom: 2026-06-15 `AttributeE",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Lessons Learned",
+      "key": "a9838fb92a539a963238fad8067e7cbf40d39170a08606bb104ea4feebacdf75",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 35,
+      "and_size": 1,
+      "title_collision_size": 61
+    },
+    {
+      "query": "fix 信息",
+      "answer_phrase": "ests.\n[session_id: 6a2bad5ebea4e6a704193f5a | topic_summary_time",
       "sources": [
         "trae"
       ],
@@ -2644,7 +3192,33 @@
       "title": "topics.md",
       "key": "94610263f9643a8183f117d7fc2f395f33aa44e9debcd18dca1d0f7aca33c215",
       "strict_unique": false,
-      "line_safe": true
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 33,
+      "and_size": 3,
+      "title_collision_size": 36
+    },
+    {
+      "query": "actions 一个",
+      "answer_phrase": " 因子名称需预填全部因子代码，缺失原样输出\n- 飞书文档创建需使用feishu_doc.py模块\n- 测试需覆盖374+用例，确",
+      "sources": [
+        "trae"
+      ],
+      "agent": "trae",
+      "title": "Engineering Conventions",
+      "key": "c854820955dd6f36c2f19e9eaa0224f360f03960209d2f1bf5f0a6f45e8be68a",
+      "strict_unique": true,
+      "line_safe": false,
+      "df": [
+        18,
+        18
+      ],
+      "df_union": 34,
+      "and_size": 2,
+      "title_collision_size": 19
     }
   ]
 }
