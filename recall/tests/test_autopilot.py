@@ -17,12 +17,47 @@ if _ROOT not in sys.path:
 from recall import autopilot  # noqa: E402
 
 
+class _FakeLogger:
+    """Captures log lines instead of writing the production health log.
+
+    Same convention as ``test_health_grading``: the module-level logger is
+    redirected for the duration of the test.
+    """
+
+    def __init__(self):
+        self.lines = []
+
+    def _add(self, level, msg, args):
+        self.lines.append((level, msg % args if args else msg))
+
+    def info(self, msg, *args):
+        self._add("INFO", msg, args)
+
+    def warning(self, msg, *args):
+        self._add("WARNING", msg, args)
+
+    def error(self, msg, *args):
+        self._add("ERROR", msg, args)
+
+    def exception(self, msg, *args):
+        self._add("ERROR", msg, args)
+
+
 class AutopilotTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = self._tmp.name
+        # run_once() logs via logs.get_logger(), a process-wide singleton bound to
+        # %LOCALAPPDATA%\recall-memory\logs. Without this redirect, every test run
+        # appends fabricated [AUTOPILOT STOPPED] / [AUTOPILOT DEGRADED] lines to
+        # the PRODUCTION health log — the log G-B10 grading and DEGRADED
+        # monitoring read. The temp base_dir isolates queue/state, not the logger.
+        self.fake = _FakeLogger()
+        self._orig_get_logger = autopilot.logs.get_logger
+        autopilot.logs.get_logger = lambda name="recall": self.fake
 
     def tearDown(self):
+        autopilot.logs.get_logger = self._orig_get_logger
         self._tmp.cleanup()
 
     def test_bootstrap_queue_contains_only_whitelisted_recurring_tasks(self):
@@ -94,6 +129,32 @@ class AutopilotTest(unittest.TestCase):
         state = json.load(open(autopilot.state_path(self.root), encoding="utf-8"))
         self.assertEqual(state["last_status"], "degraded")
         self.assertIn("boom", state["last_results"][0]["error"])
+
+    def test_sandboxed_run_never_writes_the_production_health_log(self):
+        """Regression: unit tests used to inject fake health events into the real log.
+
+        Measured before the fix: a single `pytest recall/tests/test_autopilot.py`
+        run appended 5 lines to
+        %LOCALAPPDATA%\\recall-memory\\logs\\recall-<today>.log, including
+        `[AUTOPILOT STOPPED]` and two `[AUTOPILOT DEGRADED]` lines describing
+        events that never happened in production.
+        """
+        from recall import logs as logs_mod
+
+        prod_log = logs_mod.today_log_path()
+        before = os.path.getsize(prod_log) if os.path.exists(prod_log) else 0
+
+        open(autopilot.stop_path(self.root), "w", encoding="utf-8").close()
+        result = autopilot.run_once(self.root)
+
+        self.assertTrue(result["stopped"])
+        after = os.path.getsize(prod_log) if os.path.exists(prod_log) else 0
+        self.assertEqual(
+            after, before,
+            "a sandboxed autopilot run appended to the production health log")
+        self.assertTrue(
+            any("AUTOPILOT STOPPED" in msg for _lvl, msg in self.fake.lines),
+            "the event must still be emitted - just not into the production log")
 
 
 if __name__ == "__main__":
