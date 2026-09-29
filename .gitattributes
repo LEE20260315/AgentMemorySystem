@@ -1,0 +1,9 @@
+# Windows 批处理脚本必须使用 CRLF 换行。
+# 原因：cmd.exe 读到裸 LF（LF-only）换行符时会从行中间切断命令，把后半段当成
+# 独立命令执行。实测特征（6 个脚本同时损坏）：
+#   '安装，正在安装' is not recognized as an internal or external command
+#   'ir）' is not recognized as an internal or external command
+#   'recall_config.json" >nul 2>nul' is not recognized as an internal or external command
+# 且 write/edit 工具默认写入 LF，故在此强制约束，避免再次弄坏构建与计划任务脚本。
+*.bat text eol=crlf
+*.cmd text eol=crlf
