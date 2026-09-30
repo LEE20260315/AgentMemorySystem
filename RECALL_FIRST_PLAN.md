@@ -51,33 +51,59 @@
 3. recall   查询 → 排序 top-K → (可选)合成 ≤1KB 简报 → 注入当前会话
 ```
 
-### 2.2 数据与代码布局（全新仓库）
+### 2.2 数据与代码布局（目标布局 → **2026-09-30 对照磁盘更正**）
+
+> **更正说明**：本节此前只画了**目标布局**、未标注与磁盘的差异；而 §9.1 的 T06 行却记着
+> 「计划侧已对齐（§2.2 标注……）」—— 该标注**实际不存在**，属**文档与文档自相矛盾**。
+> 现逐项标注【已有】/【未建】，并标出两个**已被实测否定**的 extractor 条目。
+> 本节的目录清单已于 2026-09-30 与磁盘逐一核对。
 
 ```
 recall/                          # 全新 greenfield，不复用旧目录
-├── cli.py                       # 唯一入口: `memory ingest|recall|brief|eval`
-├── ingest.py                    # 只读摄取编排
-├── extractors/                  # 各 Agent 只读提取器（由旧 sync_writers 改"写"为"读"）
-│   ├── __init__.py
-│   ├── markdown.py              # Claude / Generic / OpenClaw ... 通用 Markdown
-│   ├── jsonl.py                 # pi / qwen / dsh 的 sessions/*.jsonl
-│   ├── sqlite.py                # codepilot.db / workbuddy.db 只读导出
-│   ├── claude_extractor.py      # Claude 子文件 + MEMORY.md 索引
-│   └── detection.py             # 旧 config.json 的 candidate_paths+签名，纯读复用
-├── store.py                     # SQLite schema + provenance 落库
-├── rank.py                      # 关键词/混合排序（向量后置）
-├── brief.py                     # 简报合成（Phase 2 才启用）
-├── config.py
-├── pyproject.toml
-├── eval/                        # 黄金对测试集 + recall@k 评测器（价值度量，见 §4）
-│   ├── golden_pairs.yaml
-│   └── recall_eval.py
-└── tests/
+├── cli.py                       # 【已有】唯一入口
+├── ingest.py                    # 【已有】只读摄取编排（提取逻辑内联于此）
+├── store.py                     # 【已有】SQLite schema + 检索与排序
+├── config.py                    # 【已有】来源清单 + 文件/条目上限
+├── watch.py                     # 【已有】循环监控
+├── runner.py                    # 【已有】同步编排 + 健康分级（G-B10）
+├── telemetry.py                 # 【已有】查询计数（G-E4 触发判定）
+├── logs.py                      # 【已有】本机日志
+├── autopilot.py                 # 【已有】受控自主循环（§13）
+├── recall_config.json           # 【已有】可移植覆盖配置
+├── pyproject.toml               # 【已有】
+├── extractors/                  # 【未建】从未按目录实现；Markdown 提取已由
+│   ├── markdown.py              #   ingest.extract_entries 覆盖，故此项实际已完成
+│   ├── jsonl.py                 # ⚠️【待重新裁定】实测 ~/.pi/**/*.jsonl = 24 文件 52.4 MB
+│   │                            #   的**原始会话流水**（首行 {"type":"session"}，随后
+│   │                            #   model_change / thinking_level_change），非整理过的记忆；
+│   │                            #   整包摄取会引入噪声并推高已不达标的查询延迟 → §15
+│   ├── sqlite.py                # ⚠️【待重新裁定】实测 codepilot.db / workbuddy.db **均无 memory 表**，
+│   │                            #   仅应用运行时状态与会话记录（chat_sessions/messages/sessions…）；
+│   │                            #   该条目系按**旧架构**（记忆被写进 DB）编写，与现状不符 → §15
+│   ├── claude_extractor.py      # 【未建】claude 源当前 0 命中（根层无 MEMORY.md）
+│   └── detection.py             # 【未建】
+├── rank.py                      # 【未建】排序已实现在 store.search（BM25 形状，§14.7）
+├── brief.py                     # 【未建】Phase 2 才启用（§8.3 明确不做）
+├── eval/
+│   ├── golden_pairs.yaml        # 【已有】v2 冻结集（version=2，seed=0，built=158）
+│   ├── recall_eval.py           # 【已有】recall@k / MRR / DOC
+│   ├── build_golden.py          # 【已有】不在原树中
+│   ├── _common.py               # 【已有】不在原树中
+│   ├── REPORT.md                # 【已有】不在原树中
+│   └── archive/                 # 【已有】不在原树中：v1 混淆集 + 已回滚方案存档
+└── tests/                       # 【已有】8 个测试文件（原树只列 4 个）
+    ├── test_autopilot.py        #   不在原树中
+    ├── test_eval.py             #   不在原树中
+    ├── test_health_grading.py   #   不在原树中
+    ├── test_search_presentation.py  # 不在原树中（覆盖排序/折叠/预览）
+    ├── test_telemetry.py        #   不在原树中
     ├── test_ingest.py
     ├── test_index.py
-    ├── test_rank.py
-    └── test_readonly_invariant.py   # 断言：源目录校验和前后不变（防写回回归）
+    └── test_readonly_invariant.py
 ```
+
+> 原树列出的 `test_rank.py` **从未建立** —— 排序由 `test_search_presentation.py` 覆盖，
+> 故不再列入。
 
 ### 2.3 存储 schema（SQLite，本地 `%LOCALAPPDATA%\recall-memory\index.db`）
 
@@ -369,7 +395,7 @@ CREATE VIRTUAL TABLE entries_fts USING fts5(
 | **T-脚本换行符**（09-29 新增） | ✅ **完成** | `build_exe.bat` / `install_task.bat` / `recall_run.bat` / `recall_stop.bat` / `recall_watch.bat` / `remove_task.bat` 六个脚本原为 **LF-only**，cmd.exe 会从行中间切断命令（实测 `'安装，正在安装' is not recognized`）→ **全部损坏**，打包与计划任务注册路径不可用。已字节级转 CRLF，并新增 `.gitattributes`（`*.bat text eol=crlf`）防复发 |
 | T03 schema 迁移 | ⏸️ **裁决缓做** | 架构师裁定：不改善价值门可判性，现在做即"为工程而工程"；`embedding` 留 Phase 3 |
 | T05 检索排序修复（**段落级切分**） | ⏸️ **被 hold** | 切分改动已在队列，但**判决必须用返工后的新基线**（三元组：`recall@5` 不回归 ∧ `MRR` 不回归 ∧ `DOC` 下降） |
-| T06 文档/目录对齐 | 🔧 部分完成 | 计划侧已对齐（§2.2 标注 + §4 `json.load` 注 + §12.4/R7）；`RECALL_README.md` §1 单文件漂移待工程师落笔 |
+| T06 文档/目录对齐 | 🔧 **§2.2 已于 09-30 完成；README 待落笔** | §2.2 此前**并未**标注（§9.1 旧记载「计划侧已对齐」有误），09-30 改为「目标布局 × 磁盘实际」逐项对照并标出两个被实测否定的 extractor 条目；§4 `json.load` 注与 §12.4/R7 已在。⚠️ `RECALL_README.md` §1 单文件漂移**仍在** |
 
 **实测运行指纹（上线版）**：`Run\recall\recall.exe` sha256 `269B2EBE9144B22F56029830BC503FD072143F0C003A44DBC5201E0BCF50AFE6` / 2,114,886 B / 2026-09-21 16:59:44。
 **索引折叠收益上界**：589 行 → **236 个不同内容**（约 353 行为跨来源重复拷贝）。
