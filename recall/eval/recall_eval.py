@@ -17,6 +17,16 @@ Metrics
              SNIPPET, not the full text, because display-time folding already
              removes identical *texts*; what remains is "different memories whose
              previews look the same", which is exactly the waste DOC measures.
+* PD       : Preview Distinctness (0..1, higher = better) — the GRADED
+             replacement for DOC: the mean, over result pairs, of
+             `1 - LCS(snippet_i, snippet_j) / min(len_i, len_j)`, computed on the
+             UNDECORATED snippets. DOC only detects byte-INEQUALITY, so a window
+             shifted by a single character satisfies it while the reader still
+             sees the same text (measured directly in §14.6). The longest common
+             SUBSTRING survives a shift, so PD grades similarity instead of
+             equality.
+             ⚠️ **DOC is kept as an OBSERVATION ONLY** and must not be used to
+             claim preview quality improved.
 
 Keep / rollback criteria for T05 (chunking), all three must hold:
     recall@5_new >= base  AND  MRR_new >= base - 0.005  AND  DOC_new <= 0.8 * base
@@ -81,12 +91,66 @@ def compute_doc(results: list[dict]):
     return (dup / total) if total else None
 
 
+def _core(snippet: str) -> str:
+    """Strip the "…" decoration so similarity is measured on the shown text."""
+    return (snippet or "").strip("…")
+
+
+def _lcs_len(a: str, b: str) -> int:
+    """Length of the longest common SUBSTRING of a and b (classic DP, O(n*m)).
+
+    Deliberately a SUBSTRING, not a prefix: a slid preview window still shares most
+    of its characters, so a prefix-only measure would grade it as "different".
+    """
+    if not a or not b:
+        return 0
+    if len(a) > len(b):
+        a, b = b, a
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        ai = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if ai == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
+def compute_pd(results: list[dict]):
+    """Preview Distinctness of top-k (graded; higher = more distinguishable).
+
+    PD_q = mean over pairs of `1 - LCS(core_i, core_j) / min(len_i, len_j)`.
+    Returns None when there are fewer than 2 results (excluded from the mean).
+
+    Why not DOC: DOC compares content HASHES, so `a` and `a` shifted one character
+    are "perfectly distinct" while looking identical. PD rewards genuinely
+    different previews, so it cannot be satisfied by nudging a window.
+    """
+    if len(results) < 2:
+        return None
+    cores = [_core(r.get("snippet") or "") for r in results]
+    vals = []
+    for i in range(len(cores)):
+        for j in range(i + 1, len(cores)):
+            a, b = cores[i], cores[j]
+            m = min(len(a), len(b))
+            if m == 0:
+                continue
+            vals.append(1.0 - _lcs_len(a, b) / m)
+    return (sum(vals) / len(vals)) if vals else None
+
+
 def evaluate(conn, records: list[dict], k: int = DEFAULT_K) -> dict:
     """Run every golden query through `store.search` and aggregate the metrics."""
     n = len(records)
     hits = {1: 0, 3: 0, k: 0}
     mrr = 0.0
     doc_vals: list[float] = []
+    pd_vals: list[float] = []
     doc_queries = 0
     zero_result = 0
     per_source: dict[str, dict] = {}
@@ -105,6 +169,9 @@ def evaluate(conn, records: list[dict], k: int = DEFAULT_K) -> dict:
         if d is not None:
             doc_vals.append(d)
             doc_queries += 1
+        p = compute_pd(results)
+        if p is not None:
+            pd_vals.append(p)
         src = rec.get("agent", "?")
         bucket = per_source.setdefault(src, {"n": 0, "h": 0})
         bucket["n"] += 1
@@ -119,6 +186,7 @@ def evaluate(conn, records: list[dict], k: int = DEFAULT_K) -> dict:
         "mrr": (mrr / n) if n else 0.0,
         "doc": (sum(doc_vals) / len(doc_vals)) if doc_vals else None,
         "doc_queries": doc_queries,
+        "pd": (sum(pd_vals) / len(pd_vals)) if pd_vals else None,
         "zero_result": zero_result,
         "cn": sum(1 for r in records if _common.has_cjk(r.get("query", ""))),
         "per_source": per_source,
@@ -158,7 +226,8 @@ def _section(title: str, metrics: dict) -> list[str]:
         f"| recall@3 | {_fmt_pct(metrics['recall@3'])} |",
         f"| recall@{k} | {_fmt_pct(metrics[f'recall@{k}'])} |",
         f"| MRR | {_fmt(metrics['mrr'])} |",
-        f"| DOC (top-k 重复占用) | {_fmt(metrics['doc'])} |",
+        f"| **PD 预览区分度** (1 − LCS/len，越高越好) | {_fmt(metrics.get('pd'))} |",
+        f"| DOC (top-k 重复占用，**仅为观察项**) | {_fmt(metrics.get('doc'))} |",
         f"| DOC 有效查询数 (n>=2) | {metrics['doc_queries']} |",
         f"| 零结果查询数 | {metrics['zero_result']} |",
         "",
