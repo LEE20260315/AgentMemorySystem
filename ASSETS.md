@@ -156,17 +156,36 @@ recall/telemetry.py  查询遥测（只记 query 哈希，不记正文）
 
 | 内容 | 位置 | 说明 |
 |---|---|---|
-| 代码与历史 | `origin/main` = `3f0955b` | 完整保留，97 提交 |
+| 代码与历史 | `origin/main` = `cd6f5eb` | 完整保留，98 提交 |
+| gitdir | **工作区内 `.git/`** | 2026-10-06 已从 `C:/git-store/` 迁回，随 OneDrive 备份 |
 | 评估报告 | `PROJECT_EVALUATION_2026-10-06.md` | 522 行，含完整证据链 |
-| 终止原因 | `TOMBSTONE.md` | 本文档 |
-| 记忆数据副本 | `_archive_AgentMemory_20261006/` | 129M，689 文件（**未删除**，待你决定去留） |
-| 备份的 agent 源文件 | `%LOCALAPPDATA%\AgentMemorySystem\termination-backup-20261006\` | 清理前的 `workbuddy/MEMORY.md` 与 `dsh/MEMORY.md` |
-| 被移出的构建产物 | 同上`/deleted-build-artifacts/` | 7 个目录，可随时恢复 |
+| 终止原因 | `TOMBSTONE.md` | 终止依据 + 三个可迁移教训 |
+| 记忆数据副本 | `%LOCALAPPDATA%\AgentMemorySystem\terminated-archive\` | 129M / 689 文件（**唯一副本，已移出 OneDrive**） |
+| 清理前备份 | `%LOCALAPPDATA%\AgentMemorySystem\termination-backup-20261006\` | 清理前的 3 个 `MEMORY.md`、7 个构建产物目录、快捷方式、90M 运行副本 |
+| 审计证据 | `%LOCALAPPDATA%\AgentMemorySystem\` | `shared.db` / `heartbeat.log` / `logs/` / `locks/` |
 
-> ⚠️ **gitdir 位置异常**：`.git` 是指向 `C:/git-store/AgentMemorySystem` 的**文件指针**，
-> 即 gitdir 在工作区**外**。2026-09-04 曾因该配置导致整个目录被清理、
-> 远端历史全丢。若将来要恢复活跃开发，**先把 gitdir 迁回工作区内**
-> （`git init --separate-git-dir` 的反向操作：直接 `mv` 后改 `.git` 为目录）。
+> ⚠️ **`terminated-archive/_archive_AgentMemory_20261006/.sync_backups/` 内含未脱敏个人信息**
+> （`RAW_JSON` 块里有手机号等），且这些内容在当前 agent 记忆文件中**已不存在**（`RAW_JSON` 计数为 0）
+> → 它是**唯一副本**，故未删除；但也已移出 OneDrive，不再有云端暴露面。
+> 若将来决定清理，优先删 `.sync_backups/`（87M），
+> 保留 `memory_shared.md`(2.2M) 与 `knowledge_brief/`(168K) 作纪念。
+
+---
+
+## 终止时的执行动作（供复盘）
+
+| 动作 | 结果 |
+|---|---|
+| 删构建产物 7 目录 | 1235 文件 / 115M → 移至备份区（**非 rm**） |
+| 归档记忆数据 | 129M → 移出 OneDrive 至 `%LOCALAPPDATA%` |
+| 清agent 源文件注入节 | workbuddy 1791→1760、dsh 1842→1786、codepilot 1696→1663 行 |
+| 停计划任务 | `RecallMemorySync` 已注销（终止时仍在失败） |
+| gitdir 归位| 从 `C:/git-store/` 迁回工作区，消除 09-04 丢历史风险 |
+| GitHub | `archived=true` + 终止描述 + 4 话题标签 |
+| **永久删除** | **0** —— 全部为移动，可恢复 |
+
+> **终止过程中未执行任何 `rm`**，所有移除均可从 `%LOCALAPPDATA%\AgentMemorySystem\`
+> 下的两个备份区恢复。
 
 ---
 
